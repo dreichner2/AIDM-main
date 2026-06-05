@@ -1,0 +1,39 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# IDE specific
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+instance/
+ai_dm/instance/
+reset_db.py
+aidm_server/:memory:
+
+# Environment variables
+.env
+.env.local
+
+# Runtime artifacts
+.pytest_cache/
+tmp/
+*.log
+*.pid
+
+# Frontend dependencies/build output
+aidm_frontend/node_modules/
+aidm_frontend/dist/
+aidm_frontend/.vite/

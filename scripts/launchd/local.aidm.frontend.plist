@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.aidm.frontend</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/danny/Downloads/AIDM-main/scripts/launch_frontend_service.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/danny/Downloads/AIDM-main/aidm_frontend</string>
+  <key>StandardOutPath</key>
+  <string>/Users/danny/Downloads/AIDM-main/tmp/launcher_logs/frontend.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/danny/Downloads/AIDM-main/tmp/launcher_logs/frontend.log</string>
+</dict>
+</plist>
