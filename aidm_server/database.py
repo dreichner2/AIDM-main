@@ -5,16 +5,22 @@ import logging
 import pathlib
 import stat
 
-from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import MetaData
-from sqlalchemy.engine import make_url
+from sqlalchemy import MetaData, event
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.pool import NullPool
 
 from aidm_server.logging_context import configure_logging
 
 configure_logging()
 logger = logging.getLogger(__name__)
+
+try:
+    from flask_migrate import Migrate
+except ImportError:  # pragma: no cover - exercised only in minimal runtime installs.
+    class Migrate:  # type: ignore[no-redef]
+        def init_app(self, *_args, **_kwargs):
+            logger.warning('Flask-Migrate is not installed; migration CLI integration is disabled.')
 
 
 convention = {
@@ -28,6 +34,17 @@ convention = {
 metadata = MetaData(naming_convention=convention)
 db = SQLAlchemy(metadata=metadata)
 migrate = Migrate()
+
+
+@event.listens_for(Engine, 'connect')
+def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+    if 'sqlite' not in type(dbapi_connection).__module__:
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute('PRAGMA foreign_keys=ON')
+    finally:
+        cursor.close()
 
 
 def _resolve_sqlite_uri(database_uri: str, root_path: str) -> str:
@@ -80,11 +97,12 @@ def harden_sqlite_permissions(database_uri: str, root_path: str | os.PathLike | 
 
     changed: list[str] = []
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    if database_path.parent.name == 'instance' and _chmod_private(database_path.parent, 0o700):
+    local_data_dir = database_path.parent.name in {'instance', '.aidm'}
+    if local_data_dir and _chmod_private(database_path.parent, 0o700):
         changed.append(str(database_path.parent))
 
     sqlite_files = {database_path}
-    if database_path.parent.name == 'instance':
+    if local_data_dir:
         for pattern in ('*.db', '*.sqlite', '*.sqlite3'):
             sqlite_files.update(database_path.parent.glob(pattern))
 
@@ -95,6 +113,22 @@ def harden_sqlite_permissions(database_uri: str, root_path: str | os.PathLike | 
     return changed
 
 
+def engine_options_for_database_uri(database_uri: str) -> dict:
+    try:
+        url = make_url(database_uri)
+    except Exception:
+        return {}
+    if not url.drivername.startswith('sqlite'):
+        return {}
+    return {
+        'poolclass': NullPool,
+        'connect_args': {
+            'check_same_thread': False,
+            'timeout': 30,
+        },
+    }
+
+
 def init_db(app):
     """Initialize database and migrations for the Flask app."""
     try:
@@ -103,13 +137,7 @@ def init_db(app):
         harden_sqlite_permissions(database_uri)
 
         app.config['SQLALCHEMY_DATABASE_URI'] = database_uri
-        app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-            'poolclass': NullPool,
-            'connect_args': {
-                'check_same_thread': False,
-                'timeout': 30,
-            },
-        }
+        app.config['SQLALCHEMY_ENGINE_OPTIONS'] = engine_options_for_database_uri(database_uri)
         app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
         db.init_app(app)

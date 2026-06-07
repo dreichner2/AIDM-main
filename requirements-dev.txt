@@ -1,0 +1,5 @@
+-r requirements.runtime.txt
+
+Flask-Migrate
+flask-admin
+pytest

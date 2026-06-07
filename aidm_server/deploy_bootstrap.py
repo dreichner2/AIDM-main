@@ -20,6 +20,9 @@ from typing import Iterable
 
 from sqlalchemy import inspect
 
+from aidm_server.config import SUPPORTED_TURN_COORDINATOR_STORES, TURN_COORDINATOR_STORE_MEMORY
+from aidm_server.rate_limiter import RATE_LIMIT_STORE_MEMORY, SUPPORTED_RATE_LIMIT_STORES
+
 
 @dataclass
 class BootstrapReport:
@@ -128,6 +131,12 @@ def _validate_rate_limits(app):
     api_limit = app.config.get('AIDM_RATE_LIMIT_MAX_API_REQUESTS', 0)
     socket_limit = app.config.get('AIDM_RATE_LIMIT_MAX_SOCKET_MESSAGES', 0)
     window = app.config.get('AIDM_RATE_LIMIT_WINDOW_SECONDS', 0)
+    store = str(app.config.get('AIDM_RATE_LIMIT_STORE', RATE_LIMIT_STORE_MEMORY) or '').strip().lower()
+    turn_store = str(
+        app.config.get('AIDM_TURN_COORDINATOR_STORE', TURN_COORDINATOR_STORE_MEMORY) or ''
+    ).strip().lower()
+    turn_lock_ttl = app.config.get('AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS', 0)
+    turn_poll_interval_ms = app.config.get('AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS', 0)
 
     if not isinstance(api_limit, int) or api_limit < 1:
         raise BootstrapError('Invalid AIDM_RATE_LIMIT_MAX_API_REQUESTS; expected integer >= 1.')
@@ -135,15 +144,28 @@ def _validate_rate_limits(app):
         raise BootstrapError('Invalid AIDM_RATE_LIMIT_MAX_SOCKET_MESSAGES; expected integer >= 1.')
     if not isinstance(window, int) or window < 1:
         raise BootstrapError('Invalid AIDM_RATE_LIMIT_WINDOW_SECONDS; expected integer >= 1.')
+    if store not in SUPPORTED_RATE_LIMIT_STORES:
+        expected = ', '.join(sorted(SUPPORTED_RATE_LIMIT_STORES))
+        raise BootstrapError(f'Invalid AIDM_RATE_LIMIT_STORE; expected one of: {expected}.')
+    if turn_store not in SUPPORTED_TURN_COORDINATOR_STORES:
+        expected = ', '.join(sorted(SUPPORTED_TURN_COORDINATOR_STORES))
+        raise BootstrapError(f'Invalid AIDM_TURN_COORDINATOR_STORE; expected one of: {expected}.')
+    if not isinstance(turn_lock_ttl, int) or turn_lock_ttl < 30:
+        raise BootstrapError('Invalid AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS; expected integer >= 30.')
+    if not isinstance(turn_poll_interval_ms, int) or turn_poll_interval_ms < 10:
+        raise BootstrapError('Invalid AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS; expected integer >= 10.')
 
 
 def _validate_auth_config(app, report: BootstrapReport):
     env = app.config.get('AIDM_ENV', 'development')
     auth_required = bool(app.config.get('AIDM_AUTH_REQUIRED', False))
-    tokens = [token for token in app.config.get('AIDM_API_AUTH_TOKENS', []) if token]
+    tokens = _configured_auth_tokens(app)
 
     if auth_required and not tokens:
-        raise BootstrapError('AIDM_AUTH_REQUIRED=true but no AIDM_API_AUTH_TOKENS are configured.')
+        raise BootstrapError(
+            'AIDM_AUTH_REQUIRED=true but no AIDM_API_AUTH_TOKENS are configured, '
+            'and no AIDM_API_AUTH_TOKEN_WORKSPACES are configured.'
+        )
 
     if env == 'production' and not auth_required:
         raise BootstrapError('AIDM_ENV=production requires AIDM_AUTH_REQUIRED=true for deployment bootstrap.')
@@ -201,10 +223,18 @@ def _check_endpoint(client, path: str):
     return response.get_json(silent=True) or {}
 
 
+def _configured_auth_tokens(app) -> list[str]:
+    tokens = [token for token in app.config.get('AIDM_API_AUTH_TOKENS', []) if token]
+    token_workspaces = app.config.get('AIDM_API_AUTH_TOKEN_WORKSPACES', {})
+    if isinstance(token_workspaces, dict):
+        tokens.extend(token for token in token_workspaces.keys() if token)
+    return list(dict.fromkeys(tokens))
+
+
 def _auth_headers_for_app(app) -> dict:
     if not bool(app.config.get('AIDM_AUTH_REQUIRED', False)):
         return {}
-    tokens = [token for token in app.config.get('AIDM_API_AUTH_TOKENS', []) if token]
+    tokens = _configured_auth_tokens(app)
     if not tokens:
         raise BootstrapError('Auth is required but no API tokens are configured for endpoint checks.')
     return {'Authorization': f'Bearer {tokens[0]}'}
@@ -228,7 +258,7 @@ def _validate_endpoints(app):
 
 def _validate_socket_auth_behavior(app, socketio):
     auth_required = bool(app.config.get('AIDM_AUTH_REQUIRED', False))
-    tokens = [token for token in app.config.get('AIDM_API_AUTH_TOKENS', []) if token]
+    tokens = _configured_auth_tokens(app)
 
     if auth_required:
         unauthorized_client = socketio.test_client(app, flask_test_client=app.test_client())

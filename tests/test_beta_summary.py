@@ -68,6 +68,10 @@ def test_submit_feedback_and_beta_summary(client, app):
 
 
 def test_feedback_validation_errors(client):
+    response = client.post('/api/feedback/coherence', data='not-json', content_type='text/plain')
+    assert response.status_code == 400
+    assert response.get_json()['error_code'] == 'validation_error'
+
     response = client.post('/api/feedback/coherence', json={'session_id': 1})
     assert response.status_code == 400
     assert response.get_json()['error_code'] == 'validation_error'

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from aidm_server.database import db
-from aidm_server.models import PlayerAction, SessionLogEntry, TurnEvent, safe_json_dumps
+from aidm_server.models import PlayerAction, SessionLogEntry, TurnEvent, safe_json_dumps, safe_json_loads
 
 
 PLAYER_MESSAGE_EVENT = 'player_message'
@@ -11,6 +11,9 @@ ROLL_RESOLVED_EVENT = 'roll_resolved'
 DM_RESPONSE_EVENT = 'dm_response'
 SEGMENT_TRIGGERED_EVENT = 'segment_triggered'
 CANON_APPLIED_EVENT = 'canon_applied'
+SESSION_STARTED_EVENT = 'session_started'
+SESSION_ENDED_EVENT = 'session_ended'
+SESSION_RECAP_EVENT = 'session_recap'
 
 
 def record_turn_event(
@@ -39,66 +42,153 @@ def record_turn_event(
     return event
 
 
-def _project_turn_event(event: TurnEvent, payload: dict[str, Any]):
+def project_turn_event(event: TurnEvent, payload: dict[str, Any] | None = None, *, timestamp=None) -> dict[str, int]:
+    payload = payload if isinstance(payload, dict) else safe_json_loads(event.payload_json, {})
+    payload = payload if isinstance(payload, dict) else {}
+    return _project_turn_event(event, payload, timestamp=timestamp)
+
+
+def _player_action(event: TurnEvent, message: str, *, timestamp=None) -> PlayerAction:
+    action = PlayerAction(
+        player_id=event.player_id,
+        session_id=event.session_id,
+        action_text=message,
+    )
+    if timestamp is not None:
+        action.timestamp = timestamp
+    return action
+
+
+def _log_entry(event: TurnEvent, message: str, entry_type: str, metadata: dict | None = None, *, timestamp=None) -> SessionLogEntry:
+    entry = SessionLogEntry(
+        session_id=event.session_id,
+        message=message,
+        entry_type=entry_type,
+        metadata_json=safe_json_dumps(metadata or {}, {}),
+    )
+    if timestamp is not None:
+        entry.timestamp = timestamp
+    return entry
+
+
+def _project_turn_event(event: TurnEvent, payload: dict[str, Any], *, timestamp=None) -> dict[str, int]:
+    counts = {'player_actions': 0, 'session_log_entries': 0}
     if event.event_type == PLAYER_MESSAGE_EVENT:
         message = str(payload.get('message') or '').strip()
         speaker = str(payload.get('speaker') or '').strip()
         if not message:
-            return
+            return counts
         if event.player_id is not None:
-            db.session.add(
-                PlayerAction(
-                    player_id=event.player_id,
-                    session_id=event.session_id,
-                    action_text=message,
-                )
-            )
+            db.session.add(_player_action(event, message, timestamp=timestamp))
+            counts['player_actions'] += 1
         db.session.add(
-            SessionLogEntry(
-                session_id=event.session_id,
-                message=f'{speaker}: {message}' if speaker else message,
-                entry_type='player',
-                metadata_json=safe_json_dumps(payload.get('metadata', {}), {}),
+            _log_entry(
+                event,
+                f'{speaker}: {message}' if speaker else message,
+                'player',
+                payload.get('metadata', {}),
+                timestamp=timestamp,
             )
         )
-        return
+        counts['session_log_entries'] += 1
+        return counts
 
     if event.event_type == ROLL_RESOLVED_EVENT:
         pending_turn_id = payload.get('pending_turn_id')
         roll_value = payload.get('roll_value')
         db.session.add(
-            SessionLogEntry(
-                session_id=event.session_id,
-                message=f'**Check Resolved**: turn {pending_turn_id} resolved with roll {roll_value}.',
-                entry_type='dm',
-                metadata_json=safe_json_dumps(payload.get('metadata', {}), {}),
+            _log_entry(
+                event,
+                f'**Check Resolved**: turn {pending_turn_id} resolved with roll {roll_value}.',
+                'dm',
+                payload.get('metadata', {}),
+                timestamp=timestamp,
             )
         )
-        return
+        counts['session_log_entries'] += 1
+        return counts
 
     if event.event_type == DM_RESPONSE_EVENT:
         message = str(payload.get('message') or '').strip()
         if not message:
-            return
+            return counts
         db.session.add(
-            SessionLogEntry(
-                session_id=event.session_id,
-                message=f'DM: {message}',
-                entry_type='dm',
-                metadata_json=safe_json_dumps(payload.get('metadata', {}), {}),
+            _log_entry(
+                event,
+                f'DM: {message}',
+                'dm',
+                payload.get('metadata', {}),
+                timestamp=timestamp,
             )
         )
-        return
+        counts['session_log_entries'] += 1
+        return counts
 
     if event.event_type == SEGMENT_TRIGGERED_EVENT:
         title = str(payload.get('title') or '').strip()
         if not title:
-            return
+            return counts
         db.session.add(
-            SessionLogEntry(
-                session_id=event.session_id,
-                message=f'**Segment Triggered**: {title}',
-                entry_type='dm',
-                metadata_json=safe_json_dumps(payload.get('metadata', {}), {}),
+            _log_entry(
+                event,
+                f'**Segment Triggered**: {title}',
+                'dm',
+                payload.get('metadata', {}),
+                timestamp=timestamp,
             )
         )
+        counts['session_log_entries'] += 1
+        return counts
+
+    if event.event_type == SESSION_STARTED_EVENT:
+        message = str(payload.get('message') or '').strip()
+        if not message:
+            return counts
+        db.session.add(
+            _log_entry(
+                event,
+                message,
+                'system',
+                payload.get('metadata', {}),
+                timestamp=timestamp,
+            )
+        )
+        counts['session_log_entries'] += 1
+        return counts
+
+    if event.event_type == SESSION_ENDED_EVENT:
+        message = str(payload.get('message') or '**Session ended.**').strip()
+        if not message:
+            return counts
+        db.session.add(
+            _log_entry(
+                event,
+                message,
+                'system',
+                payload.get('metadata', {}),
+                timestamp=timestamp,
+            )
+        )
+        counts['session_log_entries'] += 1
+        return counts
+
+    if event.event_type == SESSION_RECAP_EVENT:
+        recap = str(payload.get('recap') or '').strip()
+        message = str(payload.get('message') or '').strip()
+        if not message and recap:
+            message = f'**Session Recap**\n\n{recap}'
+        if not message:
+            return counts
+        db.session.add(
+            _log_entry(
+                event,
+                message,
+                'system',
+                payload.get('metadata', {}),
+                timestamp=timestamp,
+            )
+        )
+        counts['session_log_entries'] += 1
+        return counts
+
+    return counts

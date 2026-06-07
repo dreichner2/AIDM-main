@@ -1,11 +1,21 @@
-"""Small in-memory fixed-window rate limiter."""
+"""Fixed-window rate limiting with pluggable storage backends."""
 
 from __future__ import annotations
 
+import hashlib
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import Lock
+from typing import Protocol
+
+from sqlalchemy import delete, func, insert, select
+
+
+RATE_LIMIT_STORE_MEMORY = 'memory'
+RATE_LIMIT_STORE_DATABASE = 'database'
+SUPPORTED_RATE_LIMIT_STORES = {RATE_LIMIT_STORE_MEMORY, RATE_LIMIT_STORE_DATABASE}
+MAX_BUCKET_KEY_LENGTH = 512
 
 
 @dataclass
@@ -15,10 +25,46 @@ class RateLimitResult:
     reset_in_seconds: int
 
 
-class FixedWindowRateLimiter:
-    def __init__(self, limit: int, window_seconds: int):
-        self.limit = max(1, int(limit))
-        self.window_seconds = max(1, int(window_seconds))
+class RateLimitStore(Protocol):
+    def hit(self, key: str, *, now: datetime, limit: int, window_seconds: int) -> RateLimitResult:
+        """Record or reject one request for *key* in the current fixed window."""
+
+
+def normalize_rate_limit_key(key: str) -> str:
+    normalized = str(key or 'unknown').strip() or 'unknown'
+    if len(normalized) <= MAX_BUCKET_KEY_LENGTH:
+        return normalized
+
+    digest = hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+    prefix_length = MAX_BUCKET_KEY_LENGTH - len(digest) - 1
+    return f'{normalized[:prefix_length]}:{digest}'
+
+
+def _coerce_datetime(value: datetime | str | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _reset_seconds_from_oldest(oldest: datetime | str | None, *, now: datetime, window_seconds: int) -> int:
+    oldest = _coerce_datetime(oldest)
+    if oldest is None:
+        return window_seconds
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+    reset_at = oldest + timedelta(seconds=window_seconds)
+    return max(0, int((reset_at - now).total_seconds()))
+
+
+class InMemoryRateLimitStore:
+    def __init__(self):
         self._events: dict[str, deque[datetime]] = {}
         self._lock = Lock()
         self._next_gc_at = datetime.min.replace(tzinfo=timezone.utc)
@@ -37,14 +83,13 @@ class FixedWindowRateLimiter:
         for key in stale_keys:
             self._events.pop(key, None)
 
-    def allow(self, key: str) -> RateLimitResult:
-        now = datetime.now(timezone.utc)
-        window_start = now - timedelta(seconds=self.window_seconds)
+    def hit(self, key: str, *, now: datetime, limit: int, window_seconds: int) -> RateLimitResult:
+        window_start = now - timedelta(seconds=window_seconds)
 
         with self._lock:
             if now >= self._next_gc_at:
                 self._collect_garbage(window_start)
-                self._next_gc_at = now + timedelta(seconds=self.window_seconds)
+                self._next_gc_at = now + timedelta(seconds=window_seconds)
 
             queue = self._events.get(key)
             if queue is None:
@@ -53,19 +98,106 @@ class FixedWindowRateLimiter:
             else:
                 self._prune_queue(queue, window_start)
 
-            if len(queue) >= self.limit:
-                reset_at = queue[0] + timedelta(seconds=self.window_seconds)
-                reset_in = max(0, int((reset_at - now).total_seconds()))
+            if len(queue) >= limit:
                 return RateLimitResult(
                     allowed=False,
                     remaining=0,
-                    reset_in_seconds=reset_in,
+                    reset_in_seconds=_reset_seconds_from_oldest(queue[0], now=now, window_seconds=window_seconds),
                 )
 
             queue.append(now)
-            remaining = max(0, self.limit - len(queue))
             return RateLimitResult(
                 allowed=True,
-                remaining=remaining,
-                reset_in_seconds=self.window_seconds,
+                remaining=max(0, limit - len(queue)),
+                reset_in_seconds=window_seconds,
             )
+
+
+class DatabaseRateLimitStore:
+    """Store rate-limit events in the configured SQLAlchemy database."""
+
+    def __init__(self, *, gc_interval_seconds: int | None = None):
+        self._gc_interval_seconds = gc_interval_seconds
+        self._next_gc_at = datetime.min.replace(tzinfo=timezone.utc)
+        self._gc_lock = Lock()
+        self._hit_lock = Lock()
+
+    def _collect_garbage(self, connection, table, *, window_start: datetime, now: datetime, window_seconds: int):
+        if now < self._next_gc_at:
+            return
+        with self._gc_lock:
+            if now < self._next_gc_at:
+                return
+            connection.execute(delete(table).where(table.c.created_at < window_start))
+            interval = self._gc_interval_seconds or window_seconds
+            self._next_gc_at = now + timedelta(seconds=max(1, int(interval)))
+
+    def hit(self, key: str, *, now: datetime, limit: int, window_seconds: int) -> RateLimitResult:
+        from aidm_server.database import db
+        from aidm_server.models import RateLimitEvent
+
+        window_start = now - timedelta(seconds=window_seconds)
+        table = RateLimitEvent.__table__
+
+        with self._hit_lock:
+            with db.engine.begin() as connection:
+                self._collect_garbage(connection, table, window_start=window_start, now=now, window_seconds=window_seconds)
+
+                matching_events = table.c.bucket_key == key
+                within_window = table.c.created_at >= window_start
+                current_count = connection.execute(
+                    select(func.count()).select_from(table).where(matching_events, within_window)
+                ).scalar_one()
+
+                if current_count >= limit:
+                    oldest = connection.execute(
+                        select(func.min(table.c.created_at)).where(matching_events, within_window)
+                    ).scalar_one()
+                    return RateLimitResult(
+                        allowed=False,
+                        remaining=0,
+                        reset_in_seconds=_reset_seconds_from_oldest(oldest, now=now, window_seconds=window_seconds),
+                    )
+
+                connection.execute(insert(table).values(bucket_key=key, created_at=now))
+                return RateLimitResult(
+                    allowed=True,
+                    remaining=max(0, limit - int(current_count) - 1),
+                    reset_in_seconds=window_seconds,
+                )
+
+
+def build_rate_limiter(
+    *,
+    limit: int,
+    window_seconds: int,
+    store_name: str = RATE_LIMIT_STORE_MEMORY,
+) -> FixedWindowRateLimiter:
+    normalized_store = str(store_name or RATE_LIMIT_STORE_MEMORY).strip().lower()
+    if normalized_store == RATE_LIMIT_STORE_MEMORY:
+        store: RateLimitStore = InMemoryRateLimitStore()
+    elif normalized_store == RATE_LIMIT_STORE_DATABASE:
+        store = DatabaseRateLimitStore()
+    else:
+        expected = ', '.join(sorted(SUPPORTED_RATE_LIMIT_STORES))
+        raise ValueError(f'Unsupported rate-limit store "{normalized_store}". Expected one of: {expected}.')
+
+    return FixedWindowRateLimiter(limit=limit, window_seconds=window_seconds, store=store)
+
+
+class FixedWindowRateLimiter:
+    def __init__(self, limit: int, window_seconds: int, store: RateLimitStore | None = None):
+        self.limit = max(1, int(limit))
+        self.window_seconds = max(1, int(window_seconds))
+        self.store = store or InMemoryRateLimitStore()
+        if isinstance(self.store, InMemoryRateLimitStore):
+            self._events = self.store._events
+
+    def allow(self, key: str) -> RateLimitResult:
+        now = datetime.now(timezone.utc)
+        return self.store.hit(
+            normalize_rate_limit_key(key),
+            now=now,
+            limit=self.limit,
+            window_seconds=self.window_seconds,
+        )

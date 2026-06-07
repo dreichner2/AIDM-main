@@ -17,6 +17,30 @@ export function normalizeBaseUrl(value: string) {
   return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed
 }
 
+const NGROK_BROWSER_WARNING_HEADER = 'ngrok-skip-browser-warning'
+
+function shouldBypassNgrokBrowserWarning(baseUrl: string) {
+  try {
+    const hostname = new URL(normalizeBaseUrl(baseUrl)).hostname
+    return hostname.endsWith('.ngrok-free.app') || hostname.endsWith('.ngrok.app')
+  } catch {
+    return baseUrl.includes('.ngrok-free.app') || baseUrl.includes('.ngrok.app')
+  }
+}
+
+export function ngrokBrowserWarningBypassHeaders(baseUrl: string): Record<string, string> | undefined {
+  if (!shouldBypassNgrokBrowserWarning(baseUrl)) return undefined
+  return { [NGROK_BROWSER_WARNING_HEADER]: 'true' }
+}
+
+export function addNgrokBrowserWarningBypassHeader(headers: Headers, baseUrl: string) {
+  const bypassHeaders = ngrokBrowserWarningBypassHeaders(baseUrl)
+  if (!bypassHeaders) return
+  for (const [name, value] of Object.entries(bypassHeaders)) {
+    headers.set(name, value)
+  }
+}
+
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -57,6 +81,7 @@ export async function apiFetch<T>(
   if (options.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
+  addNgrokBrowserWarningBypassHeader(headers, baseUrl)
 
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {
     ...options,

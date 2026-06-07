@@ -1,0 +1,427 @@
+import type { ChangeEvent, Dispatch, RefObject, SetStateAction } from 'react'
+import {
+  ArrowDown,
+  ChevronDown,
+  ClipboardList,
+  Download,
+  MoreHorizontal,
+  Share2,
+  Upload,
+} from 'lucide-react'
+import { ActionComposer, type ActionComposerProps } from './ActionComposer'
+import { ThinIcon, ToolbarButton } from './AppChrome'
+import {
+  speakerDetail,
+  truncateText,
+  turnNumber,
+  turnPersistenceLabel,
+} from './gameSelectors'
+import type { Campaign, Player, SessionState, SessionSummary, TimelineEntry } from './types'
+
+export type MainTab = 'turns' | 'dm' | 'notes'
+
+type DmExecutionStats = {
+  tokens: number | string
+  time: string
+  model: string
+  temperature: string
+}
+
+type CanonFact = [fact: string, source: string]
+
+type SessionBoardProps = {
+  activeSessionTitle: string
+  campaignTitle: string
+  workspaceLoading: boolean
+  sessionLoading: boolean
+  mainTab: MainTab
+  setMainTab: Dispatch<SetStateAction<MainTab>>
+  downloadSessionJson: () => Promise<void>
+  sessionImportPending: boolean
+  sessionImportInputRef: RefObject<HTMLInputElement | null>
+  importSessionJson: (event: ChangeEvent<HTMLInputElement>) => Promise<void>
+  shareSession: () => void
+  sessionMenuRef: RefObject<HTMLDivElement | null>
+  sessionMenuOpen: boolean
+  setSessionMenuOpen: Dispatch<SetStateAction<boolean>>
+  refreshCurrentWorkspace: () => Promise<void>
+  activeSession: SessionSummary | null
+  openRenameSessionDialog: () => void
+  openDeleteSessionDialog: () => void
+  notesCount: number
+  turnFeedRef: RefObject<HTMLElement | null>
+  updateJumpToLatestVisibility: () => void
+  sessionLogHasMore: boolean
+  olderLogLoading: boolean
+  loadOlderSessionLog: () => Promise<void>
+  turnRows: TimelineEntry[]
+  expandedTurnIds: Set<string>
+  setExpandedTurnIds: Dispatch<SetStateAction<Set<string>>>
+  selectedPlayer: Player | null
+  currentResponseEntry: TimelineEntry | null
+  latestDmText: string
+  sendPending: boolean
+  streamingTurnActive: boolean
+  dmExecutionStats: DmExecutionStats
+  welcomeText: string
+  showJumpToLatest: boolean
+  scrollTurnFeedToLatest: () => void
+  questTitle: string
+  sessionState: SessionState | null
+  campaign: Campaign | null
+  canonFacts: CanonFact[]
+  actionComposerProps: ActionComposerProps
+}
+
+function formatDateTime(value: string | null) {
+  if (!value) return 'Not recorded'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Not recorded'
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+function formatClock(value: string | null) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+export function SessionBoard({
+  activeSessionTitle,
+  campaignTitle,
+  workspaceLoading,
+  sessionLoading,
+  mainTab,
+  setMainTab,
+  downloadSessionJson,
+  sessionImportPending,
+  sessionImportInputRef,
+  importSessionJson,
+  shareSession,
+  sessionMenuRef,
+  sessionMenuOpen,
+  setSessionMenuOpen,
+  refreshCurrentWorkspace,
+  activeSession,
+  openRenameSessionDialog,
+  openDeleteSessionDialog,
+  notesCount,
+  turnFeedRef,
+  updateJumpToLatestVisibility,
+  sessionLogHasMore,
+  olderLogLoading,
+  loadOlderSessionLog,
+  turnRows,
+  expandedTurnIds,
+  setExpandedTurnIds,
+  selectedPlayer,
+  currentResponseEntry,
+  latestDmText,
+  sendPending,
+  streamingTurnActive,
+  dmExecutionStats,
+  welcomeText,
+  showJumpToLatest,
+  scrollTurnFeedToLatest,
+  questTitle,
+  sessionState,
+  campaign,
+  canonFacts,
+  actionComposerProps,
+}: SessionBoardProps) {
+  const loading = workspaceLoading || sessionLoading
+  const streamLabel =
+    currentResponseEntry && turnPersistenceLabel(currentResponseEntry)
+      ? turnPersistenceLabel(currentResponseEntry)
+      : sendPending || streamingTurnActive ? 'Streaming...' : 'Ready'
+
+  const toggleTurnExpanded = (turnId: string) => {
+    setExpandedTurnIds((current) => {
+      const next = new Set(current)
+      if (next.has(turnId)) {
+        next.delete(turnId)
+      } else {
+        next.add(turnId)
+      }
+      return next
+    })
+  }
+
+  return (
+    <main className="session-board">
+      <section className="session-header">
+        <div>
+          <h1>
+            {activeSessionTitle}{' '}
+            <span className={loading ? 'loading-badge' : ''}>
+              {loading ? 'Loading' : 'Live'}
+            </span>
+          </h1>
+          <p>{campaignTitle}</p>
+        </div>
+        <div className="session-actions">
+          <ToolbarButton
+            icon={<ClipboardList size={17} />}
+            onClick={() => setMainTab('notes')}
+            title="Summary"
+          >
+            Summary
+          </ToolbarButton>
+          <ToolbarButton
+            icon={<Download size={17} />}
+            onClick={() => void downloadSessionJson()}
+            title="Export"
+          >
+            Export
+          </ToolbarButton>
+          <ToolbarButton
+            disabled={sessionImportPending}
+            icon={<Upload size={17} />}
+            onClick={() => sessionImportInputRef.current?.click()}
+            title="Import"
+          >
+            {sessionImportPending ? 'Importing' : 'Import'}
+          </ToolbarButton>
+          <input
+            ref={sessionImportInputRef}
+            aria-label="Import session file"
+            className="file-input-hidden"
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) => void importSessionJson(event)}
+            disabled={sessionImportPending}
+          />
+          <ToolbarButton icon={<Share2 size={17} />} onClick={shareSession} title="Share">
+            Share
+          </ToolbarButton>
+          <div className="session-menu-wrap" ref={sessionMenuRef}>
+            <ToolbarButton
+              icon={<MoreHorizontal size={18} />}
+              onClick={() => setSessionMenuOpen((current) => !current)}
+              title="Session menu"
+              id="session-menu-button"
+              ariaExpanded={sessionMenuOpen}
+              ariaControls="session-menu"
+            />
+            {sessionMenuOpen ? (
+              <div
+                id="session-menu"
+                className="session-menu"
+                role="menu"
+                aria-label="Session actions"
+                aria-labelledby="session-menu-button"
+              >
+                <button type="button" role="menuitem" onClick={() => void refreshCurrentWorkspace()}>
+                  Refresh session
+                </button>
+                <button type="button" role="menuitem" disabled={!activeSession} onClick={openRenameSessionDialog}>
+                  Rename session
+                </button>
+                <button type="button" role="menuitem" disabled={!activeSession} className="danger" onClick={openDeleteSessionDialog}>
+                  Delete session
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </section>
+
+      <div className="content-tabs" role="tablist" aria-label="Session views">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mainTab === 'turns'}
+          className={mainTab === 'turns' ? 'active' : ''}
+          onClick={() => setMainTab('turns')}
+        >
+          Turns
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mainTab === 'dm'}
+          className={mainTab === 'dm' ? 'active' : ''}
+          onClick={() => setMainTab('dm')}
+        >
+          DM Response
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mainTab === 'notes'}
+          className={mainTab === 'notes' ? 'active' : ''}
+          onClick={() => setMainTab('notes')}
+        >
+          Notes ({notesCount})
+        </button>
+      </div>
+
+      {mainTab === 'turns' ? (
+        <>
+          <section
+            className="turn-feed"
+            ref={turnFeedRef}
+            onScroll={updateJumpToLatestVisibility}
+          >
+            {loading ? (
+              <div className="panel-loading-strip" role="status">
+                {sessionLoading ? 'Loading session history...' : 'Loading campaign workspace...'}
+              </div>
+            ) : null}
+            {sessionLogHasMore ? (
+              <button
+                type="button"
+                className="load-history-button"
+                onClick={() => void loadOlderSessionLog()}
+                disabled={olderLogLoading}
+              >
+                {olderLogLoading ? 'Loading older turns...' : 'Load older turns'}
+              </button>
+            ) : null}
+            {turnRows.length ? (
+              turnRows.map((turn, index) => {
+                const expanded = expandedTurnIds.has(turn.id)
+                return (
+                  <article className="turn-row" key={turn.id}>
+                    <div className="turn-number">{turnNumber(turn, index)}</div>
+                    <div className={`turn-card ${expanded ? 'expanded' : ''}`}>
+                      <div className="turn-speaker">
+                        <strong>{turn.speaker}</strong>
+                        <span>{speakerDetail(turn, selectedPlayer)}</span>
+                      </div>
+                      {turnPersistenceLabel(turn) ? (
+                        <span className="turn-status-label">{turnPersistenceLabel(turn)}</span>
+                      ) : null}
+                      <p>{expanded ? turn.text : truncateText(turn.text, 180)}</p>
+                      <time>{formatClock(turn.timestamp)}</time>
+                      <button
+                        type="button"
+                        className="turn-expand"
+                        aria-label={expanded ? 'Collapse turn' : 'Expand turn'}
+                        aria-expanded={expanded}
+                        onClick={() => toggleTurnExpanded(turn.id)}
+                      >
+                        <ChevronDown size={18} />
+                      </button>
+                    </div>
+                  </article>
+                )
+              })
+            ) : (
+              <div className="empty-state">
+                {activeSession ? welcomeText : 'No turn log entries loaded for this session.'}
+              </div>
+            )}
+
+            <article className="turn-row current">
+              <div className="turn-number">
+                {currentResponseEntry ? turnNumber(currentResponseEntry, turnRows.length) : '—'}
+              </div>
+              <div className="dm-response-card">
+                <div className="turn-speaker">
+                  <strong>{currentResponseEntry?.speaker ?? 'DM'}</strong>
+                  <span>{currentResponseEntry?.streaming ? 'Streaming' : 'Latest Response'}</span>
+                </div>
+                <div className="response-copy">
+                  <p>{latestDmText}</p>
+                </div>
+                <div className={`stream-state ${sendPending || streamingTurnActive ? 'streaming' : ''}`}>
+                  <span />
+                  {streamLabel}
+                </div>
+                <div className="execution-footer">
+                  Tokens: {dmExecutionStats.tokens} <span>|</span> Time: {dmExecutionStats.time}{' '}
+                  <span>|</span> Model: {dmExecutionStats.model} <span>|</span> Temp:{' '}
+                  {dmExecutionStats.temperature}
+                </div>
+              </div>
+            </article>
+          </section>
+          {showJumpToLatest ? (
+            <button
+              type="button"
+              className="jump-latest-button"
+              onClick={scrollTurnFeedToLatest}
+            >
+              <ArrowDown size={14} />
+              Latest
+            </button>
+          ) : null}
+        </>
+      ) : null}
+
+      {mainTab === 'dm' ? (
+        <section className="turn-feed single-panel">
+          {loading ? (
+            <div className="panel-loading-strip" role="status">
+              {sessionLoading ? 'Loading session response...' : 'Loading campaign workspace...'}
+            </div>
+          ) : null}
+          <article className="turn-row current">
+            <div className="turn-number">
+              {currentResponseEntry ? turnNumber(currentResponseEntry, 0) : '—'}
+            </div>
+            <div className="dm-response-card expanded">
+              <div className="turn-speaker">
+                <strong>{currentResponseEntry?.speaker ?? 'DM'}</strong>
+                <span>Full Response</span>
+              </div>
+              <div className="response-copy">
+                <p>{latestDmText}</p>
+              </div>
+              <div className={`stream-state ${sendPending || streamingTurnActive ? 'streaming' : ''}`}>
+                <span />
+                {streamLabel}
+              </div>
+              <div className="execution-footer">
+                Tokens: {dmExecutionStats.tokens} <span>|</span> Time: {dmExecutionStats.time}{' '}
+                <span>|</span> Model: {dmExecutionStats.model} <span>|</span> Temp:{' '}
+                {dmExecutionStats.temperature}
+              </div>
+            </div>
+          </article>
+        </section>
+      ) : null}
+
+      {mainTab === 'notes' ? (
+        <section className="turn-feed notes-panel">
+          <div className="notes-card">
+            <h2>Session State</h2>
+            <dl>
+              <dt>Current quest</dt>
+              <dd>{questTitle}</dd>
+              <dt>Current location</dt>
+              <dd>{sessionState?.current_location || campaign?.location || 'No location recorded'}</dd>
+              <dt>Updated</dt>
+              <dd>{formatDateTime(sessionState?.updated_at ?? null)}</dd>
+            </dl>
+            <h3>Rolling Summary</h3>
+            <p>{sessionState?.rolling_summary || 'No rolling summary recorded yet.'}</p>
+          </div>
+          <div className="notes-card compact-notes">
+            <h3>Recent Memory</h3>
+            {canonFacts.length ? (
+              canonFacts.slice(0, 5).map(([fact, source]) => (
+                <div key={`${fact}-${source}`} className="note-line">
+                  <ThinIcon name="dot" size={12} />
+                  <span>{fact}</span>
+                  <small>{source}</small>
+                </div>
+              ))
+            ) : (
+              <p>No memory snippets recorded yet.</p>
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      <ActionComposer {...actionComposerProps} />
+    </main>
+  )
+}

@@ -13,6 +13,7 @@ from aidm_server.deploy_bootstrap import (
     BootstrapError,
     BootstrapReport,
     _harden_env_local_permissions,
+    _validate_rate_limits,
     _validate_network_exposure,
 )
 from aidm_server.database import harden_sqlite_permissions
@@ -26,6 +27,7 @@ def _run_bootstrap(env_overrides: dict[str, str]):
     env = os.environ.copy()
     env.update(env_overrides)
     env['PYTHONPATH'] = str(REPO_ROOT)
+    env['PYTHON_DOTENV_DISABLED'] = '1'
 
     result = subprocess.run(
         [sys.executable, str(BOOTSTRAP_SCRIPT), '--check-only'],
@@ -71,6 +73,7 @@ def test_deploy_bootstrap_fails_when_auth_required_without_tokens(tmp_path):
             'AIDM_DEBUG': 'false',
             'AIDM_AUTH_REQUIRED': 'true',
             'AIDM_API_AUTH_TOKENS': '',
+            'AIDM_API_AUTH_TOKEN_WORKSPACES': '',
             'AIDM_SOCKETIO_ASYNC_MODE': 'threading',
             'AIDM_TELEMETRY_ENABLED': 'false',
             'AIDM_RATE_LIMIT_WINDOW_SECONDS': '30',
@@ -139,6 +142,27 @@ def test_harden_sqlite_permissions_locks_down_instance_files(tmp_path):
     assert stat.S_IMODE(backup_path.stat().st_mode) == 0o600
 
 
+def test_harden_sqlite_permissions_locks_down_default_local_data_dir(tmp_path):
+    local_data_dir = tmp_path / '.aidm'
+    local_data_dir.mkdir()
+    db_path = local_data_dir / 'dnd_ai_dm.db'
+    backup_path = local_data_dir / 'dnd_ai_dm.backup.db'
+    db_path.write_bytes(b'sqlite')
+    backup_path.write_bytes(b'backup')
+    local_data_dir.chmod(0o755)
+    db_path.chmod(0o644)
+    backup_path.chmod(0o644)
+
+    changed = harden_sqlite_permissions(f'sqlite:///{db_path}')
+
+    assert str(local_data_dir) in changed
+    assert str(db_path) in changed
+    assert str(backup_path) in changed
+    assert stat.S_IMODE(local_data_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(backup_path.stat().st_mode) == 0o600
+
+
 def test_harden_env_local_permissions_locks_down_file(tmp_path):
     env_local = tmp_path / '.env.local'
     env_local.write_text('AIDM_LLM_PROVIDER=fallback\n', encoding='utf-8')
@@ -170,3 +194,30 @@ def test_validate_network_exposure_rejects_production_wildcard_cors(app):
 
     with pytest.raises(BootstrapError, match='wildcard CORS'):
         _validate_network_exposure(app, '127.0.0.1', report)
+
+
+def test_validate_rate_limits_rejects_unknown_store(app):
+    app.config['AIDM_RATE_LIMIT_STORE'] = 'sidecar'
+
+    with pytest.raises(BootstrapError, match='AIDM_RATE_LIMIT_STORE'):
+        _validate_rate_limits(app)
+
+
+def test_validate_rate_limits_rejects_unknown_turn_coordinator_store(app):
+    app.config['AIDM_TURN_COORDINATOR_STORE'] = 'sidecar'
+
+    with pytest.raises(BootstrapError, match='AIDM_TURN_COORDINATOR_STORE'):
+        _validate_rate_limits(app)
+
+
+def test_validate_rate_limits_rejects_invalid_turn_lock_settings(app):
+    app.config['AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS'] = 5
+
+    with pytest.raises(BootstrapError, match='AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS'):
+        _validate_rate_limits(app)
+
+    app.config['AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS'] = 30
+    app.config['AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS'] = 5
+
+    with pytest.raises(BootstrapError, match='AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS'):
+        _validate_rate_limits(app)

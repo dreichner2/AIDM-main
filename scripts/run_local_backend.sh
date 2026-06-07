@@ -22,8 +22,6 @@ if [[ -z "${AIDM_LLM_PROVIDER:-}" ]]; then
     export AIDM_LLM_PROVIDER="gemini"
   elif [[ -n "${AIDM_DEEPSEEK_API_KEY:-}" || -n "${DEEPSEEK_API_KEY:-}" ]]; then
     export AIDM_LLM_PROVIDER="deepseek"
-  elif [[ "${AIDM_NVIDIA_INVOKE_URL:-}" == *"api.deepseek.com"* && -n "${AIDM_NVIDIA_API_KEY:-}" ]]; then
-    export AIDM_LLM_PROVIDER="deepseek"
   elif [[ -n "${AIDM_NVIDIA_API_KEY:-}" || -n "${NVIDIA_API_KEY:-}" ]]; then
     export AIDM_LLM_PROVIDER="nvidia"
   else
@@ -35,7 +33,7 @@ if [[ "${AIDM_LLM_PROVIDER}" == "deepseek" ]]; then
   export AIDM_LLM_MODEL="${AIDM_LLM_MODEL:-deepseek-v4-pro}"
   export AIDM_LLM_FALLBACK_MODELS="${AIDM_LLM_FALLBACK_MODELS:-}"
   export AIDM_DEEPSEEK_BASE_URL="${AIDM_DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
-  export AIDM_DEEPSEEK_API_KEY="${AIDM_DEEPSEEK_API_KEY:-${DEEPSEEK_API_KEY:-${AIDM_NVIDIA_API_KEY:-}}}"
+  export AIDM_DEEPSEEK_API_KEY="${AIDM_DEEPSEEK_API_KEY:-${DEEPSEEK_API_KEY:-}}"
 elif [[ "${AIDM_LLM_PROVIDER}" == "nvidia" || "${AIDM_LLM_PROVIDER}" == "kimi" ]]; then
   export AIDM_LLM_MODEL="${AIDM_LLM_MODEL:-moonshotai/kimi-k2.5}"
   export AIDM_LLM_FALLBACK_MODELS="${AIDM_LLM_FALLBACK_MODELS:-}"
@@ -48,8 +46,13 @@ else
   export AIDM_LLM_FALLBACK_MODELS="${AIDM_LLM_FALLBACK_MODELS:-models/gemini-2.5-flash}"
 fi
 export AIDM_DEBUG="${AIDM_DEBUG:-false}"
-export AIDM_CORS_ALLOWLIST="${AIDM_CORS_ALLOWLIST:-*}"
-export AIDM_SOCKET_CORS_ALLOWLIST="${AIDM_SOCKET_CORS_ALLOWLIST:-*}"
+if [[ "${AIDM_SERVE_FRONTEND:-false}" == "true" ]]; then
+  export AIDM_CORS_ALLOWLIST="${AIDM_CORS_ALLOWLIST-}"
+  export AIDM_SOCKET_CORS_ALLOWLIST="${AIDM_SOCKET_CORS_ALLOWLIST-${AIDM_CORS_ALLOWLIST}}"
+else
+  export AIDM_CORS_ALLOWLIST="${AIDM_CORS_ALLOWLIST:-*}"
+  export AIDM_SOCKET_CORS_ALLOWLIST="${AIDM_SOCKET_CORS_ALLOWLIST:-*}"
+fi
 export AIDM_CORS_ALLOW_PRIVATE_NETWORK="${AIDM_CORS_ALLOW_PRIVATE_NETWORK:-true}"
 
 PORT="${PORT:-5050}"

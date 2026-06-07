@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from aidm_server.database import db
+from aidm_server.models import DmTurn, Player, PlayerAction, TurnEvent
 from tests.helpers import seed_world_campaign_player_session
 
 
@@ -85,8 +87,67 @@ def test_update_player_rejects_invalid_payloads(client, app):
     assert bad_level_response.get_json()['error_code'] == 'validation_error'
 
 
+def test_create_player_requires_json_and_string_names(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    non_json_response = client.post(
+        f"/api/players/campaigns/{ids['campaign_id']}/players",
+        data='not-json',
+        content_type='text/plain',
+    )
+    assert non_json_response.status_code == 400
+    assert non_json_response.get_json()['error_code'] == 'validation_error'
+
+    numeric_name_response = client.post(
+        f"/api/players/campaigns/{ids['campaign_id']}/players",
+        json={'name': 123, 'character_name': 'Seraphina'},
+    )
+    assert numeric_name_response.status_code == 400
+    assert numeric_name_response.get_json()['error_code'] == 'validation_error'
+
+
 def test_list_players_returns_404_for_missing_campaign(client):
     response = client.get('/api/players/campaigns/99999/players')
 
     assert response.status_code == 404
     assert response.get_json()['error_code'] == 'campaign_not_found'
+
+
+def test_delete_player_removes_character_and_clears_history_references(client, app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            player_input='I test deletion.',
+            dm_output='Deletion tested.',
+        )
+        event = TurnEvent(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            event_type='player_message',
+            payload_json='{}',
+        )
+        action = PlayerAction(
+            action_id=100,
+            player_id=ids['player_id'],
+            session_id=ids['session_id'],
+            action_text='I test deletion.',
+        )
+        db.session.add_all([turn, event, action])
+        db.session.commit()
+        turn_id = turn.turn_id
+        event_id = event.event_id
+
+    response = client.delete(f"/api/players/{ids['player_id']}")
+
+    assert response.status_code == 200
+    assert response.get_json()['deleted'] is True
+    assert client.get(f"/api/players/{ids['player_id']}").status_code == 404
+    with app.app_context():
+        assert db.session.get(Player, ids['player_id']) is None
+        assert PlayerAction.query.filter_by(player_id=ids['player_id']).count() == 0
+        assert db.session.get(DmTurn, turn_id).player_id is None
+        assert db.session.get(TurnEvent, event_id).player_id is None

@@ -101,7 +101,14 @@ def test_auth_required_for_mutating_api_endpoints_and_tts(tmp_path, monkeypatch)
             {'name': 'Bob', 'character_name': 'Borin'},
         ),
         ('patch', f"/api/players/{ids['player_id']}", {'level': 4}),
+        ('patch', f"/api/campaigns/{ids['campaign_id']}", {'title': 'Blocked Campaign Rename'}),
+        ('delete', f"/api/campaigns/{ids['campaign_id']}", {}),
+        ('post', f"/api/campaigns/{ids['campaign_id']}/archive", {}),
+        ('post', f"/api/campaigns/{ids['campaign_id']}/restore", {}),
         ('patch', f"/api/sessions/{ids['session_id']}", {'name': 'Blocked Session Rename'}),
+        ('delete', f"/api/sessions/{ids['session_id']}", {}),
+        ('post', f"/api/sessions/{ids['session_id']}/archive", {}),
+        ('post', f"/api/sessions/{ids['session_id']}/restore", {}),
         ('post', '/api/tts/speak', {'text': 'The torches flicker.'}),
     ]
 
@@ -138,6 +145,116 @@ def test_socket_auth_required(tmp_path, monkeypatch):
     auth_client.disconnect()
 
 
+def test_auth_tokens_are_scoped_to_campaign_workspaces(tmp_path, monkeypatch):
+    app, socketio = _build_auth_runtime(
+        tmp_path,
+        monkeypatch,
+        extra_env={
+            'AIDM_API_AUTH_TOKENS': 'owner-token,friend-token',
+            'AIDM_API_AUTH_TOKEN_WORKSPACES': 'owner=owner-token,aidan_test=friend-token',
+        },
+    )
+    client = app.test_client()
+    owner_headers = {'Authorization': 'Bearer owner-token'}
+    friend_headers = {'Authorization': 'Bearer friend-token'}
+
+    with app.app_context():
+        world = World(name='Shared World', description='Reusable test world')
+        db.session.add(world)
+        db.session.flush()
+        owner_campaign = Campaign(title='Owner Campaign', world_id=world.world_id, workspace_id='owner')
+        db.session.add(owner_campaign)
+        db.session.flush()
+        owner_player = Player(
+            campaign_id=owner_campaign.campaign_id,
+            name='Danny',
+            character_name='Owner Hero',
+        )
+        owner_session = Session(campaign_id=owner_campaign.campaign_id)
+        db.session.add_all([owner_player, owner_session])
+        db.session.commit()
+        ids = {
+            'world_id': world.world_id,
+            'campaign_id': owner_campaign.campaign_id,
+            'player_id': owner_player.player_id,
+            'session_id': owner_session.session_id,
+        }
+
+    owner_campaigns = client.get('/api/campaigns', headers=owner_headers)
+    assert owner_campaigns.status_code == 200
+    assert [campaign['title'] for campaign in owner_campaigns.get_json()] == ['Owner Campaign']
+
+    owner_worlds = client.get('/api/worlds', headers=owner_headers)
+    assert owner_worlds.status_code == 200
+    assert [world['name'] for world in owner_worlds.get_json()] == ['Shared World']
+
+    friend_campaigns = client.get('/api/campaigns', headers=friend_headers)
+    assert friend_campaigns.status_code == 200
+    assert friend_campaigns.get_json() == []
+
+    friend_worlds = client.get('/api/worlds', headers=friend_headers)
+    assert friend_worlds.status_code == 200
+    assert friend_worlds.get_json() == []
+    assert client.get(f"/api/worlds/{ids['world_id']}", headers=friend_headers).status_code == 404
+
+    hidden_paths = [
+        f"/api/campaigns/{ids['campaign_id']}",
+        f"/api/campaigns/{ids['campaign_id']}/workspace",
+        f"/api/players/{ids['player_id']}",
+        f"/api/sessions/{ids['session_id']}/log",
+        f"/api/sessions/{ids['session_id']}/state",
+    ]
+    for path in hidden_paths:
+        assert client.get(path, headers=friend_headers).status_code == 404
+
+    blocked_campaign = client.post(
+        '/api/campaigns',
+        headers=friend_headers,
+        json={'title': 'Aidan Test Campaign', 'world_id': ids['world_id']},
+    )
+    assert blocked_campaign.status_code == 404
+    assert blocked_campaign.get_json()['error_code'] == 'world_not_found'
+
+    friend_world = client.post(
+        '/api/worlds',
+        headers=friend_headers,
+        json={'name': 'Aidan Test World', 'description': 'Friend-only world'},
+    )
+    assert friend_world.status_code == 201
+    friend_world_id = friend_world.get_json()['world_id']
+
+    created = client.post(
+        '/api/campaigns',
+        headers=friend_headers,
+        json={'title': 'Aidan Test Campaign', 'world_id': friend_world_id},
+    )
+    assert created.status_code == 201
+    friend_campaign_id = created.get_json()['campaign_id']
+
+    with app.app_context():
+        friend_world_obj = db.session.get(World, friend_world_id)
+        assert friend_world_obj is not None
+        assert friend_world_obj.workspace_id == 'aidan_test'
+        friend_campaign = db.session.get(Campaign, friend_campaign_id)
+        assert friend_campaign is not None
+        assert friend_campaign.workspace_id == 'aidan_test'
+
+    friend_campaigns = client.get('/api/campaigns', headers=friend_headers)
+    assert [campaign['title'] for campaign in friend_campaigns.get_json()] == ['Aidan Test Campaign']
+
+    friend_socket = socketio.test_client(
+        app,
+        flask_test_client=app.test_client(),
+        auth={'token': 'friend-token'},
+    )
+    assert friend_socket.is_connected()
+    friend_socket.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    received = friend_socket.get_received()
+    errors = [event['args'][0] for event in received if event['name'] == 'error']
+    assert errors and errors[0]['error_code'] == 'session_not_found'
+    friend_socket.disconnect()
+
+
 def test_socket_token_extraction_ignores_query_and_event_payloads(tmp_path, monkeypatch):
     app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
 
@@ -155,7 +272,11 @@ def test_admin_requires_auth_when_enabled(tmp_path, monkeypatch):
     app, _socketio = _build_auth_runtime(
         tmp_path,
         monkeypatch,
-        extra_env={'AIDM_ADMIN_ENABLED': 'true'},
+        extra_env={
+            'AIDM_ADMIN_ENABLED': 'true',
+            'AIDM_API_AUTH_TOKENS': 'token-123,friend-token',
+            'AIDM_API_AUTH_TOKEN_WORKSPACES': 'aidan_test=friend-token',
+        },
     )
     client = app.test_client()
 
@@ -167,6 +288,12 @@ def test_admin_requires_auth_when_enabled(tmp_path, monkeypatch):
 
     authorized = client.get('/admin/', headers={'Authorization': 'Bearer token-123'})
     assert authorized.status_code == 200
+
+    friend_token = client.get('/admin/', headers={'Authorization': 'Bearer friend-token'})
+    assert friend_token.status_code == 401
+
+    without_bearer_after_success = client.get('/admin/')
+    assert without_bearer_after_success.status_code == 401
 
 
 def test_admin_rejects_cookie_signed_with_old_default_secret(tmp_path, monkeypatch):
@@ -222,4 +349,40 @@ def test_api_rate_limit_ignores_spoofed_forwarded_for(tmp_path, monkeypatch):
     second = client.get('/api/metrics', headers={**headers, 'X-Forwarded-For': '2.2.2.2'})
 
     assert first.status_code == 200
+    assert second.status_code == 429
+
+
+def test_api_rate_limit_can_use_database_store(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(
+        tmp_path,
+        monkeypatch,
+        extra_env={
+            'AIDM_RATE_LIMIT_MAX_API_REQUESTS': '1',
+            'AIDM_RATE_LIMIT_STORE': 'database',
+        },
+    )
+    client = app.test_client()
+    headers = {'Authorization': 'Bearer token-123'}
+
+    first = client.get('/api/metrics', headers=headers)
+    second = client.get('/api/metrics', headers=headers)
+
+    assert app.config['AIDM_RATE_LIMIT_STORE'] == 'database'
+    assert first.status_code == 200
+    assert second.status_code == 429
+
+
+def test_api_rate_limit_uses_route_template_instead_of_raw_ids(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(
+        tmp_path,
+        monkeypatch,
+        extra_env={'AIDM_RATE_LIMIT_MAX_API_REQUESTS': '1'},
+    )
+    client = app.test_client()
+    headers = {'Authorization': 'Bearer token-123'}
+
+    first = client.get('/api/sessions/111/log', headers=headers)
+    second = client.get('/api/sessions/222/log', headers=headers)
+
+    assert first.status_code == 404
     assert second.status_code == 429

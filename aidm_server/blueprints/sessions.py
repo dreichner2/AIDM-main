@@ -1,44 +1,49 @@
 from __future__ import annotations
 
-import json
 import logging
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
+from aidm_server.action_intent import ACTION_ID_RE
 from aidm_server.database import db
 from aidm_server.errors import error_response
 from aidm_server.llm import query_gpt
 from aidm_server.models import (
     Campaign,
-    DmCoherenceFeedback,
-    DmTurn,
-    PlayerAction,
     Session,
     SessionLogEntry,
     SessionState,
-    StoryEntity,
-    StoryFact,
-    StoryThread,
     TurnEvent,
-    TurnCanonUpdate,
     get_or_create_session_state,
+    safe_json_dumps,
     safe_json_loads,
 )
+from aidm_server.response_dtos import isoformat, session_payload, session_state_payload, turn_event_payload
+from aidm_server.services.session_lifecycle import (
+    archive_session_record,
+    delete_session_record,
+    metadata_cleaned_snapshot,
+    restore_session_record,
+)
+from aidm_server.services.session_import import SessionImportError, import_session_export
+from aidm_server.services.workspace import list_campaign_session_payloads
 from aidm_server.telemetry import telemetry_event, telemetry_metric
 from aidm_server.time_utils import utc_now
-from aidm_server.turn_coordinator import session_turn_coordinator
-from aidm_server.validation import missing_fields, parse_json_body
+from aidm_server.turn_events import SESSION_ENDED_EVENT, SESSION_RECAP_EVENT, SESSION_STARTED_EVENT, record_turn_event
+from aidm_server.validation import coerce_int, missing_fields, optional_text, parse_json_body, positive_int, required_text
+from aidm_server.workspace_access import (
+    current_workspace_id,
+    get_campaign as workspace_campaign,
+    get_session as workspace_session,
+)
 
 
 logger = logging.getLogger(__name__)
 sessions_bp = Blueprint('sessions', __name__)
 RECAP_RECENT_ENTRY_LIMIT = 80
 RECAP_SOURCE_CHAR_BUDGET = 12_000
-
-
-def _state_snapshot_payload(raw_snapshot):
-    return safe_json_loads(raw_snapshot, None)
+SESSION_IDEMPOTENCY_KEY_MAX_LENGTH = 80
 
 
 def _state_snapshot_dict(raw_snapshot) -> dict:
@@ -52,103 +57,53 @@ def _merge_state_snapshot(raw_snapshot, updates: dict) -> dict:
     return snapshot
 
 
-def _isoformat(value):
-    return value.isoformat() if value else None
+def _metadata_cleaned_snapshot(raw_snapshot) -> dict:
+    return metadata_cleaned_snapshot(raw_snapshot)
 
 
-def _latest_isoformat(*values):
-    iso_values = []
-    for value in values:
-        if not value:
-            continue
-        if isinstance(value, str):
-            iso_values.append(value)
-        else:
-            iso_values.append(value.isoformat())
-    return max(iso_values) if iso_values else None
+def _client_session_id(payload: dict | None) -> tuple[str | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, None
+    raw_value = payload.get('client_session_id') or payload.get('idempotency_key')
+    if raw_value in (None, ''):
+        return None, None
+    client_session_id = str(raw_value).strip()[:SESSION_IDEMPOTENCY_KEY_MAX_LENGTH]
+    if not client_session_id:
+        return None, None
+    if not ACTION_ID_RE.fullmatch(client_session_id):
+        return None, 'client_session_id contains unsupported characters.'
+    return client_session_id, None
 
 
-def _session_display_name(session_obj: Session, snapshot: dict) -> str:
-    raw_name = snapshot.get('name') or snapshot.get('title')
-    name = str(raw_name or '').strip()
-    return name or f"Session {session_obj.session_id}"
+def _find_idempotent_session(campaign_id: int, client_session_id: str) -> Session | None:
+    direct_match = Session.query.filter_by(campaign_id=campaign_id, client_session_id=client_session_id).first()
+    if direct_match:
+        return direct_match
+
+    for session_obj in Session.query.filter_by(campaign_id=campaign_id, client_session_id=None).all():
+        snapshot = _state_snapshot_dict(session_obj.state_snapshot)
+        if snapshot.get('client_session_id') == client_session_id:
+            return session_obj
+    return None
 
 
-def _session_summary_payload(session_obj: Session) -> dict:
-    snapshot = _state_snapshot_dict(session_obj.state_snapshot)
-    session_state = SessionState.query.filter_by(session_id=session_obj.session_id).first()
-    latest_log_at = db.session.query(func.max(SessionLogEntry.timestamp)).filter_by(session_id=session_obj.session_id).scalar()
-    latest_turn_created_at = db.session.query(func.max(DmTurn.created_at)).filter_by(session_id=session_obj.session_id).scalar()
-    latest_turn_completed_at = db.session.query(func.max(DmTurn.completed_at)).filter_by(session_id=session_obj.session_id).scalar()
-    turn_count = db.session.query(func.count(DmTurn.turn_id)).filter_by(session_id=session_obj.session_id).scalar() or 0
-    snapshot_updated_at = snapshot.get('updated_at')
-
-    latest_activity = _latest_isoformat(
-        session_obj.created_at,
-        snapshot_updated_at if isinstance(snapshot_updated_at, str) else None,
-        session_state.updated_at if session_state else None,
-        latest_log_at,
-        latest_turn_created_at,
-        latest_turn_completed_at,
+def _stale_update_error(payload: dict, current_updated_at) -> tuple[dict, int] | None:
+    expected = payload.get('expected_updated_at')
+    if expected in (None, ''):
+        return None
+    actual = isoformat(current_updated_at)
+    if str(expected) == str(actual):
+        return None
+    return error_response(
+        'stale_update',
+        'Session was updated by another request. Refresh before saving changes.',
+        409,
+        {'expected_updated_at': expected, 'actual_updated_at': actual},
     )
-    latest_summary = ''
-    if session_state and session_state.rolling_summary:
-        latest_summary = session_state.rolling_summary
-    elif isinstance(snapshot.get('recap'), str):
-        latest_summary = snapshot['recap']
-    elif isinstance(snapshot.get('summary'), str):
-        latest_summary = snapshot['summary']
-
-    return {
-        'session_id': session_obj.session_id,
-        'campaign_id': session_obj.campaign_id,
-        'created_at': _isoformat(session_obj.created_at),
-        'updated_at': latest_activity,
-        'latest_activity_at': latest_activity,
-        'display_name': _session_display_name(session_obj, snapshot),
-        'turn_count': int(turn_count),
-        'latest_summary': latest_summary,
-        'is_archived': bool(snapshot.get('is_archived') or snapshot.get('archived')),
-        'state_snapshot': _state_snapshot_payload(session_obj.state_snapshot),
-    }
 
 
-def _session_state_payload(session_obj: Session, session_state: SessionState | None) -> dict:
-    if session_state is None:
-        return {
-            'session_id': session_obj.session_id,
-            'campaign_id': session_obj.campaign_id,
-            'current_location': session_obj.campaign.location,
-            'current_quest': session_obj.campaign.current_quest,
-            'rolling_summary': '',
-            'active_segments': [],
-            'memory_snippets': [],
-            'updated_at': None,
-        }
-
-    return {
-        'session_id': session_obj.session_id,
-        'campaign_id': session_obj.campaign_id,
-        'current_location': session_state.current_location,
-        'current_quest': session_state.current_quest,
-        'rolling_summary': session_state.rolling_summary,
-        'active_segments': safe_json_loads(session_state.active_segments, []),
-        'memory_snippets': safe_json_loads(session_state.memory_snippets, []),
-        'updated_at': session_state.updated_at.isoformat() if session_state.updated_at else None,
-    }
-
-
-def _turn_event_payload(event: TurnEvent) -> dict:
-    return {
-        'event_id': event.event_id,
-        'session_id': event.session_id,
-        'campaign_id': event.campaign_id,
-        'turn_id': event.turn_id,
-        'player_id': event.player_id,
-        'event_type': event.event_type,
-        'payload': safe_json_loads(event.payload_json, {}),
-        'created_at': event.created_at.isoformat() if event.created_at else None,
-    }
+def _include_archived() -> bool:
+    return str(request.args.get('include_archived', '')).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 def _bounded_session_recap_source(session_id: int, session_state: SessionState | None) -> str:
@@ -178,33 +133,81 @@ def _bounded_session_recap_source(session_id: int, session_state: SessionState |
 def start_new_session():
     telemetry_metric('sessions.start.requests_total', 1)
     payload = parse_json_body(request)
+    if payload is None:
+        telemetry_event('sessions.start.validation_error', payload={'field': 'body'}, severity='warning')
+        return error_response('validation_error', 'Expected JSON request body.', 400)
+
     required = missing_fields(payload, ['campaign_id'])
     if required:
         telemetry_event('sessions.start.validation_error', payload={'missing_fields': required}, severity='warning')
         return error_response('validation_error', 'Missing required fields.', 400, {'missing_fields': required})
 
-    campaign = db.session.get(Campaign, payload['campaign_id'])
+    client_session_id, client_session_id_error = _client_session_id(payload)
+    if client_session_id_error:
+        telemetry_event('sessions.start.validation_error', payload={'field': 'client_session_id'}, severity='warning')
+        return error_response('validation_error', client_session_id_error, 400)
+
+    campaign_id, campaign_id_error = positive_int(payload.get('campaign_id'), field='campaign_id', required=True)
+    if campaign_id_error:
+        telemetry_event('sessions.start.validation_error', payload={'field': 'campaign_id'}, severity='warning')
+        return error_response('validation_error', campaign_id_error, 400)
+
+    campaign = workspace_campaign(campaign_id)
     if not campaign:
-        telemetry_event('sessions.start.campaign_not_found', payload={'campaign_id': payload['campaign_id']}, severity='warning')
+        telemetry_event('sessions.start.campaign_not_found', payload={'campaign_id': campaign_id}, severity='warning')
         return error_response('campaign_not_found', 'Campaign not found.', 404)
 
+    if client_session_id:
+        existing_session = _find_idempotent_session(campaign.campaign_id, client_session_id)
+        if existing_session:
+            telemetry_metric('sessions.start.idempotent_replay_total', 1)
+            return jsonify({'session_id': existing_session.session_id, 'idempotent_replay': True}), 200
+
     try:
-        new_session = Session(campaign_id=campaign.campaign_id)
+        name = None
+        if payload.get('name') is not None:
+            name, name_error = optional_text(payload.get('name'), max_length=80, field='name', default=None)
+            if name_error:
+                return error_response('validation_error', name_error, 400)
+            if not name:
+                name = None
+
+        snapshot = {'client_session_id': client_session_id} if client_session_id else None
+        new_session = Session(
+            campaign_id=campaign.campaign_id,
+            name=name,
+            client_session_id=client_session_id,
+            state_snapshot=(safe_json_dumps(snapshot, {}) if snapshot else None),
+        )
         db.session.add(new_session)
         db.session.flush()
 
         get_or_create_session_state(new_session.session_id, campaign)
-        db.session.add(
-            SessionLogEntry(
-                session_id=new_session.session_id,
-                entry_type='system',
-                message='**Welcome to the table. Choose your opening move when you are ready.**',
-                metadata_json=json.dumps({'kind': 'session_welcome'}),
-            )
+        record_turn_event(
+            session_id=new_session.session_id,
+            campaign_id=campaign.campaign_id,
+            event_type=SESSION_STARTED_EVENT,
+            payload={
+                'message': '**Welcome to the table. Choose your opening move when you are ready.**',
+                'metadata': {
+                    'kind': 'session_welcome',
+                    'client_session_id': client_session_id,
+                },
+            },
         )
         db.session.commit()
         telemetry_metric('sessions.start.success_total', 1)
-        return jsonify({'session_id': new_session.session_id}), 201
+        return jsonify({'session_id': new_session.session_id, 'idempotent_replay': False}), 201
+    except IntegrityError:
+        db.session.rollback()
+        if client_session_id:
+            existing_session = _find_idempotent_session(campaign.campaign_id, client_session_id)
+            if existing_session:
+                telemetry_metric('sessions.start.idempotent_race_replay_total', 1)
+                return jsonify({'session_id': existing_session.session_id, 'idempotent_replay': True}), 200
+        logger.error('Failed to start session because idempotency constraint was violated.')
+        telemetry_event('sessions.start.idempotency_conflict_failed', payload={'campaign_id': campaign_id}, severity='error')
+        return error_response('session_start_failed', 'Failed to start session.', 400)
     except Exception as exc:
         db.session.rollback()
         logger.error('Failed to start session: %s', str(exc))
@@ -215,7 +218,7 @@ def start_new_session():
 @sessions_bp.route('/<int:session_id>/end', methods=['POST'])
 def end_game_session(session_id):
     telemetry_metric('sessions.end.requests_total', 1)
-    session_obj = db.session.get(Session, session_id)
+    session_obj = workspace_session(session_id)
     if not session_obj:
         telemetry_event('sessions.end.session_not_found', payload={'session_id': session_id}, severity='warning')
         return error_response('session_not_found', 'Session not found.', 404)
@@ -232,16 +235,44 @@ def end_game_session(session_id):
     recap = query_gpt(prompt=recap_prompt, system_message='You are a D&D session summarizer.')
 
     try:
-        snapshot = {
-            'recap': recap,
-            'ended_at': utc_now().isoformat(),
-        }
-        session_obj.state_snapshot = json.dumps(snapshot)
+        ended_at = utc_now()
+        snapshot = _merge_state_snapshot(
+            session_obj.state_snapshot,
+            {
+                'recap': recap,
+                'ended_at': ended_at.isoformat(),
+            },
+        )
+        session_obj.state_snapshot = safe_json_dumps(snapshot, {})
 
         session_state.rolling_summary = recap
         session_state.current_location = (session_state.current_location or session_obj.campaign.location)
         session_state.current_quest = (session_state.current_quest or session_obj.campaign.current_quest)
-        session_state.updated_at = utc_now()
+        session_state.updated_at = ended_at
+        record_turn_event(
+            session_id=session_id,
+            campaign_id=session_obj.campaign_id,
+            event_type=SESSION_ENDED_EVENT,
+            payload={
+                'message': '**Session ended.**',
+                'metadata': {
+                    'kind': 'session_ended',
+                    'ended_at': ended_at.isoformat(),
+                },
+            },
+        )
+        record_turn_event(
+            session_id=session_id,
+            campaign_id=session_obj.campaign_id,
+            event_type=SESSION_RECAP_EVENT,
+            payload={
+                'recap': recap,
+                'metadata': {
+                    'kind': 'session_recap',
+                    'ended_at': ended_at.isoformat(),
+                },
+            },
+        )
 
         db.session.commit()
         telemetry_metric('sessions.end.success_total', 1)
@@ -260,15 +291,47 @@ def end_game_session(session_id):
 @sessions_bp.route('/campaigns/<int:campaign_id>/sessions', methods=['GET'])
 def list_campaign_sessions(campaign_id):
     telemetry_metric('sessions.list.requests_total', 1)
-    campaign = db.session.get(Campaign, campaign_id)
+    campaign = workspace_campaign(campaign_id)
     if not campaign:
         telemetry_event('sessions.list.campaign_not_found', payload={'campaign_id': campaign_id}, severity='warning')
         return error_response('campaign_not_found', 'Campaign not found.', 404)
 
-    sessions = Session.query.filter_by(campaign_id=campaign_id).order_by(Session.created_at.desc()).all()
-    session_payloads = [_session_summary_payload(s) for s in sessions]
-    session_payloads.sort(key=lambda item: item.get('latest_activity_at') or '', reverse=True)
-    return jsonify(session_payloads)
+    limit = coerce_int(request.args.get('limit'))
+    return jsonify(
+        list_campaign_session_payloads(
+            campaign_id,
+            include_archived=_include_archived(),
+            limit=(max(1, min(500, limit)) if limit is not None else None),
+        )
+    )
+
+
+@sessions_bp.route('/import', methods=['POST'])
+def import_session():
+    telemetry_metric('sessions.import.requests_total', 1)
+    payload = parse_json_body(request)
+    if payload is None:
+        telemetry_event('sessions.import.validation_error', payload={'field': 'body'}, severity='warning')
+        return error_response('validation_error', 'Expected JSON request body.', 400)
+
+    try:
+        result = import_session_export(payload, workspace_id=current_workspace_id())
+        db.session.commit()
+        telemetry_metric('sessions.import.success_total', 1)
+        return jsonify(result.payload), 201
+    except SessionImportError as exc:
+        db.session.rollback()
+        telemetry_event(
+            'sessions.import.validation_error',
+            payload={'error_code': exc.error_code, 'message': str(exc)},
+            severity='warning',
+        )
+        return error_response(exc.error_code, str(exc), exc.status_code)
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to import session: %s', str(exc))
+        telemetry_event('sessions.import.failed', payload={'error': str(exc)}, severity='error')
+        return error_response('session_import_failed', 'Failed to import session.', 400)
 
 
 @sessions_bp.route('/<int:session_id>', methods=['PATCH'])
@@ -278,30 +341,27 @@ def update_session(session_id):
     if payload is None:
         return error_response('validation_error', 'Expected JSON request body.', 400)
 
-    session_obj = db.session.get(Session, session_id)
+    session_obj = workspace_session(session_id)
     if not session_obj:
         telemetry_event('sessions.update.session_not_found', payload={'session_id': session_id}, severity='warning')
         return error_response('session_not_found', 'Session not found.', 404)
 
+    stale_response = _stale_update_error(payload, session_obj.updated_at)
+    if stale_response:
+        return stale_response
+
     raw_name = payload.get('name', payload.get('title'))
-    name = str(raw_name or '').strip()
-    if not name:
-        return error_response('validation_error', 'Session name is required.', 400)
-    if len(name) > 80:
-        return error_response('validation_error', 'Session name must be 80 characters or fewer.', 400)
+    name, name_error = required_text(raw_name, max_length=80, field='Session name')
+    if name_error:
+        return error_response('validation_error', name_error, 400)
 
     try:
-        snapshot = _merge_state_snapshot(
-            session_obj.state_snapshot,
-            {
-                'name': name,
-                'updated_at': utc_now().isoformat(),
-            },
-        )
-        session_obj.state_snapshot = json.dumps(snapshot)
+        session_obj.name = name
+        session_obj.updated_at = utc_now()
+        session_obj.state_snapshot = safe_json_dumps(_metadata_cleaned_snapshot(session_obj.state_snapshot), {})
         db.session.commit()
         telemetry_metric('sessions.update.success_total', 1)
-        return jsonify(_session_summary_payload(session_obj))
+        return jsonify(session_payload(session_obj))
     except Exception as exc:
         db.session.rollback()
         logger.error('Failed to update session: %s', str(exc))
@@ -309,51 +369,63 @@ def update_session(session_id):
         return error_response('session_update_failed', 'Failed to update session.', 400)
 
 
+@sessions_bp.route('/<int:session_id>/archive', methods=['POST'])
+def archive_session(session_id):
+    telemetry_metric('sessions.archive.requests_total', 1)
+    session_obj = workspace_session(session_id)
+    if not session_obj:
+        telemetry_event('sessions.archive.session_not_found', payload={'session_id': session_id}, severity='warning')
+        return error_response('session_not_found', 'Session not found.', 404)
+
+    try:
+        payload = archive_session_record(session_obj)
+        db.session.commit()
+        telemetry_metric('sessions.archive.success_total', 1)
+        return jsonify({'archived': True, 'session': payload})
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to archive session: %s', str(exc))
+        telemetry_event('sessions.archive.failed', payload={'session_id': session_id, 'error': str(exc)}, severity='error')
+        return error_response('session_archive_failed', 'Failed to archive session.', 400)
+
+
+@sessions_bp.route('/<int:session_id>/restore', methods=['POST'])
+def restore_session(session_id):
+    telemetry_metric('sessions.restore.requests_total', 1)
+    session_obj = workspace_session(session_id)
+    if not session_obj:
+        telemetry_event('sessions.restore.session_not_found', payload={'session_id': session_id}, severity='warning')
+        return error_response('session_not_found', 'Session not found.', 404)
+
+    try:
+        payload = restore_session_record(session_obj)
+        db.session.commit()
+        telemetry_metric('sessions.restore.success_total', 1)
+        return jsonify({'restored': True, 'session': payload})
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to restore session: %s', str(exc))
+        telemetry_event('sessions.restore.failed', payload={'session_id': session_id, 'error': str(exc)}, severity='error')
+        return error_response('session_restore_failed', 'Failed to restore session.', 400)
+
+
 @sessions_bp.route('/<int:session_id>', methods=['DELETE'])
 def delete_session(session_id):
     telemetry_metric('sessions.delete.requests_total', 1)
-    session_obj = db.session.get(Session, session_id)
+    session_obj = workspace_session(session_id)
     if not session_obj:
         telemetry_event('sessions.delete.session_not_found', payload={'session_id': session_id}, severity='warning')
         return error_response('session_not_found', 'Session not found.', 404)
 
+    hard_delete = str(request.args.get('hard', '')).strip().lower() in {'1', 'true', 'yes', 'on'}
     try:
-        session_turn_ids = select(DmTurn.turn_id).where(DmTurn.session_id == session_id)
-        TurnCanonUpdate.query.filter(TurnCanonUpdate.turn_id.in_(session_turn_ids)).delete(synchronize_session=False)
-        StoryFact.query.filter(StoryFact.source_turn_id.in_(session_turn_ids)).update(
-            {StoryFact.source_turn_id: None},
-            synchronize_session=False,
-        )
-        StoryThread.query.filter(StoryThread.origin_turn_id.in_(session_turn_ids)).update(
-            {StoryThread.origin_turn_id: None},
-            synchronize_session=False,
-        )
-        StoryThread.query.filter(StoryThread.last_touched_turn_id.in_(session_turn_ids)).update(
-            {StoryThread.last_touched_turn_id: None},
-            synchronize_session=False,
-        )
-        StoryThread.query.filter(StoryThread.resolved_turn_id.in_(session_turn_ids)).update(
-            {StoryThread.resolved_turn_id: None},
-            synchronize_session=False,
-        )
-        StoryEntity.query.filter(StoryEntity.first_seen_turn_id.in_(session_turn_ids)).update(
-            {StoryEntity.first_seen_turn_id: None},
-            synchronize_session=False,
-        )
-        StoryEntity.query.filter(StoryEntity.last_seen_turn_id.in_(session_turn_ids)).update(
-            {StoryEntity.last_seen_turn_id: None},
-            synchronize_session=False,
-        )
-
-        StoryEntity.query.filter_by(session_id=session_id).update({StoryEntity.session_id: None}, synchronize_session=False)
-        DmCoherenceFeedback.query.filter_by(session_id=session_id).delete(synchronize_session=False)
-        PlayerAction.query.filter_by(session_id=session_id).delete(synchronize_session=False)
-        SessionState.query.filter_by(session_id=session_id).delete(synchronize_session=False)
-        db.session.delete(session_obj)
+        result = delete_session_record(session_obj, hard_delete=hard_delete)
         db.session.commit()
-        session_turn_coordinator.discard_session(session_id)
-        telemetry_metric('sessions.delete.success_total', 1)
-        return jsonify({'deleted': True, 'session_id': session_id})
+        telemetry_metric(
+            'sessions.delete.success_total' if result.hard_deleted else 'sessions.delete.archived_total',
+            1,
+        )
+        return jsonify(result.payload)
     except Exception as exc:
         db.session.rollback()
         logger.error('Failed to delete session: %s', str(exc))
@@ -364,24 +436,30 @@ def delete_session(session_id):
 @sessions_bp.route('/<int:session_id>/log', methods=['GET'])
 def get_session_log(session_id):
     telemetry_metric('sessions.log.requests_total', 1)
-    session_obj = db.session.get(Session, session_id)
+    session_obj = workspace_session(session_id)
     if not session_obj:
         telemetry_event('sessions.log.session_not_found', payload={'session_id': session_id}, severity='warning')
         return error_response('session_not_found', 'Session not found.', 404)
 
     limit = request.args.get('limit', default=200, type=int)
     limit = max(1, min(limit, 500))
+    before_id = coerce_int(request.args.get('before_id'))
 
-    entries = (
-        SessionLogEntry.query.filter_by(session_id=session_id)
-        .order_by(SessionLogEntry.timestamp.desc(), SessionLogEntry.id.desc())
-        .limit(limit)
-        .all()
-    )
+    query = SessionLogEntry.query.filter_by(session_id=session_id)
+    if before_id is not None:
+        query = query.filter(SessionLogEntry.id < before_id)
+
+    entries = query.order_by(SessionLogEntry.timestamp.desc(), SessionLogEntry.id.desc()).limit(limit + 1).all()
+    has_more = len(entries) > limit
+    if has_more:
+        entries = entries[:limit]
     entries = list(reversed(entries))
     return jsonify(
         {
             'session_id': session_id,
+            'limit': limit,
+            'has_more': has_more,
+            'next_cursor': entries[0].id if has_more and entries else None,
             'entries': [
                 {
                     'id': entry.id,
@@ -399,25 +477,31 @@ def get_session_log(session_id):
 @sessions_bp.route('/<int:session_id>/events', methods=['GET'])
 def get_session_events(session_id):
     telemetry_metric('sessions.events.requests_total', 1)
-    session_obj = db.session.get(Session, session_id)
+    session_obj = workspace_session(session_id)
     if not session_obj:
         telemetry_event('sessions.events.session_not_found', payload={'session_id': session_id}, severity='warning')
         return error_response('session_not_found', 'Session not found.', 404)
 
     limit = request.args.get('limit', default=500, type=int)
     limit = max(1, min(limit, 1000))
+    before_id = coerce_int(request.args.get('before_id'))
 
-    events = (
-        TurnEvent.query.filter_by(session_id=session_id)
-        .order_by(TurnEvent.created_at.desc(), TurnEvent.event_id.desc())
-        .limit(limit)
-        .all()
-    )
+    query = TurnEvent.query.filter_by(session_id=session_id)
+    if before_id is not None:
+        query = query.filter(TurnEvent.event_id < before_id)
+
+    events = query.order_by(TurnEvent.created_at.desc(), TurnEvent.event_id.desc()).limit(limit + 1).all()
+    has_more = len(events) > limit
+    if has_more:
+        events = events[:limit]
     events = list(reversed(events))
     return jsonify(
         {
             'session_id': session_id,
-            'events': [_turn_event_payload(event) for event in events],
+            'limit': limit,
+            'has_more': has_more,
+            'next_cursor': events[0].event_id if has_more and events else None,
+            'events': [turn_event_payload(event) for event in events],
         }
     )
 
@@ -425,10 +509,10 @@ def get_session_events(session_id):
 @sessions_bp.route('/<int:session_id>/state', methods=['GET'])
 def get_session_state(session_id):
     telemetry_metric('sessions.state.requests_total', 1)
-    session_obj = db.session.get(Session, session_id)
+    session_obj = workspace_session(session_id)
     if not session_obj:
         telemetry_event('sessions.state.session_not_found', payload={'session_id': session_id}, severity='warning')
         return error_response('session_not_found', 'Session not found.', 404)
 
     session_state = SessionState.query.filter_by(session_id=session_id).first()
-    return jsonify(_session_state_payload(session_obj, session_state))
+    return jsonify(session_state_payload(session_obj, session_state))

@@ -6,13 +6,13 @@
   <string>local.aidm.backend</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/danny/Downloads/AIDM-main/scripts/launch_backend_service.sh</string>
+    <string>__AIDM_PROGRAM__</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/danny/Downloads/AIDM-main</string>
+  <string>__AIDM_WORKING_DIRECTORY__</string>
   <key>StandardOutPath</key>
-  <string>/Users/danny/Downloads/AIDM-main/tmp/launcher_logs/backend.log</string>
+  <string>__AIDM_STDOUT_LOG__</string>
   <key>StandardErrorPath</key>
-  <string>/Users/danny/Downloads/AIDM-main/tmp/launcher_logs/backend.log</string>
+  <string>__AIDM_STDERR_LOG__</string>
 </dict>
 </plist>

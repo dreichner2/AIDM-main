@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PYTHON="${REPO_ROOT}/.venv/bin/python"
+BACKEND_PORT="${AIDM_BACKEND_PORT:-5050}"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
@@ -15,4 +16,4 @@ if [[ ! -x "${VENV_PYTHON}" ]]; then
 fi
 
 cd "${REPO_ROOT}"
-exec env PORT="${AIDM_BACKEND_PORT:-5050}" ./scripts/run_local_backend.sh
+exec env AIDM_BACKEND_PORT="${BACKEND_PORT}" ./scripts/run_unified_local.sh

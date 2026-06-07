@@ -27,6 +27,73 @@ def test_create_map_rejects_campaign_world_mismatch(client, app):
     assert payload['error_code'] == 'campaign_world_mismatch'
 
 
+def test_create_map_validates_request_body_and_fields(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    non_json_response = client.post('/api/maps', data='not-json', content_type='text/plain')
+    assert non_json_response.status_code == 400
+    assert non_json_response.get_json()['error_code'] == 'validation_error'
+
+    empty_title_response = client.post('/api/maps', json={'title': '   '})
+    assert empty_title_response.status_code == 400
+    assert empty_title_response.get_json()['error_code'] == 'validation_error'
+
+    numeric_title_response = client.post('/api/maps', json={'title': 123})
+    assert numeric_title_response.status_code == 400
+    assert numeric_title_response.get_json()['error_code'] == 'validation_error'
+
+    long_description_response = client.post('/api/maps', json={'title': 'Valid', 'description': 'x' * 2001})
+    assert long_description_response.status_code == 400
+    assert long_description_response.get_json()['error_code'] == 'validation_error'
+
+    invalid_id_response = client.post('/api/maps', json={'title': 'Valid', 'world_id': 'not-an-id'})
+    assert invalid_id_response.status_code == 400
+    assert invalid_id_response.get_json()['error_code'] == 'validation_error'
+
+    invalid_map_data_response = client.post(
+        '/api/maps',
+        json={
+            'title': 'Valid',
+            'world_id': ids['world_id'],
+            'campaign_id': ids['campaign_id'],
+            'map_data': ['not', 'an', 'object'],
+        },
+    )
+    assert invalid_map_data_response.status_code == 400
+    assert invalid_map_data_response.get_json()['error_code'] == 'validation_error'
+
+    orphan_response = client.post('/api/maps', json={'title': 'Ownerless Map', 'map_data': {}})
+    assert orphan_response.status_code == 400
+    assert orphan_response.get_json()['error_code'] == 'validation_error'
+
+
+def test_update_map_validates_mutable_fields(client, app):
+    ids = seed_world_campaign_player_session(app)
+    create_response = client.post(
+        '/api/maps',
+        json={
+            'title': 'Valid Map',
+            'world_id': ids['world_id'],
+            'campaign_id': ids['campaign_id'],
+            'map_data': {'nodes': []},
+        },
+    )
+    assert create_response.status_code == 201
+    map_id = create_response.get_json()['map_id']
+
+    non_json_response = client.patch(f'/api/maps/{map_id}', data='not-json', content_type='text/plain')
+    assert non_json_response.status_code == 400
+    assert non_json_response.get_json()['error_code'] == 'validation_error'
+
+    empty_title_response = client.patch(f'/api/maps/{map_id}', json={'title': '   '})
+    assert empty_title_response.status_code == 400
+    assert empty_title_response.get_json()['error_code'] == 'validation_error'
+
+    invalid_map_data_response = client.patch(f'/api/maps/{map_id}', json={'map_data': 'not-object'})
+    assert invalid_map_data_response.status_code == 400
+    assert invalid_map_data_response.get_json()['error_code'] == 'validation_error'
+
+
 def test_list_maps_returns_404_for_missing_campaign(client):
     response = client.get('/api/maps?campaign_id=99999')
 

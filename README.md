@@ -16,20 +16,23 @@ This README is aligned to the current codebase as of June 2026.
 ## Table of Contents
 1. [Current Beta Status](#current-beta-status)
 2. [Quick Start (Beginner Friendly)](#quick-start-beginner-friendly)
-3. [Enable Gemini AI (Flash with 2.5 Fallback)](#enable-gemini-ai-flash-with-25-fallback)
-4. [Enable NVIDIA Kimi (moonshotai/kimi-k2.5)](#enable-nvidia-kimi-moonshotaikimi-k25)
-5. [Configuration Reference](#configuration-reference)
-6. [One-Command Bootstrap](#one-command-bootstrap)
-7. [REST API Reference](#rest-api-reference)
-8. [Socket.IO Contract](#socketio-contract)
-9. [Auth and Error Contracts](#auth-and-error-contracts)
-10. [Telemetry and Metrics](#telemetry-and-metrics)
-11. [Database and Migrations](#database-and-migrations)
-12. [Testing](#testing)
-13. [Troubleshooting](#troubleshooting)
-14. [Project Structure](#project-structure)
-15. [Known Gaps and Next Steps](#known-gaps-and-next-steps)
-16. [License](#license)
+3. [Remote Multiplayer Play](#remote-multiplayer-play)
+4. [Enable Gemini AI (Flash with 2.5 Fallback)](#enable-gemini-ai-flash-with-25-fallback)
+5. [Enable NVIDIA Kimi (moonshotai/kimi-k2.5)](#enable-nvidia-kimi-moonshotaikimi-k25)
+6. [Enable DeepSeek](#enable-deepseek)
+7. [Enable Deepgram TTS](#enable-deepgram-tts)
+8. [Configuration Reference](#configuration-reference)
+9. [One-Command Bootstrap](#one-command-bootstrap)
+10. [REST API Reference](#rest-api-reference)
+11. [Socket.IO Contract](#socketio-contract)
+12. [Auth and Error Contracts](#auth-and-error-contracts)
+13. [Telemetry and Metrics](#telemetry-and-metrics)
+14. [Database and Migrations](#database-and-migrations)
+15. [Testing](#testing)
+16. [Troubleshooting](#troubleshooting)
+17. [Project Structure](#project-structure)
+18. [Known Gaps and Next Steps](#known-gaps-and-next-steps)
+19. [License](#license)
 
 ---
 
@@ -47,7 +50,7 @@ This README is aligned to the current codebase as of June 2026.
 - Beta hardening essentials (pytest suite, migration chain tests, smoke flow script, release checklist/runbook docs).
 
 ### Partially Implemented / Pending
-- External telemetry backend is optional and not pre-wired to a managed metrics stack.
+- Local Prometheus/Grafana observability is bundled; hosted alerting/provider selection is still deployment-specific.
 - Closed-beta program execution (real users + ongoing telemetry review) is operational work, not fully automated in code.
 - Some Python 3.14+ deprecation warnings may still appear in optional/legacy paths.
 
@@ -63,7 +66,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` applies `requirements.constraints.txt`, which pins the current direct dependency set for repeatable local installs.
+`requirements.txt` installs the full local development set through `requirements-dev.txt`, including tests, migrations, and optional admin UI tooling. Minimal runtime installs can use `requirements.runtime.txt`. All Python install paths apply `requirements.constraints.txt`, which pins the current direct dependency set for repeatable local installs.
 
 ### 2) Start backend immediately (no AI key required)
 This runs migrations, validates config/endpoints, then starts the server.
@@ -87,7 +90,7 @@ The canonical local frontend is the React app in `aidm_frontend/`.
 ```bash
 cd aidm_frontend
 npm ci
-VITE_AIDM_API_BASE_URL=http://127.0.0.1:5050 npm run dev -- --host 127.0.0.1
+npm run dev -- --host 127.0.0.1
 ```
 
 Open the printed Vite URL, usually:
@@ -95,16 +98,97 @@ Open the printed Vite URL, usually:
 http://127.0.0.1:5173/
 ```
 
-The hosted client can also connect to a local backend. Open
-[aidm-client.vercel.app](https://aidm-client.vercel.app) and use:
-```text
-http://127.0.0.1:5050
-```
+The Vite dev server proxies `/api/*` and `/socket.io/*` to the local backend,
+so the frontend can use same-origin requests during development. Override the
+proxy target with `VITE_AIDM_PROXY_TARGET=http://127.0.0.1:5050` if your backend
+is on a different port.
 
-If your browser blocks mixed/private-network requests from HTTPS client to local HTTP backend, keep:
+If you run the frontend from a different host or scheme and your browser blocks
+private-network requests to the local HTTP backend, keep:
 ```bash
 AIDM_CORS_ALLOW_PRIVATE_NETWORK=true
 ```
+
+### 5) Single-link local playtest
+For a multiplayer playtest, prefer the unified server. It builds the frontend
+and serves it from the Flask backend, so API calls, Socket.IO, TTS, and shared
+session links all use one origin.
+
+```bash
+make unified
+```
+
+Open:
+```text
+http://127.0.0.1:5050/
+```
+
+---
+
+## Remote Multiplayer Play
+
+Remote friends can join the same campaign/session as long as every browser can
+reach the same public origin. Do not share a `127.0.0.1` or `localhost` URL with
+remote players; that points to each player's own computer.
+
+Recommended one-link setup:
+
+- Run `make unified` so Flask serves both the UI and `/api/*`.
+- Expose only backend port `5050` through a public HTTPS tunnel or deployment.
+- Leave Backend Settings' Backend URL blank. Blank means "same origin".
+- Share an in-game session link. It includes `campaign` and `session`, but not a
+  local `player` id. Each browser should choose an existing character or create
+  a new one in the Join Campaign prompt.
+- For internet exposure, set `AIDM_AUTH_REQUIRED=true` and give invited players
+  the bearer token out of band. The share link intentionally does not include
+  auth tokens.
+
+The Party inspector shows the live Active Players roster for the selected
+session. Socket identity is bound to the joined session/player pair, and
+`send_message` rejects mismatched player/session payloads.
+
+For one backend process, the default in-memory Socket.IO presence and turn
+coordination are fine. For more than one backend worker, use
+`AIDM_RATE_LIMIT_STORE=database`, `AIDM_TURN_COORDINATOR_STORE=database`, and
+deployment-level Socket.IO session affinity or a shared Socket.IO message queue.
+
+Check remote readiness before inviting players:
+
+```bash
+curl https://YOUR_PUBLIC_AIDM_HOST/api/health
+curl https://YOUR_PUBLIC_AIDM_HOST/api/tts/config
+```
+
+### Quick ngrok playtest
+
+For a same-day playtest from your local machine, expose only the unified port.
+
+1. Start the unified server:
+```bash
+AIDM_AUTH_REQUIRED=true \
+AIDM_API_AUTH_TOKENS=choose-a-long-random-token \
+make unified
+```
+
+2. Start one tunnel:
+```bash
+ngrok http 5050
+```
+
+3. Give players the ngrok URL or the in-game Share link after the page loads.
+   If auth is enabled, each player enters the token once in Backend Settings and
+   leaves Backend URL blank.
+
+### Permanent Cloudflare tunnel
+
+For a stable bookmarked URL, point a Cloudflare Tunnel at the same unified port:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:5050
+```
+
+For long-term use, configure a named tunnel and DNS route in Cloudflare, then
+keep running `make unified` locally when you want the game online.
 
 ---
 
@@ -182,9 +266,10 @@ Then run:
 .venv/bin/python scripts/check_llm_provider.py
 ```
 
-DeepSeek-compatible defaults live in `aidm_server/config.py` and
-`aidm_server/llm.py`. Rotate any provider key that has been pasted into chat,
-screenshots, docs, or issue text.
+DeepSeek-compatible defaults and credential boundaries live in
+`aidm_server/provider_registry.py` and `aidm_server/llm_providers.py`. Rotate
+any provider key that has been pasted into chat, screenshots, docs, or issue
+text.
 
 ---
 
@@ -205,7 +290,8 @@ curl http://127.0.0.1:5050/api/tts/config
 
 Notes:
 - The frontend strips markdown/thought tags before speech.
-- The backend streams MP3 audio from `/api/tts/speak`.
+- The backend streams MP3 audio from `/api/tts/stream`; `/api/tts/speak` is kept as a compatible alias.
+- TTS responses include `X-AIDM-TTS-Chunk-Count` and `X-AIDM-TTS-First-Chunk-Chars` headers. Mid-stream upstream chunk failures are recorded in telemetry.
 - If TTS is toggled on but silent, check `/api/tts/config`, browser autoplay
   policy, and visible frontend errors.
 - Long narrator responses are chunked; first speech should begin before the
@@ -222,8 +308,10 @@ All runtime config is centralized in `aidm_server/config.py`.
 | `AIDM_ENV` | `development` | Environment mode (`development`, `test`, `production`). |
 | `AIDM_DEBUG` | `true` when not production | Flask debug mode. |
 | `FLASK_SECRET_KEY` | random ephemeral key outside production; required in production | Flask session/app secret. |
-| `AIDM_DATABASE_URI` | `sqlite:///instance/dnd_ai_dm.db` | SQLAlchemy DB URL. |
-| `AIDM_AUTO_CREATE_SCHEMA` | `true` | Entry-point runtime may call `db.create_all()` before serving. Set `false` when relying strictly on migrations. |
+| `AIDM_DATABASE_URI` | `~/.aidm/dnd_ai_dm.db` via `AIDM_LOCAL_DATA_DIR` | SQLAlchemy DB URL. Defaults to a local user data directory outside the repo; set `AIDM_DATABASE_URI` for an explicit database. |
+| `AIDM_AUTO_CREATE_SCHEMA` | `true` outside production, `false` in production | Entry-point runtime may call `db.create_all()` before serving for local convenience. Production must use migrations and rejects auto schema creation. |
+| `AIDM_SERVE_FRONTEND` | `false` | Serves the built React frontend from Flask when `true`, enabling same-origin `/api/*`, `/socket.io/*`, and TTS through one public URL. |
+| `AIDM_FRONTEND_DIST_DIR` | `aidm_frontend/dist` | Static frontend build directory used when `AIDM_SERVE_FRONTEND=true`. |
 | `AIDM_MAX_REQUEST_BYTES` | `1048576` | Max request body size (bytes). |
 | `AIDM_CORS_ALLOWLIST` | `*` in debug, empty in production | Comma-separated allowed origins for REST `/api/*`. |
 | `AIDM_SOCKET_CORS_ALLOWLIST` | mirrors `AIDM_CORS_ALLOWLIST` | Comma-separated allowed origins for Socket.IO. |
@@ -231,6 +319,11 @@ All runtime config is centralized in `aidm_server/config.py`.
 | `AIDM_SOCKETIO_ASYNC_MODE` | `threading` | Socket.IO async mode. |
 | `AIDM_AUTH_REQUIRED` | `false` | Enforce bearer token auth for API/socket (except `/api/health`). |
 | `AIDM_API_AUTH_TOKENS` | empty | Comma-separated valid bearer tokens. |
+| `AIDM_ADMIN_PASSCODE` | unset | Enables authenticated Admin composer messages. Admin turns require `action_intent.kind=admin` plus this passcode and are converted into enforced DM override instructions. |
+| `AIDM_RATE_LIMIT_STORE` | `memory` | Rate-limit storage backend: `memory` for local single-process runs, `database` to share limits across workers. |
+| `AIDM_TURN_COORDINATOR_STORE` | `memory` | Per-session turn serialization backend: `memory` for local single-process runs, `database` to share turn locks across workers. |
+| `AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS` | `900` | Database turn-lock lease duration before a stale owner can be reclaimed. |
+| `AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS` | `50` | Database turn-lock retry interval while another worker owns the session. |
 | `AIDM_RATE_LIMIT_WINDOW_SECONDS` | `30` | Fixed window size for API/socket limits. |
 | `AIDM_RATE_LIMIT_MAX_API_REQUESTS` | `120` | Max API requests per key+window. |
 | `AIDM_RATE_LIMIT_MAX_SOCKET_MESSAGES` | `40` | Max socket messages per sid/session+window. |
@@ -244,19 +337,27 @@ All runtime config is centralized in `aidm_server/config.py`.
 | `GOOGLE_GENAI_API_KEY` | unset | Gemini API key. |
 | `AIDM_DEEPSEEK_API_KEY` | unset | DeepSeek API key. |
 | `AIDM_DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek/OpenAI-compatible base URL. |
+| `AIDM_DEEPSEEK_TIMEOUT_SECONDS` | `180` | Backward-compatible default read timeout for DeepSeek calls. |
+| `AIDM_DEEPSEEK_CONNECT_TIMEOUT_SECONDS` | `10` | DeepSeek TCP/TLS connect timeout. |
+| `AIDM_DEEPSEEK_READ_TIMEOUT_SECONDS` | `AIDM_DEEPSEEK_TIMEOUT_SECONDS` | DeepSeek response/read timeout. |
 | `AIDM_NVIDIA_API_KEY` | unset | NVIDIA API key (used when `AIDM_LLM_PROVIDER=nvidia`). |
 | `AIDM_NVIDIA_INVOKE_URL` | `https://integrate.api.nvidia.com/v1` | NVIDIA base URL (auto-normalized to `/chat/completions`). |
 | `AIDM_NVIDIA_THINKING` | `true` | Official Kimi thinking control (`thinking.type=enabled|disabled`). |
 | `AIDM_NVIDIA_MAX_TOKENS` | `16384` | Max completion tokens for NVIDIA provider. |
 | `AIDM_NVIDIA_TEMPERATURE` | `1.0` thinking / `0.6` instant | Sampling temperature for NVIDIA provider. |
 | `AIDM_NVIDIA_TOP_P` | `0.95` | Top-p sampling for NVIDIA provider. |
-| `AIDM_NVIDIA_TIMEOUT_SECONDS` | `60` | Request timeout for NVIDIA provider calls. |
+| `AIDM_NVIDIA_TIMEOUT_SECONDS` | `60` | Backward-compatible default read timeout for NVIDIA provider calls. |
+| `AIDM_NVIDIA_CONNECT_TIMEOUT_SECONDS` | `10` | NVIDIA TCP/TLS connect timeout. |
+| `AIDM_NVIDIA_READ_TIMEOUT_SECONDS` | `AIDM_NVIDIA_TIMEOUT_SECONDS` | NVIDIA response/read timeout. |
 | `AIDM_DEEPGRAM_API_KEY` | unset | Deepgram API key for optional TTS. |
-| `AIDM_DEEPGRAM_TTS_MODEL` | `aura-2-draco-en` | Deepgram speech model used by `/api/tts/speak`. |
+| `AIDM_DEEPGRAM_TTS_MODEL` | `aura-2-draco-en` | Deepgram speech model used by `/api/tts/stream` and `/api/tts/speak`. |
+| `AIDM_DEEPGRAM_TTS_CONNECT_TIMEOUT_SECONDS` | `3` | Deepgram TTS TCP/TLS connect timeout. |
+| `AIDM_DEEPGRAM_TTS_READ_TIMEOUT_SECONDS` | `60` | Deepgram TTS response/read timeout. |
 | `AIDM_TELEMETRY_ENABLED` | `false` | Enables outbound telemetry events. |
 | `AIDM_TELEMETRY_ENDPOINT` | empty | External telemetry ingest endpoint. |
 | `AIDM_TELEMETRY_API_KEY` | unset | Bearer token for telemetry endpoint. |
 | `AIDM_TELEMETRY_TIMEOUT_SECONDS` | `2` | External telemetry request timeout. |
+| `AIDM_TELEMETRY_MAX_QUEUE_SIZE` | `1000` | Max queued outbound telemetry events before dropping. |
 | `HOST` | `0.0.0.0` | Bootstrap server host. |
 | `PORT` | `5000` (bootstrap), `5050` via `run_local_backend.sh` | Server port. |
 
@@ -295,33 +396,43 @@ Base path: `/api`
 
 ### Worlds
 - `POST /api/worlds`
+- `GET /api/worlds`
+  - Query params: `limit` (1..200, default 100), `before_id` for older-world cursors
 - `GET /api/worlds/<world_id>`
 
 ### Campaigns
 - `POST /api/campaigns`
 - `GET /api/campaigns`
 - `GET /api/campaigns/<campaign_id>`
+- `PATCH /api/campaigns/<campaign_id>`
+- `POST /api/campaigns/<campaign_id>/archive`
+- `POST /api/campaigns/<campaign_id>/restore`
+- `DELETE /api/campaigns/<campaign_id>`
 
 ### Players
 - `GET /api/players/campaigns/<campaign_id>/players`
 - `POST /api/players/campaigns/<campaign_id>/players`
 - `GET /api/players/<player_id>`
+- `PATCH /api/players/<player_id>`
 
 ### Sessions
 - `POST /api/sessions/start`
+  - Payload: `{ "campaign_id": 1, "name": "<optional>", "client_session_id": "<optional retry key>" }`
+  - Replaying the same `client_session_id` or `idempotency_key` for a campaign returns the existing session with `idempotent_replay: true`.
 - `POST /api/sessions/<session_id>/end`
 - `GET /api/sessions/campaigns/<campaign_id>/sessions`
 - `GET /api/sessions/<session_id>/log`
-  - Query param: `limit` (1..500, default 200)
+  - Query params: `limit` (1..500, default 200), `before_id` for older-history cursors
 - `GET /api/sessions/<session_id>/state`
 - `PATCH /api/sessions/<session_id>`
-  - Payload: `{ "name": "New session name" }`
+  - Payload: `{ "name": "New session name", "expected_updated_at": "<optional ISO timestamp>" }`
+- `POST /api/sessions/<session_id>/archive`
+- `POST /api/sessions/<session_id>/restore`
 - `DELETE /api/sessions/<session_id>`
+  - Archives by default. Use `?hard=true` only for local cleanup.
 
-Session delete is currently a hard delete for the session transcript/projections.
-Session-owned rows are removed, and canon rows that reference deleted turns are
-kept but have turn/session references nulled where needed. Use this as a local
-cleanup feature until product-level archive/restore semantics are added.
+Session delete is archive-by-default so normal UI deletes hide a session without
+destroying its turn history. Hard delete remains explicit for local cleanup.
 
 ### Maps
 - `POST /api/maps`
@@ -339,6 +450,7 @@ cleanup feature until product-level archive/restore semantics are added.
 ### System and Beta
 - `GET /api/health`
 - `GET /api/metrics`
+- `GET /api/metrics/prometheus`
 - `GET /api/beta/summary`
 - `POST /api/feedback/coherence`
 
@@ -363,8 +475,15 @@ cleanup feature until product-level archive/restore semantics are added.
 - `leave_session`
   - `{ "session_id": <int>, "player_id": <int> }`
 - `send_message`
-  - Required: `session_id`, `campaign_id`, `world_id`, `player_id`, `message`
-  - Optional auth token fields: `token` or `auth_token`
+  - Required: `session_id`, `campaign_id`, `player_id`, `message`
+  - Optional context hint: `world_id` (the engine uses the campaign's world as authoritative)
+  - Optional idempotency: `client_message_id`
+  - Optional typed action metadata: `action_intent`
+    - `kind`: `message`, `roll`, `ability`, `item`, `emote`, `ooc`, or `admin`
+    - Roll intent includes `die`, `mode`, `modifier`, `rolls`, `kept`, `total`, `result_visibility`, and `reason`
+    - Ability and item intents carry selected character stat/inventory metadata
+    - Admin intents require a separate `admin_passcode` payload value matching `AIDM_ADMIN_PASSCODE`; the passcode is validated before turn creation and is not persisted.
+  - Auth tokens are not accepted in event payloads; use the socket auth payload or bearer header instead.
 
 ### Server -> Client events
 - `active_players`
@@ -376,6 +495,7 @@ cleanup feature until product-level archive/restore semantics are added.
 - `dm_response_start`
 - `dm_chunk`
 - `dm_response_end`
+- `turn_status` (`received`, `narrating`, `response_complete`, `saving`, `saved`, `canon_pending`, `canon_applied`, `failed`)
 - `session_log_update`
 - `error`
 
@@ -412,6 +532,10 @@ If auth is required, token can be supplied by:
 
 Do not put auth tokens in socket event payloads or query strings.
 
+Presence and connection state are wrapped by `aidm_server.socket_state.SocketState`.
+The default store remains process-local for local play; use a shared store before
+running multiple Socket.IO workers.
+
 ### Error envelope
 HTTP and socket errors share this shape:
 ```json
@@ -436,6 +560,23 @@ HTTP and socket errors share this shape:
 - in-memory counters
 - timing aggregates
 - beta summary block
+
+`GET /api/metrics/prometheus` returns the same counters and timing aggregates in Prometheus text exposition format. Beta summary fields are exposed as `aidm_beta_*` gauges.
+
+### Local Prometheus/Grafana stack
+The repo includes a local beta observability bundle under `observability/`.
+
+```bash
+./scripts/run_local_backend.sh
+cd observability
+docker compose up
+```
+
+- Prometheus: http://localhost:9090
+- Grafana: http://localhost:3001
+- Grafana credentials: `aidm` / `aidm`
+
+Prometheus scrapes `host.docker.internal:5050/api/metrics/prometheus` by default. Update `observability/prometheus.yml` if your Docker runtime needs a different host address.
 
 ### Beta summary endpoint
 `GET /api/beta/summary` includes:
@@ -463,6 +604,12 @@ export AIDM_TELEMETRY_TIMEOUT_SECONDS=2
 - `0003_turn_confidence_feedback`
 - `0004_emergent_memory_runtime`
 - `0005_turn_event_spine`
+- `0006_metadata_status_and_indexes`
+- `0007_rate_limit_events`
+- `0008_session_delete_semantics`
+- `0009_canon_jobs`
+- `0010_review_addendum_hardening`
+- `0011_session_turn_locks`
 
 ### Run migrations manually
 ```bash
@@ -473,6 +620,7 @@ flask db upgrade
 ### Notes
 - `AIDM_AUTO_CREATE_SCHEMA=true` still supports local bootstrap convenience through the explicit runtime entrypoint.
 - For stricter environments, set `AIDM_AUTO_CREATE_SCHEMA=false` and rely on migrations only.
+- `scripts/reproject_session.py` expects schema to already exist. Use `--create-schema` only for local/test repair databases; production rejects that flag.
 
 ---
 
@@ -497,6 +645,41 @@ By default, the smoke flow uses an isolated in-memory database and deterministic
 fallback provider. Use `--use-local-env` only when you intentionally want to run
 against `.env.local`, the configured database, and the configured provider.
 
+### Run browser smoke flow
+```bash
+cd aidm_frontend
+npx playwright install chromium
+npm run smoke:browser
+```
+
+The browser smoke starts an isolated fallback backend with a temporary SQLite
+database, starts the React dev server against it, then verifies the playable UI
+path: create a campaign, create a player, start a session, handle unavailable
+TTS, send an action, receive a streamed DM response, delete the session, import
+a saved session JSON file, verify the restored log, and delete the imported
+session.
+
+### Session export and import
+
+The React session toolbar can export the currently selected session to JSON.
+Exports include selected IDs, session state, log entries, turn events, campaign
+canon, maps, segments, and runtime metrics when those endpoints are available.
+The Import action accepts that JSON and posts it to `POST /api/sessions/import`.
+The backend creates a new active session in the target campaign, restores
+session state, imports canonical turn events when present, and falls back to
+legacy log entries for older export files.
+
+### Run visual smoke screenshots
+```bash
+cd aidm_frontend
+npm run smoke:visual
+```
+
+The visual smoke uses the same isolated fallback setup, drives a real turn, and
+captures desktop, short-height desktop, and mobile screenshots under
+`tmp/verification_artifacts/visual-smoke/`. It fails on Vite overlays, browser
+console errors, horizontal overflow, or desktop top/composer/inspector clipping.
+
 ---
 
 ## Production And Local-Only Boundaries
@@ -506,14 +689,22 @@ Local development conveniences should not be treated as production defaults:
 - `.env.local` writes from `/api/llm/config` are for local runtime switching.
 - Wildcard CORS is local/debug only; production bootstrap rejects wildcard CORS.
 - `AIDM_AUTH_REQUIRED=false` is local/private-network only.
-- SQLite and local DB backups are developer data, not a shared deployment store.
+- SQLite and local DB backups are developer data, not source fixtures or a shared deployment store. Local defaults use `~/.aidm/`; do not put active DBs or backups under `aidm_server/instance/` before packaging or sharing.
 - Flask admin is a local/admin surface and should be deliberately gated.
-- In-memory rate limiting and module-global socket state are single-process only.
+- In-memory rate limiting, the in-memory turn coordinator, and module-global socket state are single-process only. For multiple backend workers, use `AIDM_RATE_LIMIT_STORE=database` and `AIDM_TURN_COORDINATOR_STORE=database`, and keep Socket.IO session affinity or a shared Socket.IO message queue in the deployment layer.
 - `scripts/smoke_beta_flow.py` defaults to isolated fallback mode to avoid
   local DB pollution and provider spend.
+- Browser QA screenshots and traces should live under ignored paths such as
+  `tmp/verification_artifacts/`, which is removed by `scripts/cleanup_artifacts.sh`.
+- Use `make source-archive` when sharing the project source. The archive is
+  written under ignored `tmp/release/` and excludes local dependencies,
+  frontend build output, runtime caches, SQLite data, logs, and `.env.local`.
+- Use `make clean-deps` only for source-only handoff or commit prep when you
+  want to remove `.venv` and `aidm_frontend/node_modules` from the local tree.
 
-Bootstrap tightens `.env.local` to `0600`, `aidm_server/instance` to `0700`,
-and local SQLite database/backups to `0600` when those files are present.
+Bootstrap tightens `.env.local` to `0600`, local SQLite data directories such
+as `~/.aidm` or `aidm_server/instance` to `0700`, and local SQLite
+database/backups to `0600` when those files are present.
 
 ### Release docs
 - `docs/release_checklist.md`
@@ -566,7 +757,7 @@ AIDM-main/
 │   ├── llm.py                 # Provider abstraction + Gemini/fallback
 │   ├── logging_context.py     # Correlation/session/turn log context
 │   ├── models.py              # SQLAlchemy models
-│   ├── rate_limiter.py        # Fixed-window limiter
+│   ├── rate_limiter.py        # Pluggable fixed-window limiter
 │   ├── rules.py               # D&D-lite rules hints
 │   ├── segment_triggers.py    # Segment trigger evaluator
 │   └── telemetry.py           # Metrics/events + optional outbound delivery
@@ -589,7 +780,7 @@ AIDM-main/
 ## Known Gaps and Next Steps
 
 Still open from the long-range vision:
-- Full external telemetry/observability stack integration (Prometheus/Grafana or managed equivalent) is not bundled.
+- Hosted observability provider selection, alert routing, and production dashboard ownership remain deployment-specific. A local Prometheus/Grafana bundle is available under `observability/`.
 - Closed-beta execution and post-beta prioritization remain ongoing product operations.
 - Canon extraction still blends provider-assisted parsing with deterministic heuristics; deeper semantic contradiction policies can be added in a later pass.
 - Potential Python 3.14 deprecation cleanup (where applicable) can be finished in a dedicated maintenance pass.

@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: AIDM
+    orgId: 1
+    folder: AIDM
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

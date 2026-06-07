@@ -3,202 +3,137 @@ from __future__ import annotations
 import logging
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import func
+from sqlalchemy import func, or_
+from sqlalchemy.orm import joinedload
 
+from aidm_server.canon_jobs import canon_job_status_counts
 from aidm_server.database import db
 from aidm_server.errors import error_response
 from aidm_server.models import (
     Campaign,
     CampaignSegment,
+    CanonJob,
+    DmCoherenceFeedback,
     DmTurn,
     Map,
     Player,
     Session,
-    SessionLogEntry,
-    SessionState,
     StoryEntity,
+    StoryEvent,
     StoryFact,
     StoryThread,
     TurnCanonUpdate,
-    World,
+    TurnEvent,
     safe_json_loads,
 )
-from aidm_server.validation import coerce_int, missing_fields, parse_json_body
+from aidm_server.pagination import limited_page
+from aidm_server.response_dtos import (
+    campaign_is_archived,
+    campaign_payload,
+    campaign_payloads,
+    isoformat,
+)
+from aidm_server.services.workspace import campaign_workspace_payload
+from aidm_server.services.session_lifecycle import delete_session_record
+from aidm_server.time_utils import utc_now
+from aidm_server.validation import (
+    coerce_int,
+    missing_fields,
+    optional_text as _optional_text,
+    parse_json_body,
+    required_text as _required_text,
+)
+from aidm_server.workspace_access import (
+    campaign_query,
+    current_workspace_id,
+    get_campaign as workspace_campaign,
+    get_world as workspace_world,
+)
 
 
 logger = logging.getLogger(__name__)
 campaigns_bp = Blueprint('campaigns', __name__)
 CAMPAIGN_TITLE_MAX_LENGTH = 120
 CAMPAIGN_TEXT_MAX_LENGTH = 2000
+ACTIVE_STATUS = 'active'
+ARCHIVED_STATUS = 'archived'
 
 
-def _isoformat(value):
-    return value.isoformat() if value else None
-
-
-def _optional_text(value, *, max_length: int, field: str, default: str | None = ''):
-    if value is None:
-        return default, None
-    text = str(value).strip()
-    if len(text) > max_length:
-        return None, f'{field} must be {max_length} characters or fewer.'
-    return text, None
-
-
-def _required_text(value, *, max_length: int, field: str):
-    text, error = _optional_text(value, max_length=max_length, field=field, default='')
-    if error:
-        return None, error
-    if not text:
-        return None, f'{field} is required.'
-    return text, None
-
-
-def _latest_isoformat(*values):
-    iso_values = []
-    for value in values:
-        if not value:
-            continue
-        if isinstance(value, str):
-            iso_values.append(value)
-        else:
-            iso_values.append(value.isoformat())
-    return max(iso_values) if iso_values else None
-
-
-def _campaign_session_summary(campaign: Campaign) -> dict:
-    session_count = db.session.query(func.count(Session.session_id)).filter_by(campaign_id=campaign.campaign_id).scalar() or 0
-    latest_session = (
-        Session.query.filter_by(campaign_id=campaign.campaign_id)
-        .order_by(Session.created_at.desc(), Session.session_id.desc())
-        .first()
+def _stale_update_error(payload: dict, current_updated_at, *, label: str) -> tuple[dict, int] | None:
+    expected = payload.get('expected_updated_at')
+    if expected in (None, ''):
+        return None
+    actual = isoformat(current_updated_at)
+    if str(expected) == str(actual):
+        return None
+    return error_response(
+        'stale_update',
+        f'{label} was updated by another request. Refresh before saving changes.',
+        409,
+        {'expected_updated_at': expected, 'actual_updated_at': actual},
     )
-    latest_log_at = (
-        db.session.query(func.max(SessionLogEntry.timestamp))
-        .join(Session, Session.session_id == SessionLogEntry.session_id)
-        .filter(Session.campaign_id == campaign.campaign_id)
-        .scalar()
+
+
+def _include_archived() -> bool:
+    return str(request.args.get('include_archived', '')).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _pagination_limit(default: int = 100, maximum: int = 500) -> int:
+    return max(1, min(maximum, coerce_int(request.args.get('limit'), default) or default))
+
+
+def _optional_limit_arg(name: str, maximum: int = 500) -> int | None:
+    if name not in request.args:
+        return None
+    return max(1, min(maximum, coerce_int(request.args.get(name), maximum) or maximum))
+
+
+def _active_campaigns_query():
+    return campaign_query().filter(or_(Campaign.status.is_(None), Campaign.status != ARCHIVED_STATUS))
+
+
+def _force_delete_campaign(campaign: Campaign) -> dict:
+    campaign_id = campaign.campaign_id
+    session_rows = Session.query.filter_by(campaign_id=campaign_id).all()
+    session_ids = [session.session_id for session in session_rows]
+    detached_player_ids = [
+        player.player_id for player in Player.query.filter_by(campaign_id=campaign_id).all()
+    ]
+    for session_obj in session_rows:
+        delete_session_record(session_obj, hard_delete=True)
+
+    Player.query.filter_by(campaign_id=campaign_id).update(
+        {Player.campaign_id: None},
+        synchronize_session=False,
     )
-    latest_state_at = (
-        db.session.query(func.max(SessionState.updated_at))
-        .join(Session, Session.session_id == SessionState.session_id)
-        .filter(Session.campaign_id == campaign.campaign_id)
-        .scalar()
+    CanonJob.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    TurnCanonUpdate.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    TurnEvent.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    DmCoherenceFeedback.query.filter(
+        DmCoherenceFeedback.turn_id.in_(
+            db.session.query(DmTurn.turn_id).filter_by(campaign_id=campaign_id),
+        )
+    ).delete(synchronize_session=False)
+    DmTurn.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    StoryFact.query.filter_by(campaign_id=campaign_id).update(
+        {StoryFact.supersedes_fact_id: None},
+        synchronize_session=False,
     )
-    latest_turn_created_at = db.session.query(func.max(DmTurn.created_at)).filter_by(campaign_id=campaign.campaign_id).scalar()
-    latest_turn_completed_at = db.session.query(func.max(DmTurn.completed_at)).filter_by(campaign_id=campaign.campaign_id).scalar()
-
+    StoryFact.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    StoryThread.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    StoryEntity.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    StoryEvent.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    CampaignSegment.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    Map.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    Session.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    db.session.delete(campaign)
     return {
-        'session_count': int(session_count),
-        'latest_session_id': latest_session.session_id if latest_session else None,
-        'latest_activity_at': _latest_isoformat(
-            campaign.created_at,
-            latest_session.created_at if latest_session else None,
-            latest_log_at,
-            latest_state_at,
-            latest_turn_created_at,
-            latest_turn_completed_at,
-        ),
-    }
-
-
-def _campaign_payload(campaign: Campaign) -> dict:
-    return {
-        'campaign_id': campaign.campaign_id,
-        'title': campaign.title,
-        'description': campaign.description,
-        'world_id': campaign.world_id,
-        'created_at': _isoformat(campaign.created_at),
-        'current_quest': campaign.current_quest,
-        'location': campaign.location,
-        **_campaign_session_summary(campaign),
-    }
-
-
-def _player_payload(player: Player) -> dict:
-    return {
-        'player_id': player.player_id,
-        'campaign_id': player.campaign_id,
-        'name': player.name,
-        'character_name': player.character_name,
-        'race': player.race,
-        'class_': player.class_,
-        'char_class': player.class_,
-        'level': player.level,
-    }
-
-
-def _map_payload(map_obj: Map) -> dict:
-    return {
-        'map_id': map_obj.map_id,
-        'world_id': map_obj.world_id,
-        'campaign_id': map_obj.campaign_id,
-        'title': map_obj.title,
-        'description': map_obj.description,
-        'map_data': safe_json_loads(map_obj.map_data, {}),
-        'created_at': _isoformat(map_obj.created_at),
-    }
-
-
-def _segment_payload(segment: CampaignSegment) -> dict:
-    return {
-        'segment_id': segment.segment_id,
-        'campaign_id': segment.campaign_id,
-        'title': segment.title,
-        'description': segment.description,
-        'trigger_condition': segment.trigger_condition,
-        'tags': segment.tags,
-        'is_triggered': segment.is_triggered,
-        'created_at': _isoformat(segment.created_at),
-    }
-
-
-def _session_snapshot(session_obj: Session) -> dict:
-    snapshot = safe_json_loads(session_obj.state_snapshot, {})
-    return snapshot if isinstance(snapshot, dict) else {}
-
-
-def _session_display_name(session_obj: Session, snapshot: dict) -> str:
-    raw_name = snapshot.get('name') or snapshot.get('title')
-    name = str(raw_name or '').strip()
-    return name or f"Session {session_obj.session_id}"
-
-
-def _session_payload(session_obj: Session) -> dict:
-    snapshot = _session_snapshot(session_obj)
-    session_state = SessionState.query.filter_by(session_id=session_obj.session_id).first()
-    latest_log_at = db.session.query(func.max(SessionLogEntry.timestamp)).filter_by(session_id=session_obj.session_id).scalar()
-    latest_turn_created_at = db.session.query(func.max(DmTurn.created_at)).filter_by(session_id=session_obj.session_id).scalar()
-    latest_turn_completed_at = db.session.query(func.max(DmTurn.completed_at)).filter_by(session_id=session_obj.session_id).scalar()
-    turn_count = db.session.query(func.count(DmTurn.turn_id)).filter_by(session_id=session_obj.session_id).scalar() or 0
-    snapshot_updated_at = snapshot.get('updated_at')
-    latest_activity = _latest_isoformat(
-        session_obj.created_at,
-        snapshot_updated_at if isinstance(snapshot_updated_at, str) else None,
-        session_state.updated_at if session_state else None,
-        latest_log_at,
-        latest_turn_created_at,
-        latest_turn_completed_at,
-    )
-    latest_summary = ''
-    if session_state and session_state.rolling_summary:
-        latest_summary = session_state.rolling_summary
-    elif isinstance(snapshot.get('recap'), str):
-        latest_summary = snapshot['recap']
-    elif isinstance(snapshot.get('summary'), str):
-        latest_summary = snapshot['summary']
-
-    return {
-        'session_id': session_obj.session_id,
-        'campaign_id': session_obj.campaign_id,
-        'created_at': _isoformat(session_obj.created_at),
-        'updated_at': latest_activity,
-        'latest_activity_at': latest_activity,
-        'display_name': _session_display_name(session_obj, snapshot),
-        'turn_count': int(turn_count),
-        'latest_summary': latest_summary,
-        'is_archived': bool(snapshot.get('is_archived') or snapshot.get('archived')),
-        'state_snapshot': safe_json_loads(session_obj.state_snapshot, None),
+        'deleted': True,
+        'campaign_id': campaign_id,
+        'archived': False,
+        'hard_deleted': True,
+        'deleted_session_ids': session_ids,
+        'detached_player_ids': detached_player_ids,
     }
 
 
@@ -216,8 +151,8 @@ def _entity_payload(entity: StoryEntity) -> dict:
         'metadata': safe_json_loads(entity.metadata_json, {}),
         'first_seen_turn_id': entity.first_seen_turn_id,
         'last_seen_turn_id': entity.last_seen_turn_id,
-        'created_at': _isoformat(entity.created_at),
-        'updated_at': _isoformat(entity.updated_at),
+        'created_at': isoformat(entity.created_at),
+        'updated_at': isoformat(entity.updated_at),
     }
 
 
@@ -236,7 +171,7 @@ def _fact_payload(fact: StoryFact) -> dict:
         'confidence': fact.confidence,
         'source_turn_id': fact.source_turn_id,
         'supersedes_fact_id': fact.supersedes_fact_id,
-        'created_at': _isoformat(fact.created_at),
+        'created_at': isoformat(fact.created_at),
     }
 
 
@@ -253,8 +188,8 @@ def _thread_payload(thread: StoryThread) -> dict:
         'resolved_turn_id': thread.resolved_turn_id,
         'source': thread.source,
         'metadata': safe_json_loads(thread.metadata_json, {}),
-        'created_at': _isoformat(thread.created_at),
-        'updated_at': _isoformat(thread.updated_at),
+        'created_at': isoformat(thread.created_at),
+        'updated_at': isoformat(thread.updated_at),
     }
 
 
@@ -268,7 +203,7 @@ def _canon_update_payload(update: TurnCanonUpdate) -> dict:
         'status': update.status,
         'extractor_model': update.extractor_model,
         'error_text': update.error_text,
-        'created_at': _isoformat(update.created_at),
+        'created_at': isoformat(update.created_at),
     }
 
 
@@ -317,12 +252,13 @@ def create_campaign():
     if location_error:
         return error_response('validation_error', location_error, 400)
 
-    world = db.session.get(World, world_id)
+    world = workspace_world(world_id)
     if not world:
         return error_response('world_not_found', 'World not found.', 404)
 
     try:
         new_campaign = Campaign(
+            workspace_id=current_workspace_id(),
             title=title,
             description=description,
             world_id=world_id,
@@ -331,7 +267,7 @@ def create_campaign():
         )
         db.session.add(new_campaign)
         db.session.commit()
-        return jsonify({'campaign_id': new_campaign.campaign_id}), 201
+        return jsonify(campaign_payload(new_campaign)), 201
     except Exception as exc:
         db.session.rollback()
         logger.error('Failed to create campaign: %s', str(exc))
@@ -340,64 +276,277 @@ def create_campaign():
 
 @campaigns_bp.route('', methods=['GET'])
 def list_campaigns():
-    campaigns = Campaign.query.order_by(Campaign.created_at.desc()).all()
-    return jsonify(
-        [_campaign_payload(campaign) for campaign in campaigns]
-    )
+    query = campaign_query() if _include_archived() else _active_campaigns_query()
+    before_id = coerce_int(request.args.get('before_id'))
+    if before_id is not None:
+        query = query.filter(Campaign.campaign_id < before_id)
+    limit = _optional_limit_arg('limit')
+    query = query.order_by(Campaign.updated_at.desc(), Campaign.created_at.desc(), Campaign.campaign_id.desc())
+    campaigns = limited_page(query, limit=limit)
+    payloads = campaign_payloads(list(campaigns))
+    response = jsonify(payloads)
+    response.headers['X-AIDM-Has-More'] = 'true' if campaigns._has_more else 'false'
+    if campaigns._has_more and campaigns:
+        response.headers['X-AIDM-Next-Cursor'] = str(campaigns[-1].campaign_id)
+    return response
 
 
 @campaigns_bp.route('/<int:campaign_id>', methods=['GET'])
 def get_campaign(campaign_id):
-    campaign = db.session.get(Campaign, campaign_id)
+    campaign = workspace_campaign(campaign_id)
     if not campaign:
         return error_response('campaign_not_found', 'Campaign not found.', 404)
 
-    return jsonify(_campaign_payload(campaign))
+    return jsonify(campaign_payload(campaign))
+
+
+@campaigns_bp.route('/<int:campaign_id>', methods=['PATCH'])
+def update_campaign(campaign_id):
+    payload = parse_json_body(request)
+    if payload is None:
+        return error_response('validation_error', 'Expected JSON request body.', 400)
+
+    campaign = workspace_campaign(campaign_id)
+    if not campaign:
+        return error_response('campaign_not_found', 'Campaign not found.', 404)
+
+    stale_response = _stale_update_error(payload, campaign.updated_at, label='Campaign')
+    if stale_response:
+        return stale_response
+
+    allowed_fields = {'title', 'description', 'current_quest', 'location', 'world_id'}
+    if not any(field in payload for field in allowed_fields):
+        return error_response('validation_error', 'No supported campaign fields were provided.', 400)
+
+    try:
+        if 'title' in payload:
+            title, title_error = _required_text(
+                payload.get('title'),
+                max_length=CAMPAIGN_TITLE_MAX_LENGTH,
+                field='title',
+            )
+            if title_error:
+                return error_response('validation_error', title_error, 400)
+            campaign.title = title
+
+        if 'description' in payload:
+            description, description_error = _optional_text(
+                payload.get('description'),
+                max_length=CAMPAIGN_TEXT_MAX_LENGTH,
+                field='description',
+            )
+            if description_error:
+                return error_response('validation_error', description_error, 400)
+            campaign.description = description
+
+        if 'current_quest' in payload:
+            current_quest, current_quest_error = _optional_text(
+                payload.get('current_quest'),
+                max_length=CAMPAIGN_TEXT_MAX_LENGTH,
+                field='current_quest',
+                default=None,
+            )
+            if current_quest_error:
+                return error_response('validation_error', current_quest_error, 400)
+            campaign.current_quest = current_quest
+
+        if 'location' in payload:
+            location, location_error = _optional_text(
+                payload.get('location'),
+                max_length=CAMPAIGN_TEXT_MAX_LENGTH,
+                field='location',
+                default=None,
+            )
+            if location_error:
+                return error_response('validation_error', location_error, 400)
+            campaign.location = location
+
+        if 'world_id' in payload:
+            world_id = coerce_int(payload.get('world_id'))
+            if world_id is None or world_id < 1:
+                return error_response('validation_error', 'A valid world ID is required.', 400)
+            world = workspace_world(world_id)
+            if not world:
+                return error_response('world_not_found', 'World not found.', 404)
+            campaign.world_id = world_id
+
+        campaign.updated_at = utc_now()
+        db.session.commit()
+        return jsonify(campaign_payload(campaign))
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to update campaign: %s', str(exc))
+        return error_response('campaign_update_failed', 'Failed to update campaign.', 400)
+
+
+@campaigns_bp.route('/<int:campaign_id>/archive', methods=['POST'])
+def archive_campaign(campaign_id):
+    campaign = workspace_campaign(campaign_id)
+    if not campaign:
+        return error_response('campaign_not_found', 'Campaign not found.', 404)
+
+    try:
+        campaign.status = ARCHIVED_STATUS
+        campaign.updated_at = utc_now()
+        Session.query.filter(
+            Session.campaign_id == campaign_id,
+            or_(Session.status.is_(None), Session.status != ARCHIVED_STATUS),
+        ).update(
+            {
+                Session.status: ARCHIVED_STATUS,
+                Session.deleted_at: campaign.updated_at,
+                Session.updated_at: campaign.updated_at,
+                Session.archived_by_campaign_id: campaign_id,
+            },
+            synchronize_session=False,
+        )
+        db.session.commit()
+        return jsonify({'archived': True, 'campaign': campaign_payload(campaign)})
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to archive campaign: %s', str(exc))
+        return error_response('campaign_archive_failed', 'Failed to archive campaign.', 400)
+
+
+@campaigns_bp.route('/<int:campaign_id>/restore', methods=['POST'])
+def restore_campaign(campaign_id):
+    campaign = workspace_campaign(campaign_id)
+    if not campaign:
+        return error_response('campaign_not_found', 'Campaign not found.', 404)
+
+    try:
+        campaign.status = ACTIVE_STATUS
+        campaign.updated_at = utc_now()
+        Session.query.filter_by(campaign_id=campaign_id, archived_by_campaign_id=campaign_id).update(
+            {
+                Session.status: ACTIVE_STATUS,
+                Session.deleted_at: None,
+                Session.updated_at: campaign.updated_at,
+                Session.archived_by_campaign_id: None,
+            },
+            synchronize_session=False,
+        )
+        db.session.commit()
+        return jsonify({'restored': True, 'campaign': campaign_payload(campaign)})
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to restore campaign: %s', str(exc))
+        return error_response('campaign_restore_failed', 'Failed to restore campaign.', 400)
+
+
+@campaigns_bp.route('/<int:campaign_id>', methods=['DELETE'])
+def delete_campaign(campaign_id):
+    hard_delete = str(request.args.get('hard', '')).strip().lower() in {'1', 'true', 'yes', 'on'}
+    force_delete = str(request.args.get('force', '')).strip().lower() in {'1', 'true', 'yes', 'on'}
+    campaign = workspace_campaign(campaign_id)
+    if not campaign:
+        return error_response('campaign_not_found', 'Campaign not found.', 404)
+
+    if hard_delete:
+        session_count = db.session.query(func.count(Session.session_id)).filter_by(campaign_id=campaign_id).scalar() or 0
+        if session_count and not force_delete:
+            return error_response(
+                'campaign_has_sessions',
+                'Hard deleting a campaign with sessions is not supported. Archive it instead.',
+                409,
+                {'session_count': int(session_count)},
+            )
+        try:
+            if force_delete:
+                payload = _force_delete_campaign(campaign)
+            else:
+                detached_player_ids = [
+                    player.player_id for player in Player.query.filter_by(campaign_id=campaign_id).all()
+                ]
+                Player.query.filter_by(campaign_id=campaign_id).update(
+                    {Player.campaign_id: None},
+                    synchronize_session=False,
+                )
+                payload = {
+                    'deleted': True,
+                    'campaign_id': campaign_id,
+                    'archived': False,
+                    'hard_deleted': True,
+                    'deleted_session_ids': [],
+                    'detached_player_ids': detached_player_ids,
+                }
+            if not force_delete:
+                db.session.delete(campaign)
+            db.session.commit()
+            return jsonify(payload)
+        except Exception as exc:
+            db.session.rollback()
+            logger.error('Failed to hard delete campaign: %s', str(exc))
+            return error_response('campaign_delete_failed', 'Failed to delete campaign.', 400)
+
+    return archive_campaign(campaign_id)
 
 
 @campaigns_bp.route('/<int:campaign_id>/workspace', methods=['GET'])
 def get_campaign_workspace(campaign_id):
-    campaign = db.session.get(Campaign, campaign_id)
+    campaign = workspace_campaign(campaign_id)
     if not campaign:
         return error_response('campaign_not_found', 'Campaign not found.', 404)
-
-    sessions = Session.query.filter_by(campaign_id=campaign_id).order_by(Session.created_at.desc()).all()
-    session_payloads = [_session_payload(session_obj) for session_obj in sessions]
-    session_payloads.sort(key=lambda item: item.get('latest_activity_at') or '', reverse=True)
-    players = Player.query.filter_by(campaign_id=campaign_id).order_by(Player.created_at.asc(), Player.player_id.asc()).all()
-    maps = Map.query.filter_by(campaign_id=campaign_id).order_by(Map.created_at.desc()).all()
-    segments = CampaignSegment.query.filter_by(campaign_id=campaign_id).order_by(CampaignSegment.created_at.desc()).all()
-    latest_session = session_payloads[0] if session_payloads else None
+    if campaign_is_archived(campaign) and not _include_archived():
+        return error_response('campaign_not_found', 'Campaign not found.', 404)
 
     return jsonify(
-        {
-            'campaign': _campaign_payload(campaign),
-            'sessions': session_payloads,
-            'players': [_player_payload(player) for player in players],
-            'maps': [_map_payload(map_obj) for map_obj in maps],
-            'segments': [_segment_payload(segment) for segment in segments],
-            'summary': {
-                'session_count': len(session_payloads),
-                'player_count': len(players),
-                'map_count': len(maps),
-                'segment_count': len(segments),
-                'latest_session_id': latest_session['session_id'] if latest_session else None,
-                'latest_activity_at': latest_session['latest_activity_at'] if latest_session else _isoformat(campaign.created_at),
-            },
-        }
+        campaign_workspace_payload(
+            campaign,
+            include_archived=_include_archived(),
+            session_limit=_optional_limit_arg('session_limit'),
+            player_limit=_optional_limit_arg('player_limit'),
+            map_limit=_optional_limit_arg('map_limit'),
+            segment_limit=_optional_limit_arg('segment_limit'),
+        )
     )
 
 
 @campaigns_bp.route('/<int:campaign_id>/canon', methods=['GET'])
 def get_campaign_canon(campaign_id):
-    campaign = db.session.get(Campaign, campaign_id)
+    campaign = workspace_campaign(campaign_id)
     if not campaign:
         return error_response('campaign_not_found', 'Campaign not found.', 404)
 
-    entities = StoryEntity.query.filter_by(campaign_id=campaign_id).order_by(StoryEntity.updated_at.desc()).all()
-    facts = StoryFact.query.filter_by(campaign_id=campaign_id).order_by(StoryFact.created_at.desc()).all()
-    threads = StoryThread.query.filter_by(campaign_id=campaign_id).order_by(StoryThread.updated_at.desc()).all()
-    updates = TurnCanonUpdate.query.filter_by(campaign_id=campaign_id).order_by(TurnCanonUpdate.created_at.desc()).all()
+    limit = _pagination_limit(default=100, maximum=500)
+    entity_before = coerce_int(request.args.get('entity_before_id'))
+    fact_before = coerce_int(request.args.get('fact_before_id'))
+    thread_before = coerce_int(request.args.get('thread_before_id'))
+    update_before = coerce_int(request.args.get('update_before_id'))
+
+    entities_query = StoryEntity.query.filter_by(campaign_id=campaign_id)
+    if entity_before is not None:
+        entities_query = entities_query.filter(StoryEntity.entity_id < entity_before)
+    entities = entities_query.order_by(StoryEntity.entity_id.desc()).limit(limit + 1).all()
+
+    facts_query = StoryFact.query.options(
+        joinedload(StoryFact.subject_entity),
+        joinedload(StoryFact.object_entity),
+    ).filter_by(campaign_id=campaign_id)
+    if fact_before is not None:
+        facts_query = facts_query.filter(StoryFact.fact_id < fact_before)
+    facts = facts_query.order_by(StoryFact.fact_id.desc()).limit(limit + 1).all()
+
+    threads_query = StoryThread.query.filter_by(campaign_id=campaign_id)
+    if thread_before is not None:
+        threads_query = threads_query.filter(StoryThread.thread_id < thread_before)
+    threads = threads_query.order_by(StoryThread.thread_id.desc()).limit(limit + 1).all()
+
+    updates_query = TurnCanonUpdate.query.filter_by(campaign_id=campaign_id)
+    if update_before is not None:
+        updates_query = updates_query.filter(TurnCanonUpdate.update_id < update_before)
+    updates = updates_query.order_by(TurnCanonUpdate.update_id.desc()).limit(limit + 1).all()
+
+    has_more = {
+        'entities': len(entities) > limit,
+        'facts': len(facts) > limit,
+        'threads': len(threads) > limit,
+        'updates': len(updates) > limit,
+    }
+    entities = entities[:limit]
+    facts = facts[:limit]
+    threads = threads[:limit]
+    updates = updates[:limit]
 
     return jsonify(
         {
@@ -406,11 +555,20 @@ def get_campaign_canon(campaign_id):
             'facts': [_fact_payload(fact) for fact in facts],
             'threads': [_thread_payload(thread) for thread in threads],
             'updates': [_canon_update_payload(update) for update in updates],
+            'limit': limit,
+            'has_more': has_more,
+            'next_cursor': {
+                'entities': entities[-1].entity_id if has_more['entities'] and entities else None,
+                'facts': facts[-1].fact_id if has_more['facts'] and facts else None,
+                'threads': threads[-1].thread_id if has_more['threads'] and threads else None,
+                'updates': updates[-1].update_id if has_more['updates'] and updates else None,
+            },
             'summary': {
-                'entity_count': len(entities),
-                'fact_count': len(facts),
-                'thread_count': len(threads),
-                'update_count': len(updates),
+                'entity_count': StoryEntity.query.filter_by(campaign_id=campaign_id).count(),
+                'fact_count': StoryFact.query.filter_by(campaign_id=campaign_id).count(),
+                'thread_count': StoryThread.query.filter_by(campaign_id=campaign_id).count(),
+                'update_count': TurnCanonUpdate.query.filter_by(campaign_id=campaign_id).count(),
+                'canon_job_counts': canon_job_status_counts(campaign_id),
             },
         }
     )

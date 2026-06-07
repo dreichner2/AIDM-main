@@ -6,13 +6,13 @@
   <string>local.aidm.frontend</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/danny/Downloads/AIDM-main/scripts/launch_frontend_service.sh</string>
+    <string>__AIDM_PROGRAM__</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/danny/Downloads/AIDM-main/aidm_frontend</string>
+  <string>__AIDM_WORKING_DIRECTORY__</string>
   <key>StandardOutPath</key>
-  <string>/Users/danny/Downloads/AIDM-main/tmp/launcher_logs/frontend.log</string>
+  <string>__AIDM_STDOUT_LOG__</string>
   <key>StandardErrorPath</key>
-  <string>/Users/danny/Downloads/AIDM-main/tmp/launcher_logs/frontend.log</string>
+  <string>__AIDM_STDERR_LOG__</string>
 </dict>
 </plist>

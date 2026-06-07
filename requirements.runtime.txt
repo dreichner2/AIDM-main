@@ -1,0 +1,16 @@
+-c requirements.constraints.txt
+
+flask
+google-genai
+python-dotenv
+SQLAlchemy
+alembic
+python-json-logger
+websocket-client
+flask-socketio
+python-socketio
+flask_sqlalchemy
+flask-cors
+requests
+appdirs
+pywin32; sys_platform == 'win32'

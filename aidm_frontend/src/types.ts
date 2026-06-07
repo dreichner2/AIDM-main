@@ -1,4 +1,22 @@
-export type JsonRecord = Record<string, unknown>
+import type { JsonRecord } from './apiContract.generated'
+
+export type {
+  Campaign,
+  CampaignSegment,
+  CampaignWorkspace,
+  JsonRecord,
+  MapItem,
+  Player,
+  PlayerDetail,
+  SessionImportResponse,
+  SessionEventsResponse,
+  SessionLogEntry,
+  SessionLogResponse,
+  SessionState,
+  SessionSummary,
+  TurnEventPayload,
+  World,
+} from './apiContract.generated'
 
 export type Health = {
   status: string
@@ -34,6 +52,7 @@ export type LlmProviderOption = {
   default_model: string
   configured: boolean
   base_url?: string
+  capabilities?: JsonRecord
   models: LlmModelOption[]
 }
 
@@ -41,6 +60,8 @@ export type LlmRuntimeConfig = {
   current: NonNullable<Health['llm']>
   providers: LlmProviderOption[]
   persisted: boolean
+  runtime_scope?: 'process'
+  restart_required_for_other_workers?: boolean
 }
 
 export type TtsRuntimeConfig = {
@@ -49,140 +70,26 @@ export type TtsRuntimeConfig = {
   model: string
 }
 
-export type Campaign = {
-  campaign_id: number
-  title: string
-  description: string
-  world_id: number
-  created_at: string | null
-  current_quest?: string | null
-  location?: string | null
-  session_count?: number
-  latest_session_id?: number | null
-  latest_activity_at?: string | null
-}
-
-export type World = {
-  world_id: number
-  name: string
-  description: string
-  created_at: string | null
-}
-
-export type SessionSummary = {
-  session_id: number
-  campaign_id: number
-  created_at: string | null
-  updated_at?: string | null
-  latest_activity_at?: string | null
-  display_name?: string
-  turn_count?: number
-  latest_summary?: string
-  is_archived?: boolean
-  state_snapshot: JsonRecord | null
-}
-
-export type CampaignWorkspace = {
-  campaign: Campaign
-  sessions: SessionSummary[]
-  players: Player[]
-  maps: MapItem[]
-  segments: CampaignSegment[]
-  summary: {
-    session_count: number
-    player_count: number
-    map_count: number
-    segment_count: number
-    latest_session_id: number | null
-    latest_activity_at: string | null
-  }
-}
-
 export type CampaignCanon = {
   campaign_id: number
   entities: JsonRecord[]
   facts: JsonRecord[]
   threads: JsonRecord[]
   updates: JsonRecord[]
+  limit?: number
+  has_more?: {
+    entities?: boolean
+    facts?: boolean
+    threads?: boolean
+    updates?: boolean
+  }
+  next_cursor?: {
+    entities?: number | null
+    facts?: number | null
+    threads?: number | null
+    updates?: number | null
+  }
   summary: JsonRecord
-}
-
-export type SessionLogEntry = {
-  id: number
-  message: string
-  entry_type: string
-  metadata: JsonRecord
-  timestamp: string | null
-}
-
-export type SessionLogResponse = {
-  session_id: number
-  entries: SessionLogEntry[]
-}
-
-export type TurnEventPayload = {
-  event_id: number
-  session_id: number
-  campaign_id: number
-  turn_id: number | null
-  player_id: number | null
-  event_type: string
-  payload: JsonRecord
-  created_at: string | null
-}
-
-export type SessionEventsResponse = {
-  session_id: number
-  events: TurnEventPayload[]
-}
-
-export type SessionState = {
-  session_id: number
-  campaign_id: number
-  current_location: string | null
-  current_quest: string | null
-  rolling_summary: string
-  active_segments: unknown[]
-  memory_snippets: unknown[]
-  updated_at: string | null
-}
-
-export type Player = {
-  player_id: number
-  campaign_id: number
-  name: string
-  character_name: string
-  race: string
-  class_: string
-  char_class: string
-  level: number
-}
-
-export type PlayerDetail = Player & {
-  stats: unknown
-  inventory: unknown
-  character_sheet: unknown
-}
-
-export type MapItem = {
-  map_id: number
-  world_id: number | null
-  campaign_id: number | null
-  title: string
-  description: string
-  map_data: JsonRecord
-  created_at: string | null
-}
-
-export type CampaignSegment = {
-  segment_id: number
-  campaign_id: number
-  title: string
-  description: string
-  trigger_condition: string
-  tags: string
-  is_triggered: boolean
-  created_at: string | null
 }
 
 export type BetaSummary = {

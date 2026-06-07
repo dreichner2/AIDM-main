@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
 
 from aidm_server.contracts import SegmentTriggerSpec
+from aidm_server.models import safe_json_loads
 
 
 def parse_trigger_spec(trigger_condition: str | None) -> SegmentTriggerSpec:
@@ -13,13 +13,13 @@ def parse_trigger_spec(trigger_condition: str | None) -> SegmentTriggerSpec:
     if not raw_text:
         return SegmentTriggerSpec(trigger_type="manual", raw={"trigger_condition": ""})
 
-    try:
-        raw = json.loads(raw_text)
+    raw = safe_json_loads(raw_text, None)
+    if isinstance(raw, dict):
         trigger_type = str(raw.get("type", "manual")).strip().lower()
         return SegmentTriggerSpec(trigger_type=trigger_type or "manual", raw=raw)
-    except json.JSONDecodeError:
-        keywords = [k.strip().lower() for k in raw_text.split(",") if k.strip()]
-        return SegmentTriggerSpec(trigger_type="keywords", raw={"keywords": keywords, "match": "any"})
+
+    keywords = [k.strip().lower() for k in raw_text.split(",") if k.strip()]
+    return SegmentTriggerSpec(trigger_type="keywords", raw={"keywords": keywords, "match": "any"})
 
 
 def evaluate_segment_trigger(

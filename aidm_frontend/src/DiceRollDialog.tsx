@@ -35,6 +35,7 @@ type DiceRollStatus = 'rolling' | 'sending'
 type DiceRollDialogProps = {
   die: string
   result: number
+  targetLabel?: string | null
   rollKey: number
   status: DiceRollStatus
   onCancel: () => void
@@ -390,6 +391,7 @@ function DiceCanvas({
 export default function DiceRollDialog({
   die,
   result,
+  targetLabel,
   rollKey,
   status,
   onCancel,
@@ -433,6 +435,7 @@ export default function DiceRollDialog({
           <span>{die.toUpperCase()}</span>
           <strong>{hasLanded || isSending ? result : '...'}</strong>
           <small>{statusText}</small>
+          {targetLabel ? <small>Target: {targetLabel}</small> : null}
         </div>
       </div>
     </section>

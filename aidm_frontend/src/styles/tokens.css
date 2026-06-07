@@ -1,0 +1,66 @@
+:root {
+  --bg: #081010;
+  --surface: #0d1718;
+  --surface-2: #111b1c;
+  --panel: #101819;
+  --paper: #101819;
+  --field: #0b1314;
+  --button: #141c1d;
+  --line: rgba(144, 164, 159, 0.16);
+  --line-strong: rgba(144, 164, 159, 0.26);
+  --line-hot: rgba(255, 107, 44, 0.58);
+  --border: rgba(144, 164, 159, 0.16);
+  --border-strong: rgba(144, 164, 159, 0.26);
+  --heading: #fbf5e8;
+  --text: #c9d0cc;
+  --muted: #8a9793;
+  --faint: #63706d;
+  --orange: #ff6b2c;
+  --orange-soft: rgba(255, 107, 44, 0.14);
+  --accent: #ff6b2c;
+  --accent-2: #ffb067;
+  --teal: #72b59b;
+  --green: #6bdc68;
+  --soft-shadow: 0 12px 34px rgba(0, 0, 0, 0.24);
+  --panel-shadow: 0 14px 34px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.022);
+  --sans:
+    'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Helvetica Neue',
+    Arial, sans-serif;
+  --serif:
+    'Crimson Pro', 'Iowan Old Style', 'Palatino Linotype', Georgia,
+    'Times New Roman', serif;
+  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  color: var(--text);
+  background: var(--bg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.38;
+  letter-spacing: 0;
+  font-weight: 380;
+  font-variant-numeric: tabular-nums;
+  color-scheme: dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.prototype-shell.theme-light {
+  --bg: #eef0e9;
+  --surface: #f7f3ea;
+  --surface-2: #efe7da;
+  --panel: #f8f3e9;
+  --paper: #fbf7ef;
+  --field: #fffaf1;
+  --button: #ece3d6;
+  --line: rgba(55, 67, 62, 0.18);
+  --line-strong: rgba(55, 67, 62, 0.3);
+  --heading: #1b211e;
+  --text: #34413c;
+  --muted: #5c6762;
+  --faint: #89918d;
+  color: var(--text);
+  background:
+    linear-gradient(180deg, rgba(255, 107, 44, 0.055), transparent 190px),
+    linear-gradient(135deg, #f6f1e8 0%, #e9eee9 54%, #f7efe3 100%);
+}

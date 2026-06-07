@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from flask import current_app, session
+from flask import current_app
 from flask_admin import Admin
 from flask_admin import AdminIndexView
 from flask_admin.contrib.sqla import ModelView
 from flask_admin.helpers import is_form_submitted
 
-from aidm_server.auth import request_is_authorized
+from aidm_server.auth import DEFAULT_WORKSPACE_ID, request_is_authorized, request_workspace_id
 
 from aidm_server.models import (
     Campaign,
@@ -29,14 +29,7 @@ from aidm_server.models import (
 
 
 def _admin_request_authorized() -> bool:
-    if session.get('aidm_admin_authorized'):
-        return True
-
-    if request_is_authorized():
-        session['aidm_admin_authorized'] = True
-        return True
-
-    return False
+    return request_is_authorized() and request_workspace_id() == DEFAULT_WORKSPACE_ID
 
 
 class ProtectedAdminMixin:

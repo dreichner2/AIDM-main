@@ -7,47 +7,44 @@ import re
 from typing import Any
 
 from sqlalchemy import func
+from sqlalchemy.orm import joinedload
 
-from aidm_server.contracts import ProviderRequest
+from aidm_server import canon_retrieval as _canon_retrieval
+from aidm_server.canon_inventory import (
+    INVENTORY_GAIN_PATTERNS as _INVENTORY_GAIN_PATTERNS,
+    INVENTORY_LOSS_PATTERNS as _INVENTORY_LOSS_PATTERNS,
+    apply_inventory_changes as _apply_inventory_changes,
+    clean_inventory_item_name as _clean_inventory_item_name,
+    extract_inventory_changes_from_text as _extract_inventory_changes_from_text,
+    inventory_payload,
+    looks_like_inventory_item as _looks_like_inventory_item,
+)
+from aidm_server.canon_location import infer_location_update
+from aidm_server.canon_projection import append_session_memory, refresh_session_projection
+from aidm_server.canon_text import (
+    normalized_name as _normalized_name,
+    optional_float as _optional_float,
+    positive_int as _positive_int,
+)
 from aidm_server.database import db
 from aidm_server.models import (
     Campaign,
     DmTurn,
-    Player,
-    SessionState,
     StoryEntity,
     StoryFact,
     StoryThread,
     TurnCanonUpdate,
-    get_or_create_session_state,
     safe_json_dumps,
     safe_json_loads,
 )
+from aidm_server.prompt_templates import build_canon_extraction_request
 from aidm_server.telemetry import telemetry_event, telemetry_metric
-from aidm_server.time_utils import utc_now
 
-
-_LOCATION_PATTERNS = [
-    re.compile(
-        r'\b(?:enter|entered|arrive(?:d)? at|reach(?:ed)?|head(?:ing)? to|go(?:ing)? to|travel(?:ing)? to|'
-        r'move(?:d)? to|sprint(?:ing)? for|run(?:ning)? for|escape(?:d)? (?:to|through)|'
-        r'slip(?:ped)? into|leap(?:ing)? into|jump(?:ing)? into|vault(?:ing)? onto)\s+'
-        r'(?:the\s+)?([^.,;!?]+)',
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r'\b(?:you reach|you arrive at|you enter|you slip into|you burst into|you move into)\s+'
-        r'(?:the\s+)?([^.,;!?]+)',
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r'\b(?:lead(?:s|ing)?|guide(?:s|d)?|usher(?:s|ed)?|pull(?:s|ed)?)\s+you\s+'
-        r'(?:into|to|toward)\s+(?:the\s+)?([^.,;!?]+)',
-        re.IGNORECASE,
-    ),
-]
 
 _ENTITY_RE = re.compile(r'\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})?\b')
+EMERGENT_ENTITY_CANDIDATE_LIMIT = _canon_retrieval.EMERGENT_ENTITY_CANDIDATE_LIMIT
+EMERGENT_FACT_CANDIDATE_LIMIT = _canon_retrieval.EMERGENT_FACT_CANDIDATE_LIMIT
+EMERGENT_THREAD_CANDIDATE_LIMIT = _canon_retrieval.EMERGENT_THREAD_CANDIDATE_LIMIT
 _ENTITY_STOPWORDS = {
     'The',
     'This',
@@ -75,182 +72,6 @@ _EMPTY_PATCH = {
 _ALLOWED_FACT_CHANGE_TYPES = {'reveal', 'retcon', 'misconception', 'correction'}
 _GLOBAL_SINGLETON_FACTS = {'current_location', 'current_quest'}
 _SUBJECT_SINGLETON_FACTS = {'status', 'role', 'current_holder'}
-_ITEM_HEADWORDS = {
-    'amulet',
-    'armor',
-    'armour',
-    'arrow',
-    'arrows',
-    'axe',
-    'badge',
-    'bag',
-    'blade',
-    'bone',
-    'bones',
-    'book',
-    'bottle',
-    'bow',
-    'box',
-    'bundle',
-    'charm',
-    'chain',
-    'cloak',
-    'coin',
-    'coins',
-    'component',
-    'components',
-    'crown',
-    'crystal',
-    'crystals',
-    'dagger',
-    'feather',
-    'figurine',
-    'flask',
-    'gem',
-    'gems',
-    'hammer',
-    'helmet',
-    'herb',
-    'herbs',
-    'idol',
-    'journal',
-    'key',
-    'keys',
-    'knife',
-    'lantern',
-    'letter',
-    'map',
-    'mask',
-    'medallion',
-    'necklace',
-    'note',
-    'notes',
-    'orb',
-    'package',
-    'parcel',
-    'pendant',
-    'potion',
-    'pouch',
-    'reagent',
-    'reagents',
-    'relic',
-    'ring',
-    'rod',
-    'rope',
-    'sack',
-    'satchel',
-    'scroll',
-    'seal',
-    'shield',
-    'skull',
-    'spear',
-    'staff',
-    'stone',
-    'stones',
-    'supplies',
-    'supply',
-    'sword',
-    'talisman',
-    'token',
-    'tome',
-    'torch',
-    'trinket',
-    'vial',
-    'wand',
-}
-_ITEM_MATERIAL_HINTS = {
-    'amber',
-    'bone',
-    'brass',
-    'bronze',
-    'cloth',
-    'copper',
-    'crystal',
-    'glass',
-    'gold',
-    'iron',
-    'ivory',
-    'jade',
-    'leather',
-    'obsidian',
-    'oak',
-    'onyx',
-    'paper',
-    'rope',
-    'silver',
-    'steel',
-    'wood',
-    'wooden',
-}
-_ITEM_NAME_CONNECTORS = {'of'}
-_NON_ITEM_HEADWORDS = {
-    'advice',
-    'answer',
-    'attention',
-    'chance',
-    'choice',
-    'fear',
-    'glance',
-    'hope',
-    'look',
-    'news',
-    'nod',
-    'path',
-    'permission',
-    'promise',
-    'rumor',
-    'silence',
-    'smile',
-    'stare',
-    'story',
-    'time',
-    'trouble',
-    'truth',
-    'warning',
-    'way',
-    'word',
-}
-_NON_ITEM_TOKENS = {
-    'across',
-    'along',
-    'around',
-    'away',
-    'before',
-    'behind',
-    'deeper',
-    'down',
-    'further',
-    'immediately',
-    'inside',
-    'into',
-    'onto',
-    'outside',
-    'through',
-    'toward',
-    'towards',
-    'under',
-    'within',
-}
-
-_INVENTORY_GAIN_PATTERNS = [
-    re.compile(
-        r'\byou\s+(?:take|pick up|pocket|claim|receive|accept|gather|loot|carry away)\s+'
-        r'(?:the|a|an|some|your)?\s*([a-z][a-z0-9\' -]{1,40}?)(?:\s+from\b|[.,;!?]|$)',
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r'\b[A-Z][a-z]{2,}\s+(?:hands|gives|passes|offers)\s+you\s+'
-        r'(?:the|a|an|some)?\s*([a-z][a-z0-9\' -]{1,40}?)(?:\s+with\b|[.,;!?]|$)',
-        re.IGNORECASE,
-    ),
-]
-_INVENTORY_LOSS_PATTERNS = [
-    re.compile(
-        r'\byou\s+(?:drop|give|hand over|leave behind|discard|consume|use up|spend)\s+'
-        r'(?:the|a|an|some|your)?\s*([a-z][a-z0-9\' -]{1,40}?)(?:\s+to\b|\s+on\b|[.,;!?]|$)',
-        re.IGNORECASE,
-    ),
-]
 
 
 def _empty_patch() -> dict:
@@ -261,65 +82,6 @@ def _empty_patch() -> dict:
         'inventory_changes': [],
         'projection': {},
     }
-
-
-def _normalize_location_candidate(raw_text: str | None) -> str | None:
-    text = (raw_text or '').strip(" \t\r\n'\"`")
-    if not text:
-        return None
-
-    lower = text.lower()
-    split_tokens = [
-        ' and ',
-        ' while ',
-        ' before ',
-        ' after ',
-        ' as ',
-        ' with ',
-        ' but ',
-        ' where ',
-        ' to ',
-        ' through ',
-        ' across ',
-        ' above ',
-        ' unhindered',
-    ]
-    cut = len(text)
-    for token in split_tokens:
-        idx = lower.find(token)
-        if idx != -1 and idx < cut:
-            cut = idx
-
-    cleaned = text[:cut].strip(' -')
-    words = cleaned.split()
-    trailing_noise = {
-        'quietly',
-        'carefully',
-        'quickly',
-        'silently',
-        'safely',
-        'unseen',
-        'unhindered',
-        'immediately',
-    }
-    while words and words[-1].lower().strip('.,;:!?') in trailing_noise:
-        words.pop()
-    if not words:
-        return None
-    return ' '.join(words[:8])
-
-
-def infer_location_update(player_input: str, dm_output: str | None) -> str | None:
-    sources = [player_input or '', dm_output or '']
-    for source in sources:
-        for pattern in _LOCATION_PATTERNS:
-            match = pattern.search(source)
-            if not match:
-                continue
-            candidate = _normalize_location_candidate(match.group(1))
-            if candidate:
-                return candidate
-    return None
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -355,31 +117,6 @@ def _normalize_patch(raw_patch: dict | None) -> dict:
     projection = raw_patch.get('projection', {})
     patch['projection'] = projection if isinstance(projection, dict) else {}
     return patch
-
-
-def _normalized_name(value: str | None) -> str:
-    text = re.sub(r'[^a-z0-9]+', ' ', str(value or '').lower()).strip()
-    return re.sub(r'\s+', ' ', text)
-
-
-def _int_or_default(value: Any, default: int = 1) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _positive_int(value: Any, default: int = 1) -> int:
-    return max(1, _int_or_default(value, default))
-
-
-def _optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _candidate_labels(entity: StoryEntity) -> set[str]:
@@ -484,91 +221,6 @@ def _find_existing_entity(
     return _EntityLookupIndex(campaign_id).find(incoming_type, incoming_name)
 
 
-def _clean_inventory_item_name(item_name: str | None) -> str | None:
-    candidate = str(item_name or '').strip(" \t\r\n'\"`")
-    if not candidate:
-        return None
-    candidate = re.sub(r'\b(?:the|a|an|some|your|their|his|her)\b\s+', '', candidate, flags=re.IGNORECASE).strip()
-    candidate = re.sub(r'\s+', ' ', candidate).strip(' -')
-    if not candidate:
-        return None
-    return candidate[:80]
-
-
-def _looks_like_inventory_item(item_name: str | None) -> bool:
-    candidate = _clean_inventory_item_name(item_name)
-    if not candidate:
-        return False
-
-    normalized = _normalized_name(candidate)
-    tokens = normalized.split()
-    if not tokens or len(tokens) > 4:
-        return False
-
-    if any(token in _NON_ITEM_TOKENS for token in tokens):
-        return False
-
-    if any(token not in _ITEM_NAME_CONNECTORS and len(token) <= 1 for token in tokens):
-        return False
-
-    head = tokens[-1]
-    if head in _NON_ITEM_HEADWORDS:
-        return False
-
-    if head in _ITEM_HEADWORDS:
-        return True
-
-    if any(token in _ITEM_MATERIAL_HINTS for token in tokens[:-1]) and head not in _NON_ITEM_HEADWORDS:
-        return True
-
-    return False
-
-
-def _append_inventory_change(patch: dict, action: str, item_name: str | None, quantity: int = 1):
-    clean_name = _clean_inventory_item_name(item_name)
-    if not clean_name or not _looks_like_inventory_item(clean_name):
-        return
-    normalized_item = _normalized_name(clean_name)
-    existing = next(
-        (
-            change
-            for change in patch['inventory_changes']
-            if _normalized_name(change.get('item_name')) == normalized_item and change.get('action') == action
-        ),
-        None,
-    )
-    if existing:
-        existing['quantity'] = _positive_int(existing.get('quantity', 1)) + _positive_int(quantity)
-        return
-
-    patch['inventory_changes'].append(
-        {
-            'action': action,
-            'item_name': clean_name,
-            'quantity': _positive_int(quantity),
-        }
-    )
-
-    if not any(
-        entity.get('entity_type') == 'item' and _normalized_name(entity.get('name')) == normalized_item
-        for entity in patch['entities']
-    ):
-        patch['entities'].append(
-            {
-                'entity_type': 'item',
-                'name': clean_name,
-                'summary': 'Explicitly involved in a deterministic inventory consequence.',
-                'status': 'active',
-            }
-        )
-
-
-def _extract_inventory_changes_from_text(text: str, patterns: list[re.Pattern], action: str, patch: dict):
-    for pattern in patterns:
-        for match in pattern.finditer(text or ''):
-            _append_inventory_change(patch, action=action, item_name=match.group(1))
-
-
 def _heuristic_patch(
     turn: DmTurn,
     campaign: Campaign,
@@ -657,28 +309,13 @@ def _extract_with_provider(
     context = build_emergent_context(campaign.campaign_id, session_id=turn.session_id, entity_limit=8, fact_limit=12, thread_limit=8)
     provider = get_provider()
 
-    request = ProviderRequest(
-        system_message=(
-            'You maintain flexible canon for an improvisational tabletop campaign. '
-            'Return strict JSON only with keys entities, facts, threads, inventory_changes, projection. '
-            'Do not invent beyond what became canon in this turn. '
-            'Campaign segments are optional story threads, not rails.'
-        ),
-        prompt=(
-            f'CURRENT CANON:\n{json.dumps(context, indent=2)}\n\n'
-            f'PLAYER CHARACTER: {speaking_player_name or "Unknown"}\n'
-            f'CAMPAIGN TITLE: {campaign.title}\n'
-            f'TURN INPUT:\n{turn.player_input}\n\n'
-            f'DM OUTPUT:\n{dm_output}\n\n'
-            f'TRIGGERED SEGMENTS:\n{json.dumps(triggered_segments, indent=2)}\n\n'
-            'Return JSON of the form:\n'
-            '{'
-            '"entities":[{"entity_type":"npc|location|faction|item|rumor|ritual","name":"...","canonical_name":"optional","aliases":["optional"],"summary":"...","status":"active"}],'
-            '"facts":[{"predicate":"...","value_text":"...","confidence":0.0,"replace_existing":false,"change_type":"optional reveal|retcon|misconception|correction"}],'
-            '"threads":[{"title":"...","summary":"...","status":"open","priority":1,"source":"emergent","metadata":{}}],'
-            '"inventory_changes":[{"action":"acquire|lose","item_name":"...","quantity":1}],'
-            '"projection":{"current_location":"optional"}}'
-        ),
+    request = build_canon_extraction_request(
+        context=context,
+        campaign_title=campaign.title,
+        player_input=turn.player_input,
+        dm_output=dm_output,
+        speaking_player_name=speaking_player_name,
+        triggered_segments=triggered_segments,
     )
 
     try:
@@ -934,6 +571,32 @@ def validate_canon_patch(turn: DmTurn, campaign: Campaign, patch: dict) -> tuple
         deduped_entities.append(normalized_payload)
     patch['entities'] = deduped_entities
 
+    fact_predicates = {
+        predicate
+        for predicate in (
+            str(fact_payload.get('predicate') or '').strip()
+            for fact_payload in patch['facts']
+        )
+        if predicate
+    }
+    accepted_facts_by_predicate: dict[str, list[StoryFact]] = defaultdict(list)
+    if fact_predicates:
+        accepted_facts = (
+            StoryFact.query.options(
+                joinedload(StoryFact.subject_entity),
+                joinedload(StoryFact.object_entity),
+            )
+            .filter(
+                StoryFact.campaign_id == campaign.campaign_id,
+                StoryFact.predicate.in_(fact_predicates),
+                StoryFact.fact_status == 'accepted',
+            )
+            .order_by(StoryFact.fact_id.desc())
+            .all()
+        )
+        for existing_fact in accepted_facts:
+            accepted_facts_by_predicate[existing_fact.predicate].append(existing_fact)
+
     validated_facts: list[dict] = []
     for fact_payload in patch['facts']:
         predicate = str(fact_payload.get('predicate') or '').strip()
@@ -948,15 +611,7 @@ def validate_canon_patch(turn: DmTurn, campaign: Campaign, patch: dict) -> tuple
         incoming_signature = _fact_value_signature(fact_copy)
         subject_key = _fact_subject_key(fact_copy)
 
-        accepted_facts = (
-            StoryFact.query.filter(
-                StoryFact.campaign_id == campaign.campaign_id,
-                StoryFact.predicate == predicate,
-                StoryFact.fact_status == 'accepted',
-            )
-            .order_by(StoryFact.fact_id.desc())
-            .all()
-        )
+        accepted_facts = accepted_facts_by_predicate.get(predicate, [])
 
         conflicting_fact: StoryFact | None = None
         duplicate = False
@@ -1029,83 +684,6 @@ def validate_canon_patch(turn: DmTurn, campaign: Campaign, patch: dict) -> tuple
     patch['inventory_changes'] = validated_inventory_changes
 
     return patch, rejections
-
-
-def _load_inventory(raw_value: str | None) -> list[dict]:
-    if not raw_value:
-        return []
-
-    payload = safe_json_loads(raw_value, None)
-    if isinstance(payload, dict):
-        payload = payload.get('items', [])
-    if isinstance(payload, list):
-        normalized_items: list[dict] = []
-        for item in payload:
-            if isinstance(item, dict):
-                name = _clean_inventory_item_name(item.get('name'))
-                if not name:
-                    continue
-                normalized_items.append({'name': name, 'quantity': _positive_int(item.get('quantity', 1))})
-            elif isinstance(item, str):
-                name = _clean_inventory_item_name(item)
-                if name:
-                    normalized_items.append({'name': name, 'quantity': 1})
-        return normalized_items
-
-    if isinstance(raw_value, str):
-        parts = [part.strip() for part in raw_value.split(',') if part.strip()]
-        return [{'name': part, 'quantity': 1} for part in parts]
-    return []
-
-
-def _dump_inventory(items: list[dict]) -> str:
-    compacted = [
-        {'name': item['name'], 'quantity': _positive_int(item.get('quantity', 1))}
-        for item in items
-        if item.get('name') and _int_or_default(item.get('quantity', 1), default=1) > 0
-    ]
-    return safe_json_dumps(compacted, [])
-
-
-def inventory_payload(raw_value: str | None) -> list[dict]:
-    return _load_inventory(raw_value)
-
-
-def _apply_inventory_changes(turn: DmTurn, changes: list[dict]) -> list[dict]:
-    if not changes:
-        return []
-
-    player = db.session.get(Player, turn.player_id)
-    if not player:
-        return []
-
-    inventory = _load_inventory(player.inventory)
-    index = {_normalized_name(item['name']): item for item in inventory}
-    applied_changes: list[dict] = []
-
-    for change in changes:
-        action = change['action']
-        item_name = change['item_name']
-        quantity = _positive_int(change.get('quantity', 1))
-        key = _normalized_name(item_name)
-        item_entry = index.get(key)
-
-        if action == 'acquire':
-            if item_entry:
-                item_entry['quantity'] += quantity
-            else:
-                item_entry = {'name': item_name, 'quantity': quantity}
-                inventory.append(item_entry)
-                index[key] = item_entry
-            applied_changes.append({'action': action, 'item_name': item_name, 'quantity': quantity})
-            continue
-
-        if action == 'lose' and item_entry:
-            item_entry['quantity'] -= quantity
-            applied_changes.append({'action': action, 'item_name': item_name, 'quantity': quantity})
-
-    player.inventory = _dump_inventory([item for item in inventory if item.get('quantity', 0) > 0])
-    return applied_changes
 
 
 def apply_canon_patch(
@@ -1199,19 +777,31 @@ def apply_canon_patch(
         db.session.add(fact)
         applied_summary['facts_created'] += 1
 
+    thread_title_keys = {
+        str(thread_payload.get('title') or '').strip().lower()
+        for thread_payload in patch['threads']
+        if str(thread_payload.get('title') or '').strip()
+    }
+    existing_threads_by_title: dict[str, StoryThread] = {}
+    if thread_title_keys:
+        existing_threads = (
+            StoryThread.query.filter(
+                StoryThread.campaign_id == campaign.campaign_id,
+                func.lower(StoryThread.title).in_(thread_title_keys),
+            )
+            .order_by(StoryThread.thread_id.asc())
+            .all()
+        )
+        for existing_thread in existing_threads:
+            existing_threads_by_title.setdefault(existing_thread.title.lower(), existing_thread)
+
     for thread_payload in patch['threads']:
         title = str(thread_payload.get('title') or '').strip()
         if not title:
             continue
 
-        thread = (
-            StoryThread.query.filter(
-                StoryThread.campaign_id == campaign.campaign_id,
-                func.lower(StoryThread.title) == title.lower(),
-            )
-            .order_by(StoryThread.thread_id.asc())
-            .first()
-        )
+        title_key = title.lower()
+        thread = existing_threads_by_title.get(title_key)
         if not thread:
             thread = StoryThread(
                 campaign_id=campaign.campaign_id,
@@ -1227,6 +817,7 @@ def apply_canon_patch(
             )
             db.session.add(thread)
             db.session.flush()
+            existing_threads_by_title[title_key] = thread
         else:
             if thread_payload.get('summary'):
                 thread.summary = thread_payload.get('summary')
@@ -1256,196 +847,6 @@ def apply_canon_patch(
     return applied_summary
 
 
-def append_session_memory(turn: DmTurn):
-    state = get_or_create_session_state(turn.session_id, turn.campaign)
-    memory_snippets = safe_json_loads(state.memory_snippets, [])
-    memory_snippets = memory_snippets if isinstance(memory_snippets, list) else []
-    memory_snippets.append(
-        {
-            'turn_id': turn.turn_id,
-            'player_input': turn.player_input[:250],
-            'dm_output': (turn.dm_output or '')[:350],
-            'requires_roll': turn.requires_roll,
-            'rule_type': turn.rule_type,
-            'confidence': turn.confidence,
-            'roll_value': turn.roll_value,
-            'outcome_status': turn.outcome_status,
-            'created_at': utc_now().isoformat(),
-        }
-    )
-    state.memory_snippets = safe_json_dumps(memory_snippets[-12:], [])
-
-    existing_summary = (state.rolling_summary or '').strip()
-    next_line = f"T{turn.turn_id} | P{turn.player_id}: {turn.player_input[:160]} | DM: {(turn.dm_output or '')[:220]}"
-    state.rolling_summary = f"{existing_summary}\n{next_line}".strip()[-8000:]
-    state.updated_at = utc_now()
-    return state
-
-
-def _latest_location_fact(campaign_id: int) -> StoryFact | None:
-    return (
-        StoryFact.query.filter(
-            StoryFact.campaign_id == campaign_id,
-            StoryFact.predicate == 'current_location',
-            StoryFact.fact_status == 'accepted',
-        )
-        .order_by(StoryFact.fact_id.desc())
-        .first()
-    )
-
-
-def refresh_session_projection(session_id: int, campaign: Campaign, triggered_segments: list[dict] | None = None):
-    triggered_segments = triggered_segments or []
-    state = get_or_create_session_state(session_id, campaign)
-
-    location_fact = _latest_location_fact(campaign.campaign_id)
-    if location_fact and location_fact.value_text:
-        state.current_location = location_fact.value_text
-    elif not state.current_location:
-        state.current_location = campaign.location
-
-    open_threads = (
-        StoryThread.query.filter(
-            StoryThread.campaign_id == campaign.campaign_id,
-            StoryThread.status.in_(('open', 'active')),
-        )
-        .order_by(StoryThread.priority.desc(), StoryThread.updated_at.desc(), StoryThread.thread_id.desc())
-        .limit(3)
-        .all()
-    )
-    if open_threads:
-        state.current_quest = ' | '.join(thread.title for thread in open_threads)
-    else:
-        state.current_quest = campaign.current_quest
-
-    active_segments = safe_json_loads(state.active_segments, [])
-    active_segments = active_segments if isinstance(active_segments, list) else []
-    for segment_payload in triggered_segments:
-        if not any(existing.get('segment_id') == segment_payload.get('segment_id') for existing in active_segments):
-            active_segments.append(segment_payload)
-    state.active_segments = safe_json_dumps(active_segments, [])
-    state.updated_at = utc_now()
-    return state
-
-
-_RETRIEVAL_STOPWORDS = {
-    'a',
-    'an',
-    'and',
-    'at',
-    'for',
-    'from',
-    'into',
-    'is',
-    'of',
-    'on',
-    'or',
-    'the',
-    'to',
-    'with',
-}
-
-
-def _retrieval_tokens(*values: str | None) -> set[str]:
-    tokens: set[str] = set()
-    for value in values:
-        normalized = _normalized_name(value)
-        if not normalized:
-            continue
-        for token in normalized.split():
-            if len(token) < 3 or token in _RETRIEVAL_STOPWORDS:
-                continue
-            tokens.add(token)
-    return tokens
-
-
-def _recent_signal_text(recent_turns: list[dict] | None) -> str:
-    if not recent_turns:
-        return ''
-    fragments: list[str] = []
-    for turn in recent_turns[-3:]:
-        if not isinstance(turn, dict):
-            continue
-        player_input = str(turn.get('player_input') or '').strip()
-        dm_output = str(turn.get('dm_output') or '').strip()
-        if player_input:
-            fragments.append(player_input)
-        if dm_output:
-            fragments.append(dm_output[:160])
-    return '\n'.join(fragments)
-
-
-def _entity_retrieval_score(
-    entity: StoryEntity,
-    *,
-    signal_text: str,
-    signal_tokens: set[str],
-    session_id: int | None,
-) -> float:
-    score = 0.0
-    labels = _candidate_labels(entity)
-    if signal_text:
-        for label in labels:
-            if label and label in signal_text:
-                score += 10.0
-    for label in labels:
-        overlap = len(set(label.split()) & signal_tokens)
-        if overlap:
-            score += overlap * 3.0
-    summary_tokens = _retrieval_tokens(entity.summary)
-    summary_overlap = len(summary_tokens & signal_tokens)
-    if summary_overlap:
-        score += summary_overlap * 1.5
-    if session_id is not None and entity.session_id == session_id:
-        score += 1.0
-    if str(entity.status or '').lower() in {'active', 'open'}:
-        score += 0.5
-    return score
-
-
-def _fact_retrieval_score(
-    fact: StoryFact,
-    *,
-    signal_text: str,
-    signal_tokens: set[str],
-    relevant_entity_ids: set[int],
-) -> float:
-    score = 0.0
-    if fact.subject_entity_id in relevant_entity_ids:
-        score += 5.0
-    if fact.object_entity_id in relevant_entity_ids:
-        score += 4.0
-    if fact.predicate in _GLOBAL_SINGLETON_FACTS:
-        score += 2.5
-
-    predicate_tokens = _retrieval_tokens(fact.predicate)
-    value_tokens = _retrieval_tokens(fact.value_text)
-    score += len(predicate_tokens & signal_tokens) * 2.0
-    score += len(value_tokens & signal_tokens) * 1.0
-
-    subject_name = fact.subject_entity.name if fact.subject_entity else None
-    object_name = fact.object_entity.name if fact.object_entity else None
-    for name in (subject_name, object_name):
-        normalized = _normalized_name(name)
-        if normalized and normalized in signal_text:
-            score += 3.0
-    return score
-
-
-def _thread_retrieval_score(thread: StoryThread, *, signal_text: str, signal_tokens: set[str]) -> float:
-    score = float(thread.priority or 0)
-    if str(thread.status or '').lower() in {'open', 'active'}:
-        score += 2.0
-    title_tokens = _retrieval_tokens(thread.title)
-    summary_tokens = _retrieval_tokens(thread.summary)
-    score += len(title_tokens & signal_tokens) * 2.5
-    score += len(summary_tokens & signal_tokens) * 1.0
-    normalized_title = _normalized_name(thread.title)
-    if normalized_title and normalized_title in signal_text:
-        score += 4.0
-    return score
-
-
 def build_emergent_context(
     campaign_id: int,
     session_id: int | None = None,
@@ -1457,117 +858,17 @@ def build_emergent_context(
     current_quest: str | None = None,
     recent_turns: list[dict] | None = None,
 ) -> dict:
-    signal_text = _normalized_name(
-        ' '.join(
-            part
-            for part in [
-                query_text or '',
-                current_location or '',
-                current_quest or '',
-                _recent_signal_text(recent_turns),
-            ]
-            if part
-        )
+    return _canon_retrieval.build_emergent_context(
+        campaign_id=campaign_id,
+        session_id=session_id,
+        entity_limit=entity_limit,
+        fact_limit=fact_limit,
+        thread_limit=thread_limit,
+        entity_candidate_limit=EMERGENT_ENTITY_CANDIDATE_LIMIT,
+        fact_candidate_limit=EMERGENT_FACT_CANDIDATE_LIMIT,
+        thread_candidate_limit=EMERGENT_THREAD_CANDIDATE_LIMIT,
+        query_text=query_text,
+        current_location=current_location,
+        current_quest=current_quest,
+        recent_turns=recent_turns,
     )
-    signal_tokens = _retrieval_tokens(query_text, current_location, current_quest, _recent_signal_text(recent_turns))
-
-    all_entities = StoryEntity.query.filter_by(campaign_id=campaign_id).all()
-    ranked_entities = sorted(
-        all_entities,
-        key=lambda entity: (
-            _entity_retrieval_score(entity, signal_text=signal_text, signal_tokens=signal_tokens, session_id=session_id),
-            entity.updated_at or entity.created_at,
-            entity.entity_id,
-        ),
-        reverse=True,
-    )
-    entities = ranked_entities[:entity_limit]
-    relevant_entity_ids = {entity.entity_id for entity in entities}
-
-    all_facts = (
-        StoryFact.query.filter(
-            StoryFact.campaign_id == campaign_id,
-            StoryFact.fact_status == 'accepted',
-        )
-        .all()
-    )
-    ranked_facts = sorted(
-        all_facts,
-        key=lambda fact: (
-            _fact_retrieval_score(
-                fact,
-                signal_text=signal_text,
-                signal_tokens=signal_tokens,
-                relevant_entity_ids=relevant_entity_ids,
-            ),
-            fact.fact_id,
-        ),
-        reverse=True,
-    )
-    if ranked_facts and _fact_retrieval_score(
-        ranked_facts[0],
-        signal_text=signal_text,
-        signal_tokens=signal_tokens,
-        relevant_entity_ids=relevant_entity_ids,
-    ) <= 0.0:
-        ranked_facts = sorted(all_facts, key=lambda fact: fact.fact_id, reverse=True)
-    facts = ranked_facts[:fact_limit]
-
-    all_threads = StoryThread.query.filter_by(campaign_id=campaign_id).all()
-    ranked_threads = sorted(
-        all_threads,
-        key=lambda thread: (
-            _thread_retrieval_score(thread, signal_text=signal_text, signal_tokens=signal_tokens),
-            thread.updated_at or thread.created_at,
-            thread.thread_id,
-        ),
-        reverse=True,
-    )
-    threads = ranked_threads[:thread_limit]
-
-    payload = {
-        'entities': [
-            {
-                'entity_id': entity.entity_id,
-                'entity_type': entity.entity_type,
-                'name': entity.name,
-                'canonical_name': entity.canonical_name,
-                'aliases': safe_json_loads(entity.aliases_json, []),
-                'summary': entity.summary,
-                'status': entity.status,
-            }
-            for entity in entities
-        ],
-        'facts': [
-            {
-                'fact_id': fact.fact_id,
-                'subject': fact.subject_entity.name if fact.subject_entity else None,
-                'predicate': fact.predicate,
-                'object': fact.object_entity.name if fact.object_entity else None,
-                'value_text': fact.value_text,
-                'confidence': fact.confidence,
-            }
-            for fact in facts
-        ],
-        'threads': [
-            {
-                'thread_id': thread.thread_id,
-                'title': thread.title,
-                'summary': thread.summary,
-                'status': thread.status,
-                'priority': thread.priority,
-                'source': thread.source,
-            }
-            for thread in threads
-        ],
-    }
-
-    if session_id:
-        state = SessionState.query.filter_by(session_id=session_id).first()
-        payload['projection'] = {
-            'current_location': state.current_location if state else None,
-            'current_quest': state.current_quest if state else None,
-            'rolling_summary': state.rolling_summary if state else '',
-        }
-
-    return payload

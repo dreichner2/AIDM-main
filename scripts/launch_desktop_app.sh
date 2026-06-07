@@ -2,13 +2,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FRONTEND_DIR="${REPO_ROOT}/aidm_frontend"
 LOG_DIR="${REPO_ROOT}/tmp/launcher_logs"
 BACKEND_PORT="${AIDM_BACKEND_PORT:-5050}"
-FRONTEND_PORT="${AIDM_FRONTEND_PORT:-5173}"
 BACKEND_HEALTH_URL="http://127.0.0.1:${BACKEND_PORT}/api/health"
-FRONTEND_URL="${AIDM_FRONTEND_URL:-http://127.0.0.1:${FRONTEND_PORT}/}"
+APP_URL="${AIDM_APP_URL:-http://127.0.0.1:${BACKEND_PORT}/}"
 LAUNCH_DOMAIN="gui/$(id -u)"
+TAILSCALE_BIN="/opt/homebrew/bin/tailscale"
+TAILSCALE_SOCKET_PATH="${HOME}/.local/share/tailscale/tailscaled.sock"
+TAILSCALE_PLIST="${HOME}/Library/LaunchAgents/local.aidm.tailscaled.plist"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
@@ -30,6 +31,43 @@ on run argv
 end run
 APPLESCRIPT
   exit 1
+}
+
+xml_escape() {
+  local value="$1"
+  value="${value//&/&amp;}"
+  value="${value//</&lt;}"
+  value="${value//>/&gt;}"
+  value="${value//\"/&quot;}"
+  printf '%s' "${value}"
+}
+
+render_launch_agent_plist() {
+  local label="$1"
+  local source_plist="$2"
+  local target_plist="$3"
+  local program_path
+  local working_dir
+  local log_path
+  local rendered
+
+  case "${label}" in
+    local.aidm.backend)
+      program_path="${REPO_ROOT}/scripts/launch_backend_service.sh"
+      working_dir="${REPO_ROOT}"
+      log_path="${LOG_DIR}/backend.log"
+      ;;
+    *)
+      fail "Unknown LaunchAgent label ${label}."
+      ;;
+  esac
+
+  rendered="$(<"${source_plist}")"
+  rendered="${rendered//__AIDM_PROGRAM__/$(xml_escape "${program_path}")}"
+  rendered="${rendered//__AIDM_WORKING_DIRECTORY__/$(xml_escape "${working_dir}")}"
+  rendered="${rendered//__AIDM_STDOUT_LOG__/$(xml_escape "${log_path}")}"
+  rendered="${rendered//__AIDM_STDERR_LOG__/$(xml_escape "${log_path}")}"
+  printf '%s\n' "${rendered}" >"${target_plist}"
 }
 
 port_open() {
@@ -58,17 +96,43 @@ wait_for_http() {
   done
 }
 
+wait_for_unified_app() {
+  local max_seconds="${1:-90}"
+  local start
+  local now
+  local body
+
+  start="$(date +%s)"
+  while true; do
+    body="$(/usr/bin/curl -fsS --connect-timeout 2 --max-time 4 "${APP_URL}" 2>/dev/null || true)"
+    if [[ "${body}" == *"AI-DM Tabletop Console"* || "${body}" == *'id="root"'* ]]; then
+      log "Unified app ready at ${APP_URL}"
+      return 0
+    fi
+
+    now="$(date +%s)"
+    if (( now - start >= max_seconds )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 install_launch_agent() {
   local label="$1"
   local source_plist="${REPO_ROOT}/scripts/launchd/${label}.plist"
   local target_plist="${HOME}/Library/LaunchAgents/${label}.plist"
+  local next_plist="${target_plist}.next"
 
   [[ -f "${source_plist}" ]] || fail "Missing LaunchAgent template at ${source_plist}."
   mkdir -p "${HOME}/Library/LaunchAgents"
+  render_launch_agent_plist "${label}" "${source_plist}" "${next_plist}"
 
-  if [[ ! -f "${target_plist}" ]] || ! /usr/bin/cmp -s "${source_plist}" "${target_plist}"; then
-    /bin/cp "${source_plist}" "${target_plist}"
+  if [[ ! -f "${target_plist}" ]] || ! /usr/bin/cmp -s "${next_plist}" "${target_plist}"; then
+    /bin/mv "${next_plist}" "${target_plist}"
     /bin/launchctl bootout "${LAUNCH_DOMAIN}/${label}" >/dev/null 2>&1 || true
+  else
+    /bin/rm -f "${next_plist}"
   fi
 
   /bin/launchctl bootstrap "${LAUNCH_DOMAIN}" "${target_plist}" >/dev/null 2>&1 || true
@@ -80,45 +144,58 @@ kickstart_launch_agent() {
   /bin/launchctl kickstart "${LAUNCH_DOMAIN}/${label}" >/dev/null 2>&1 || fail "Could not start ${label} LaunchAgent."
 }
 
+restart_launch_agent() {
+  local label="$1"
+  /bin/launchctl kickstart -k "${LAUNCH_DOMAIN}/${label}" >/dev/null 2>&1 || fail "Could not restart ${label} LaunchAgent."
+}
+
+stop_legacy_frontend() {
+  /bin/launchctl bootout "${LAUNCH_DOMAIN}/local.aidm.frontend" >/dev/null 2>&1 || true
+}
+
+start_tailscale_funnel() {
+  if [[ ! -x "${TAILSCALE_BIN}" || ! -f "${TAILSCALE_PLIST}" ]]; then
+    return 0
+  fi
+
+  /bin/launchctl bootstrap "${LAUNCH_DOMAIN}" "${TAILSCALE_PLIST}" >/dev/null 2>&1 || true
+  /bin/launchctl enable "${LAUNCH_DOMAIN}/local.aidm.tailscaled" >/dev/null 2>&1 || true
+  if ! "${TAILSCALE_BIN}" --socket="${TAILSCALE_SOCKET_PATH}" status --json >/dev/null 2>&1; then
+    /bin/launchctl kickstart -k "${LAUNCH_DOMAIN}/local.aidm.tailscaled" >/dev/null 2>&1 || true
+  fi
+
+  if "${TAILSCALE_BIN}" --socket="${TAILSCALE_SOCKET_PATH}" status --json 2>/dev/null | /usr/bin/grep -q '"BackendState": "Running"'; then
+    "${REPO_ROOT}/scripts/aidm_tailscale.sh" funnel-on >/dev/null 2>&1 || log "Tailscale Funnel was not started automatically."
+    log "Tailscale Funnel checked."
+  else
+    log "Tailscale is not logged in; public Funnel URL not started."
+  fi
+}
+
 start_backend() {
   install_launch_agent "local.aidm.backend"
 
-  if wait_for_http "${BACKEND_HEALTH_URL}" "Backend" 2; then
+  if wait_for_http "${BACKEND_HEALTH_URL}" "Backend" 2 && wait_for_unified_app 2; then
     return 0
   fi
 
+  log "Starting unified AI-DM LaunchAgent on ${BACKEND_PORT}"
   if port_open "${BACKEND_PORT}"; then
-    fail "Port ${BACKEND_PORT} is in use, but ${BACKEND_HEALTH_URL} is not healthy."
+    restart_launch_agent "local.aidm.backend"
+  else
+    kickstart_launch_agent "local.aidm.backend"
   fi
-
-  log "Starting backend LaunchAgent on ${BACKEND_PORT}"
-  kickstart_launch_agent "local.aidm.backend"
-}
-
-start_frontend() {
-  install_launch_agent "local.aidm.frontend"
-
-  if wait_for_http "${FRONTEND_URL}" "Frontend" 2; then
-    return 0
-  fi
-
-  if port_open "${FRONTEND_PORT}"; then
-    fail "Port ${FRONTEND_PORT} is in use, but ${FRONTEND_URL} is not responding."
-  fi
-
-  log "Starting frontend LaunchAgent on ${FRONTEND_PORT}"
-  kickstart_launch_agent "local.aidm.frontend"
 }
 
 {
   log "Launch requested at $(date)"
+  stop_legacy_frontend
   start_backend
   wait_for_http "${BACKEND_HEALTH_URL}" "Backend" 120 || fail "Backend did not become ready at ${BACKEND_HEALTH_URL}."
+  wait_for_unified_app 120 || fail "Unified app did not become ready at ${APP_URL}."
+  start_tailscale_funnel
 
-  start_frontend
-  wait_for_http "${FRONTEND_URL}" "Frontend" 90 || fail "Frontend did not become ready at ${FRONTEND_URL}."
-
-  /usr/bin/open "${FRONTEND_URL}"
-  /usr/bin/osascript -e 'display notification "Backend and frontend are running." with title "AI-DM Launcher"' >/dev/null 2>&1 || true
-  log "Opened ${FRONTEND_URL}"
+  /usr/bin/open "${APP_URL}"
+  /usr/bin/osascript -e 'display notification "Unified AI-DM is running." with title "AI-DM Launcher"' >/dev/null 2>&1 || true
+  log "Opened ${APP_URL}"
 } >>"${LOG_DIR}/launcher.log" 2>&1

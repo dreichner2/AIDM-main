@@ -1,0 +1,110 @@
+name: AIDM CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+    inputs:
+      run_visual_smoke:
+        description: Run visual smoke screenshots
+        required: false
+        default: 'false'
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Secret scan
+        run: python scripts/scan_secrets.py
+      - name: Run backend tests
+        env:
+          AIDM_ENV: test
+          AIDM_AUTO_CREATE_SCHEMA: 'true'
+          AIDM_TELEMETRY_ENABLED: 'false'
+        run: python -m pytest
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aidm_frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: aidm_frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Production dependency audit
+        run: npm audit --omit=dev
+      - name: Install backend dependencies for browser smoke
+        working-directory: .
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Test frontend
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Bundle budget
+        run: npm run bundle:budget
+      - name: Browser smoke
+        env:
+          PYTHON: python
+        run: |
+          npx playwright install chromium
+          npm run smoke:browser
+
+  visual-smoke:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.run_visual_smoke == 'true'
+    defaults:
+      run:
+        working-directory: aidm_frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: aidm_frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Install backend dependencies
+        working-directory: .
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Visual smoke screenshots
+        env:
+          PYTHON: python
+        run: |
+          npx playwright install chromium
+          npm run smoke:visual
+      - name: Upload visual smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-smoke
+          path: tmp/verification_artifacts/visual-smoke

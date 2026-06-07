@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import math
 from queue import Empty, Full, Queue
+import re
 from threading import Event, Lock, Thread
 import time
 import logging
@@ -14,10 +16,124 @@ from flask import current_app, has_app_context
 
 
 logger = logging.getLogger(__name__)
+_PROMETHEUS_NAME_RE = re.compile(r'[^a-zA-Z0-9_:]')
+_PROMETHEUS_LABEL_RE = re.compile(r'[^a-zA-Z0-9_]')
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _prometheus_name(value: str) -> str:
+    name = _PROMETHEUS_NAME_RE.sub('_', str(value or 'metric')).strip('_') or 'metric'
+    if name[0].isdigit():
+        name = f'_{name}'
+    return name
+
+
+def _prometheus_label_name(value: str) -> str:
+    name = _PROMETHEUS_LABEL_RE.sub('_', str(value or 'label')).strip('_') or 'label'
+    if name[0].isdigit():
+        name = f'_{name}'
+    return name
+
+
+def _escape_prometheus_label_value(value: object) -> str:
+    return str(value).replace('\\', '\\\\').replace('\n', '\\n').replace('"', '\\"')
+
+
+def _prometheus_value(value: object) -> str | None:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric_value):
+        return None
+    if numeric_value.is_integer():
+        return str(int(numeric_value))
+    return f'{numeric_value:.12g}'
+
+
+def _split_metric_key(metric_key: str) -> tuple[str, dict[str, str]]:
+    name, separator, raw_tags = str(metric_key).partition('|')
+    labels: dict[str, str] = {}
+    if separator:
+        for raw_tag in raw_tags.split(','):
+            label, tag_separator, value = raw_tag.partition('=')
+            if tag_separator and label:
+                labels[label] = value
+    return name, labels
+
+
+def _format_prometheus_labels(labels: dict[str, str] | None = None) -> str:
+    if not labels:
+        return ''
+    formatted = [
+        f'{_prometheus_label_name(label)}="{_escape_prometheus_label_value(value)}"'
+        for label, value in sorted(labels.items())
+    ]
+    return '{' + ','.join(formatted) + '}'
+
+
+def _timing_metric_base(name: str) -> str:
+    normalized = _prometheus_name(name)
+    if normalized.endswith('_ms'):
+        return f'{normalized[:-3]}_milliseconds'
+    return f'{normalized}_milliseconds'
+
+
+def prometheus_text_from_snapshot(snapshot: dict, extra_gauges: dict[str, object] | None = None) -> str:
+    """Render a telemetry snapshot using the Prometheus text exposition format."""
+    lines: list[str] = []
+    emitted_metadata: set[str] = set()
+
+    def emit_metric(
+        metric_name: str,
+        value: object,
+        *,
+        labels: dict[str, str] | None = None,
+        metric_type: str = 'gauge',
+        help_text: str | None = None,
+    ) -> None:
+        rendered_value = _prometheus_value(value)
+        if rendered_value is None:
+            return
+        full_name = f'aidm_{_prometheus_name(metric_name)}'
+        if full_name not in emitted_metadata:
+            if help_text:
+                lines.append(f'# HELP {full_name} {help_text}')
+            lines.append(f'# TYPE {full_name} {metric_type}')
+            emitted_metadata.add(full_name)
+        lines.append(f'{full_name}{_format_prometheus_labels(labels)} {rendered_value}')
+
+    emit_metric(
+        'telemetry_enabled',
+        1 if snapshot.get('enabled') else 0,
+        help_text='Whether outbound AIDM telemetry is enabled.',
+    )
+    emit_metric(
+        'telemetry_external_endpoint_configured',
+        1 if snapshot.get('external_endpoint_configured') else 0,
+        help_text='Whether an external AIDM telemetry endpoint is configured.',
+    )
+
+    for raw_key, value in sorted((snapshot.get('counters') or {}).items()):
+        metric_name, labels = _split_metric_key(raw_key)
+        emit_metric(metric_name, value, labels=labels, metric_type='counter')
+
+    for raw_key, timing in sorted((snapshot.get('timings') or {}).items()):
+        metric_name, labels = _split_metric_key(raw_key)
+        base_name = _timing_metric_base(metric_name)
+        emit_metric(f'{base_name}_count', timing.get('count'), labels=labels, metric_type='counter')
+        emit_metric(f'{base_name}_sum', timing.get('sum_ms'), labels=labels, metric_type='counter')
+        emit_metric(f'{base_name}_avg', timing.get('avg_ms'), labels=labels)
+        emit_metric(f'{base_name}_min', timing.get('min_ms'), labels=labels)
+        emit_metric(f'{base_name}_max', timing.get('max_ms'), labels=labels)
+
+    for metric_name, value in sorted((extra_gauges or {}).items()):
+        emit_metric(metric_name, value)
+
+    return '\n'.join(lines) + '\n'
 
 
 class TelemetryClient:
@@ -113,6 +229,9 @@ class TelemetryClient:
             'counters': counters,
             'timings': timings,
         }
+
+    def prometheus_text(self, extra_gauges: dict[str, object] | None = None) -> str:
+        return prometheus_text_from_snapshot(self.snapshot(), extra_gauges=extra_gauges)
 
     def flush(self, timeout_seconds: float | None = None) -> bool:
         if self._delivery_queue is None:

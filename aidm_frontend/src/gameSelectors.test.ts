@@ -1,0 +1,243 @@
+import { describe, expect, it } from 'vitest'
+import {
+  abilityOptionsFromStatBlock,
+  buildMapMeta,
+  buildTimeline,
+  canonFactsFromMemorySnippets,
+  inventoryCapacity,
+  inventoryWeightLabel,
+  itemOptionsFromInventory,
+  memorySnippetRecords,
+  normalizeInventory,
+  normalizeStats,
+  normalizeXp,
+  pendingRollOptionsFromTimeline,
+  speakerDetail,
+  truncateText,
+  turnNumber,
+  turnPersistenceLabel,
+} from './gameSelectors'
+import type { CampaignSegment, MapItem, Player, SessionLogEntry, TimelineEntry } from './types'
+
+describe('game selector helpers', () => {
+  it('normalizes inventory, weight labels, stat blocks, and picker options', () => {
+    const inventory = normalizeInventory({
+      items: [
+        'Torch',
+        { name: 'Healing Potion', quantity: 2, weight: 0.5 },
+        { item: 'Chain Mail', count: '1', weight: '55' },
+      ],
+    })
+
+    expect(inventory).toEqual([
+      { item: 'Torch', count: '1', weight: '—', icon: 'sword', weightValue: null },
+      { item: 'Healing Potion', count: '2', weight: '1 lb', icon: 'potion', weightValue: 1 },
+      { item: 'Chain Mail', count: '1', weight: '55 lb', icon: 'armor', weightValue: 55 },
+    ])
+    expect(itemOptionsFromInventory(inventory)).toEqual([
+      { name: 'Torch', quantity: '1' },
+      { name: 'Healing Potion', quantity: '2' },
+      { name: 'Chain Mail', quantity: '1' },
+    ])
+    expect(inventoryCapacity({ carrying_capacity: 120 })).toBe(120)
+    expect(inventoryWeightLabel(inventory, 120)).toBe('Weight 56 / 120 lb')
+
+    const statBlock = normalizeStats(
+      { strength: 16, dexterity: 12, constitution: 9 },
+      { current_hp: 8, max_hp: 10, ac: 14, speed: '30 ft', xp: 150, xp_to_next: 300 },
+      3,
+    )
+
+    expect(statBlock.hp).toBe('8 / 10')
+    expect(statBlock.ac).toBe('14')
+    expect(statBlock.proficiency).toBe('+2')
+    expect(abilityOptionsFromStatBlock(statBlock).slice(0, 3)).toEqual([
+      { key: 'strength', label: 'STR', score: '16', modifier: '+3' },
+      { key: 'dexterity', label: 'DEX', score: '12', modifier: '+1' },
+      { key: 'constitution', label: 'CON', score: '9', modifier: '-1' },
+    ])
+    expect(normalizeXp({ xp: 150, xp_to_next: 300 }, 3)).toMatchObject({
+      current: 150,
+      max: 300,
+      percent: 50,
+    })
+  })
+
+  it('builds timeline rows from logs, optimistic entries, streaming state, and statuses', () => {
+    const logEntries: SessionLogEntry[] = [
+      {
+        id: 1,
+        entry_type: 'player',
+        message: 'Ember: I inspect the gate.',
+        timestamp: '2026-06-06T01:00:00Z',
+        metadata: { turn_id: 11 },
+      },
+      {
+        id: 2,
+        entry_type: 'dm',
+        message: 'DM: The gate hums.',
+        timestamp: '2026-06-06T01:00:02Z',
+        metadata: { turn_id: 11 },
+      },
+      {
+        id: 3,
+        entry_type: 'system',
+        message: '**Welcome to the table.**',
+        timestamp: '2026-06-06T01:00:03Z',
+        metadata: {},
+      },
+    ]
+    const optimisticEntries: TimelineEntry[] = [
+      {
+        id: 'optimistic-local',
+        role: 'player',
+        speaker: 'Ember',
+        text: 'I listen.',
+        timestamp: null,
+        metadata: { client_message_id: 'local-1' },
+      },
+    ]
+
+    const timeline = buildTimeline({
+      logEntries,
+      optimisticEntries,
+      streamingTurn: {
+        turnId: 12,
+        text: 'A whisper answers.',
+        requiresRoll: true,
+        rulesHint: { roll_type: 'perception' },
+      },
+      turnStatuses: { 11: 'persisted' },
+    })
+
+    expect(timeline.map((entry) => entry.id)).toEqual([
+      'log-1',
+      'log-2',
+      'log-3',
+      'optimistic-local',
+      'stream-12',
+    ])
+    expect(timeline[0]).toMatchObject({
+      role: 'player',
+      speaker: 'Ember',
+      text: 'I inspect the gate.',
+      metadata: { turn_id: 11, persistence_status: 'persisted' },
+    })
+    expect(timeline[2]).toMatchObject({ role: 'system', speaker: 'System', text: 'Welcome to the table.' })
+    expect(turnNumber(timeline[0], 0)).toBe(11)
+    expect(turnPersistenceLabel(timeline.at(-1) as TimelineEntry)).toBe('streaming')
+  })
+
+  it('derives unresolved pending roll target options from timeline metadata', () => {
+    const timeline: TimelineEntry[] = [
+      {
+        id: 'dm-10',
+        role: 'dm',
+        speaker: 'DM',
+        text: 'The lock resists your tools.',
+        timestamp: null,
+        metadata: {
+          turn_id: 10,
+          requires_roll: true,
+          outcome_status: 'deferred',
+          rule_type: 'thieves_tools',
+        },
+      },
+      {
+        id: 'dm-11',
+        role: 'dm',
+        speaker: 'DM',
+        text: 'The guard studies your expression.',
+        timestamp: null,
+        metadata: {
+          turn_id: 11,
+          requires_roll: true,
+          outcome_status: 'deferred',
+          rule_type: 'social',
+        },
+      },
+      {
+        id: 'roll-11',
+        role: 'system',
+        speaker: 'System',
+        text: 'Check resolved.',
+        timestamp: null,
+        metadata: { resolved_turn_id: 11 },
+      },
+    ]
+
+    expect(pendingRollOptionsFromTimeline(timeline)).toEqual([
+      {
+        turnId: 10,
+        label: 'Turn 10: thieves tools',
+        detail: 'The lock resists your tools.',
+      },
+    ])
+  })
+
+  it('derives speaker detail, canon facts, truncation, and map meta', () => {
+    const player: Player = {
+      player_id: 1,
+      workspace_id: 'owner',
+      campaign_id: 1,
+      name: 'Danny',
+      character_name: 'Ember',
+      race: 'Elf',
+      class_: 'Wizard',
+      char_class: 'Wizard',
+      level: 2,
+      created_at: null,
+      updated_at: null,
+    }
+    const playerEntry: TimelineEntry = {
+      id: 'log-1',
+      role: 'player',
+      speaker: 'Ember',
+      text: 'I search.',
+      timestamp: null,
+      metadata: {},
+    }
+    expect(speakerDetail(playerEntry, player)).toBe('Elf Wizard')
+    expect(truncateText('  This   text   should be compacted before it is shortened. ', 24)).toBe(
+      'This text should be com…',
+    )
+
+    const snippets = memorySnippetRecords([
+      { turn_id: 4, dm_output: '**The gate remembers Ember.**' },
+      { turn_id: 5, player_input: 'Ember asks about the ash crown.' },
+      'bad value',
+    ])
+    expect(canonFactsFromMemorySnippets(snippets, 9)).toEqual([
+      ['Ember asks about the ash crown.', 'S9E5'],
+      ['The gate remembers Ember.', 'S9E4'],
+    ])
+
+    const map: MapItem = {
+      map_id: 1,
+      world_id: 1,
+      campaign_id: 1,
+      title: 'Ash Gate',
+      description: 'A locked gate.',
+      map_data: { explored_percent: 72.4, threat: 'High', weather: 'Cold rain' },
+      created_at: null,
+      updated_at: null,
+    }
+    const segment: CampaignSegment = {
+      segment_id: 1,
+      campaign_id: 1,
+      title: 'Ambush',
+      description: '',
+      trigger_condition: '',
+      tags: 'high',
+      is_triggered: true,
+      created_at: null,
+      updated_at: null,
+    }
+    expect(buildMapMeta(map, segment)).toEqual({
+      explored: '72%',
+      threat: 'High',
+      threatTone: 'high',
+      weather: 'Cold rain',
+    })
+  })
+})

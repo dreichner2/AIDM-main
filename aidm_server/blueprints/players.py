@@ -4,33 +4,28 @@ import logging
 
 from flask import Blueprint, jsonify, request
 
+from aidm_server.canon_inventory import inventory_payload
 from aidm_server.database import db
-from aidm_server.emergent_memory import inventory_payload
 from aidm_server.errors import error_response
-from aidm_server.models import Campaign, Player, safe_json_dumps, safe_json_loads
-from aidm_server.validation import coerce_int, missing_fields, parse_json_body
+from aidm_server.models import DmTurn, Player, PlayerAction, TurnEvent, safe_json_dumps
+from aidm_server.pagination import jsonify_page, limited_page
+from aidm_server.response_dtos import player_detail_payload, player_summary_payload
+from aidm_server.validation import (
+    coerce_int,
+    missing_fields,
+    optional_text as _optional_text,
+    parse_json_body,
+    required_text as _required_text,
+)
+from aidm_server.workspace_access import (
+    current_workspace_id,
+    get_campaign as workspace_campaign,
+    get_player as workspace_player,
+)
 
 
 logger = logging.getLogger(__name__)
 players_bp = Blueprint('players', __name__)
-
-
-def _optional_text(value, *, max_length: int, field: str):
-    if value is None:
-        return '', None
-    text = str(value).strip()
-    if len(text) > max_length:
-        return None, f'{field} must be {max_length} characters or fewer.'
-    return text, None
-
-
-def _required_text(value, *, max_length: int, field: str):
-    text, error = _optional_text(value, max_length=max_length, field=field)
-    if error:
-        return None, error
-    if not text:
-        return None, f'{field} is required.'
-    return text, None
 
 
 def _structured_text(value):
@@ -39,32 +34,6 @@ def _structured_text(value):
     if isinstance(value, str):
         return value
     return safe_json_dumps(value, {})
-
-
-def _structured_payload(raw_value):
-    return safe_json_loads(raw_value, raw_value)
-
-
-def _player_summary_payload(player: Player) -> dict:
-    return {
-        'player_id': player.player_id,
-        'campaign_id': player.campaign_id,
-        'name': player.name,
-        'character_name': player.character_name,
-        'race': player.race,
-        'class_': player.class_,
-        'char_class': player.class_,
-        'level': player.level,
-    }
-
-
-def _player_detail_payload(player: Player) -> dict:
-    return {
-        **_player_summary_payload(player),
-        'stats': _structured_payload(player.stats),
-        'inventory': inventory_payload(player.inventory),
-        'character_sheet': _structured_payload(player.character_sheet),
-    }
 
 
 @players_bp.route('/campaigns/<int:campaign_id>/players', methods=['GET', 'POST'])
@@ -76,11 +45,14 @@ def handle_players(campaign_id):
 
 def add_player(campaign_id):
     payload = parse_json_body(request)
+    if payload is None:
+        return error_response('validation_error', 'Expected JSON request body.', 400)
+
     required = missing_fields(payload, ['name', 'character_name'])
     if required:
         return error_response('validation_error', 'Missing required fields.', 400, {'missing_fields': required})
 
-    campaign = db.session.get(Campaign, campaign_id)
+    campaign = workspace_campaign(campaign_id)
     if not campaign:
         return error_response('campaign_not_found', 'Campaign not found.', 404)
 
@@ -111,6 +83,7 @@ def add_player(campaign_id):
     try:
         raw_inventory = payload.get('inventory')
         new_player = Player(
+            workspace_id=current_workspace_id(),
             campaign_id=campaign_id,
             name=name,
             character_name=character_name,
@@ -131,21 +104,27 @@ def add_player(campaign_id):
 
 
 def get_players(campaign_id):
-    campaign = db.session.get(Campaign, campaign_id)
+    campaign = workspace_campaign(campaign_id)
     if not campaign:
         return error_response('campaign_not_found', 'Campaign not found.', 404)
 
-    players = Player.query.filter_by(campaign_id=campaign_id).all()
-    return jsonify([_player_summary_payload(player) for player in players])
+    before_id = coerce_int(request.args.get('before_id'))
+    limit = coerce_int(request.args.get('limit'))
+    query = Player.query.filter_by(workspace_id=current_workspace_id())
+    if before_id is not None:
+        query = query.filter(Player.player_id < before_id)
+    query = query.order_by(Player.created_at.asc(), Player.player_id.asc())
+    players = limited_page(query, limit=limit)
+    return jsonify_page(players, payload_for=player_summary_payload, cursor_for=lambda player: player.player_id)
 
 
 @players_bp.route('/<int:player_id>', methods=['GET'])
 def get_player_by_id(player_id):
-    player = db.session.get(Player, player_id)
+    player = workspace_player(player_id)
     if not player:
         return error_response('player_not_found', 'Player not found.', 404)
 
-    return jsonify(_player_detail_payload(player))
+    return jsonify(player_detail_payload(player))
 
 
 @players_bp.route('/<int:player_id>', methods=['PATCH'])
@@ -154,7 +133,7 @@ def update_player(player_id):
     if payload is None:
         return error_response('validation_error', 'Expected JSON request body.', 400)
 
-    player = db.session.get(Player, player_id)
+    player = workspace_player(player_id)
     if not player:
         return error_response('player_not_found', 'Player not found.', 404)
 
@@ -199,8 +178,28 @@ def update_player(player_id):
             player.inventory = safe_json_dumps(inventory_payload(payload.get('inventory')), [])
 
         db.session.commit()
-        return jsonify(_player_detail_payload(player))
+        return jsonify(player_detail_payload(player))
     except Exception as exc:
         db.session.rollback()
         logger.error('Failed to update player: %s', str(exc))
         return error_response('player_update_failed', 'Failed to update player.', 400)
+
+
+@players_bp.route('/<int:player_id>', methods=['DELETE'])
+def delete_player(player_id):
+    player = workspace_player(player_id)
+    if not player:
+        return error_response('player_not_found', 'Player not found.', 404)
+
+    campaign_id = player.campaign_id
+    try:
+        PlayerAction.query.filter_by(player_id=player_id).delete(synchronize_session=False)
+        DmTurn.query.filter_by(player_id=player_id).update({DmTurn.player_id: None}, synchronize_session=False)
+        TurnEvent.query.filter_by(player_id=player_id).update({TurnEvent.player_id: None}, synchronize_session=False)
+        db.session.delete(player)
+        db.session.commit()
+        return jsonify({'deleted': True, 'player_id': player_id, 'campaign_id': campaign_id})
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to delete player: %s', str(exc))
+        return error_response('player_delete_failed', 'Failed to delete player.', 400)

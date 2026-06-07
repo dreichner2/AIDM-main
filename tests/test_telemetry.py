@@ -21,6 +21,43 @@ def test_metrics_endpoint_exposes_counters(client):
     assert payload['enabled'] is False
 
 
+def test_prometheus_metrics_endpoint_exposes_counters_and_beta_gauges(client):
+    client.get('/api/health')
+    response = client.get('/api/metrics/prometheus')
+    assert response.status_code == 200
+    assert response.headers['Content-Type'].startswith('text/plain; version=0.0.4')
+
+    body = response.get_data(as_text=True)
+    assert '# TYPE aidm_telemetry_enabled gauge' in body
+    assert 'aidm_system_health_requests_total' in body
+    assert 'aidm_system_metrics_prometheus_requests_total 1' in body
+    assert 'aidm_api_requests_total{method="GET",path="/api/health"}' in body
+    assert 'aidm_beta_ai_failure_rate 0' in body
+
+
+def test_prometheus_text_sanitizes_metric_and_label_names():
+    import aidm_server.telemetry as telemetry_module
+
+    client = telemetry_module.TelemetryClient(
+        enabled=False,
+        endpoint=None,
+        api_key=None,
+        timeout_seconds=1,
+        max_queue_size=8,
+    )
+    client.record_metric(
+        'custom.metric-total',
+        2,
+        tags={'odd label': 'needs"escape\n'},
+    )
+    client.record_timing('provider.phase_ms', 12.5, tags={'provider': 'test'})
+
+    body = client.prometheus_text()
+    assert 'aidm_custom_metric_total{odd_label="needs\\"escape\\n"} 2' in body
+    assert 'aidm_provider_phase_milliseconds_count{provider="test"} 1' in body
+    assert 'aidm_provider_phase_milliseconds_sum{provider="test"} 12.5' in body
+
+
 def test_external_telemetry_delivery(tmp_path, monkeypatch):
     db_path = tmp_path / 'telemetry.db'
 

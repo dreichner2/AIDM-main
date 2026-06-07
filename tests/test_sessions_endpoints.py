@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from sqlalchemy.exc import IntegrityError
+
 import aidm_server.blueprints.sessions as sessions_blueprint
 from aidm_server.database import db
 from aidm_server.models import (
+    Campaign,
     DmTurn,
     Session,
     SessionLogEntry,
@@ -14,7 +18,9 @@ from aidm_server.models import (
     StoryThread,
     TurnEvent,
     TurnCanonUpdate,
+    World,
 )
+from aidm_server.turn_events import DM_RESPONSE_EVENT, PLAYER_MESSAGE_EVENT, SESSION_ENDED_EVENT, SESSION_RECAP_EVENT, SESSION_STARTED_EVENT
 from tests.helpers import seed_world_campaign_player_session
 
 
@@ -42,6 +48,12 @@ def test_session_state_and_log_endpoints(client, app):
 def test_end_session_recap_persists_snapshot(client, app):
     ids = seed_world_campaign_player_session(app)
 
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        assert session is not None
+        session.state_snapshot = json.dumps({'client_session_id': 'legacy-id', 'custom': {'keep': True}})
+        db.session.commit()
+
     response = client.post(f"/api/sessions/{ids['session_id']}/end")
     assert response.status_code == 200
     payload = response.get_json()
@@ -52,6 +64,28 @@ def test_end_session_recap_persists_snapshot(client, app):
     sessions_payload = sessions_response.get_json()
     assert isinstance(sessions_payload[0]['state_snapshot'], dict)
     assert sessions_payload[0]['state_snapshot']['recap'] == payload['recap']
+    assert sessions_payload[0]['state_snapshot']['custom'] == {'keep': True}
+
+    with app.app_context():
+        events = (
+            TurnEvent.query.filter_by(session_id=ids['session_id'])
+            .order_by(TurnEvent.event_id.asc())
+            .all()
+        )
+        assert [event.event_type for event in events] == [SESSION_ENDED_EVENT, SESSION_RECAP_EVENT]
+        recap_event = events[-1]
+        recap_payload = json.loads(recap_event.payload_json)
+        assert recap_payload['recap'] == payload['recap']
+
+        log_entries = (
+            SessionLogEntry.query.filter_by(session_id=ids['session_id'])
+            .order_by(SessionLogEntry.id.asc())
+            .all()
+        )
+        assert [entry.entry_type for entry in log_entries] == ['system', 'system']
+        assert 'Session ended' in log_entries[0].message
+        assert 'Session Recap' in log_entries[1].message
+        assert payload['recap'] in log_entries[1].message
 
 
 def test_end_session_recap_uses_bounded_recent_log_and_summary(client, app, monkeypatch):
@@ -118,26 +152,271 @@ def test_start_session_adds_welcome_log(client, app):
     assert entries[0]['entry_type'] == 'system'
     assert 'Welcome to the table' in entries[0]['message']
 
+    with app.app_context():
+        event = TurnEvent.query.filter_by(session_id=session_id).one()
+        assert event.event_type == SESSION_STARTED_EVENT
+        payload = json.loads(event.payload_json)
+        assert payload['metadata']['kind'] == 'session_welcome'
 
-def test_update_session_persists_name_in_snapshot(client, app):
+
+def test_start_session_requires_json_and_valid_campaign_id(client):
+    non_json_response = client.post('/api/sessions/start', data='not-json', content_type='text/plain')
+    assert non_json_response.status_code == 400
+    assert non_json_response.get_json()['error_code'] == 'validation_error'
+
+    invalid_campaign_response = client.post('/api/sessions/start', json={'campaign_id': 'not-an-id'})
+    assert invalid_campaign_response.status_code == 400
+    assert invalid_campaign_response.get_json()['error_code'] == 'validation_error'
+
+
+def test_start_session_reuses_client_session_id(client, app):
+    ids = seed_world_campaign_player_session(app)
+    payload = {'campaign_id': ids['campaign_id'], 'client_session_id': 'session-start-1'}
+
+    first_response = client.post('/api/sessions/start', json=payload)
+    replay_response = client.post('/api/sessions/start', json=payload)
+
+    assert first_response.status_code == 201
+    assert replay_response.status_code == 200
+    assert replay_response.get_json()['session_id'] == first_response.get_json()['session_id']
+    assert replay_response.get_json()['idempotent_replay'] is True
+
+    with app.app_context():
+        created_count = Session.query.filter_by(campaign_id=ids['campaign_id']).count()
+        assert created_count == 2
+        created = Session.query.filter_by(client_session_id='session-start-1').one()
+        assert created.session_id == first_response.get_json()['session_id']
+
+
+def test_session_client_session_id_is_unique_per_campaign(app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        db.session.add_all(
+            [
+                Session(campaign_id=ids['campaign_id'], client_session_id='duplicate-start'),
+                Session(campaign_id=ids['campaign_id'], client_session_id='duplicate-start'),
+            ]
+        )
+        with pytest.raises(IntegrityError):
+            db.session.commit()
+        db.session.rollback()
+
+
+def test_start_session_rejects_invalid_client_session_id(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    response = client.post(
+        '/api/sessions/start',
+        json={'campaign_id': ids['campaign_id'], 'client_session_id': 'bad key with spaces'},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()['error_code'] == 'validation_error'
+
+
+def test_import_session_from_export_restores_state_events_and_projected_log(client, app):
+    ids = seed_world_campaign_player_session(app)
+    export_payload = {
+        'exportedAt': '2026-06-06T10:30:00+00:00',
+        'selectedIds': {
+            'campaignId': ids['campaign_id'],
+            'sessionId': ids['session_id'],
+            'playerId': ids['player_id'],
+        },
+        'selectedSession': {
+            'session_id': ids['session_id'],
+            'display_name': 'Ash Gate Alpha',
+            'state_snapshot': {'recap': 'Old recap'},
+        },
+        'sessionState': {
+            'current_location': 'Restored Gate',
+            'current_quest': 'Open the restored door',
+            'rolling_summary': 'The party found the gate in an exported file.',
+            'active_segments': [{'title': 'Gate'}],
+            'memory_snippets': [{'summary': 'Exported memory'}],
+            'updated_at': '2026-06-06T10:31:00+00:00',
+        },
+        'logEntries': [
+            {
+                'message': 'This should not be duplicated when events are present.',
+                'entry_type': 'system',
+                'metadata': {},
+                'timestamp': '2026-06-06T10:29:00+00:00',
+            }
+        ],
+        'turnEvents': [
+            {
+                'event_id': 101,
+                'turn_id': 77,
+                'player_id': ids['player_id'],
+                'event_type': PLAYER_MESSAGE_EVENT,
+                'payload': {'speaker': 'Ember', 'message': 'I test the restored gate.'},
+                'created_at': '2026-06-06T10:32:00+00:00',
+            },
+            {
+                'event_id': 102,
+                'turn_id': 77,
+                'player_id': ids['player_id'],
+                'event_type': DM_RESPONSE_EVENT,
+                'payload': {'message': 'The restored gate opens.'},
+                'created_at': '2026-06-06T10:33:00+00:00',
+            },
+        ],
+    }
+
+    response = client.post('/api/sessions/import', json=export_payload)
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    imported_session_id = payload['session_id']
+    assert imported_session_id != ids['session_id']
+    assert payload['session']['display_name'] == 'Ash Gate Alpha'
+    assert payload['counts'] == {
+        'turn_events': 2,
+        'projected_log_entries': 2,
+        'log_entries': 0,
+        'session_state': 1,
+    }
+
+    with app.app_context():
+        imported_session = db.session.get(Session, imported_session_id)
+        assert imported_session is not None
+        assert imported_session.campaign_id == ids['campaign_id']
+        assert imported_session.name == 'Ash Gate Alpha'
+
+        imported_state = SessionState.query.filter_by(session_id=imported_session_id).one()
+        assert imported_state.current_location == 'Restored Gate'
+        assert imported_state.rolling_summary == 'The party found the gate in an exported file.'
+        assert json.loads(imported_state.active_segments) == [{'title': 'Gate'}]
+        assert json.loads(imported_state.memory_snippets) == [{'summary': 'Exported memory'}]
+
+        events = TurnEvent.query.filter_by(session_id=imported_session_id).order_by(TurnEvent.event_id.asc()).all()
+        assert [event.event_type for event in events] == [PLAYER_MESSAGE_EVENT, DM_RESPONSE_EVENT]
+        player_event_payload = json.loads(events[0].payload_json)
+        assert player_event_payload['metadata']['imported_from_turn_id'] == 77
+        assert player_event_payload['metadata']['imported_from_event_id'] == 101
+
+        log_entries = (
+            SessionLogEntry.query.filter_by(session_id=imported_session_id)
+            .order_by(SessionLogEntry.id.asc())
+            .all()
+        )
+        assert [entry.entry_type for entry in log_entries] == ['player', 'dm']
+        assert 'I test the restored gate.' in log_entries[0].message
+        assert 'The restored gate opens.' in log_entries[1].message
+        assert 'This should not be duplicated' not in '\n'.join(entry.message for entry in log_entries)
+
+
+def test_import_session_falls_back_to_log_entries_when_events_are_absent(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    response = client.post(
+        '/api/sessions/import',
+        json={
+            'campaign_id': ids['campaign_id'],
+            'name': 'Legacy Snapshot',
+            'logEntries': [
+                {
+                    'message': 'Legacy player log',
+                    'entry_type': 'player',
+                    'metadata': {'source': 'legacy'},
+                    'timestamp': '2026-06-06T10:34:00+00:00',
+                },
+                {
+                    'message': 'Legacy DM log',
+                    'entry_type': 'dm',
+                    'metadata': {},
+                    'timestamp': '2026-06-06T10:35:00+00:00',
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    imported_session_id = payload['session_id']
+    assert payload['session']['display_name'] == 'Legacy Snapshot'
+    assert payload['counts']['turn_events'] == 0
+    assert payload['counts']['log_entries'] == 2
+
+    log_response = client.get(f"/api/sessions/{imported_session_id}/log")
+    assert log_response.status_code == 200
+    assert [entry['message'] for entry in log_response.get_json()['entries']] == [
+        'Legacy player log',
+        'Legacy DM log',
+    ]
+
+
+def test_import_session_bounds_nested_state_lists(client, app):
+    ids = seed_world_campaign_player_session(app)
+    huge_text = 'x' * 3000
+
+    response = client.post(
+        '/api/sessions/import',
+        json={
+            'campaign_id': ids['campaign_id'],
+            'sessionState': {
+                'active_segments': [{'title': huge_text} for _ in range(110)],
+                'memory_snippets': [{'summary': huge_text, 'nested': [huge_text for _ in range(80)]}],
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    imported_session_id = response.get_json()['session_id']
+    with app.app_context():
+        imported_state = SessionState.query.filter_by(session_id=imported_session_id).one()
+        active_segments = json.loads(imported_state.active_segments)
+        memory_snippets = json.loads(imported_state.memory_snippets)
+
+    assert len(active_segments) == 100
+    assert len(active_segments[0]['title']) == 2000
+    assert len(memory_snippets[0]['summary']) == 2000
+    assert len(memory_snippets[0]['nested']) == 50
+
+
+def test_import_session_rejects_missing_or_unknown_campaign(client):
+    missing_campaign_response = client.post('/api/sessions/import', json={'logEntries': []})
+    assert missing_campaign_response.status_code == 400
+    assert missing_campaign_response.get_json()['error_code'] == 'validation_error'
+
+    unknown_campaign_response = client.post('/api/sessions/import', json={'campaign_id': 99999})
+    assert unknown_campaign_response.status_code == 404
+    assert unknown_campaign_response.get_json()['error_code'] == 'campaign_not_found'
+
+
+def test_update_session_persists_name_in_metadata_columns(client, app):
     ids = seed_world_campaign_player_session(app)
 
     response = client.patch(f"/api/sessions/{ids['session_id']}", json={'name': 'Pyres at Dawn'})
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload['state_snapshot']['name'] == 'Pyres at Dawn'
+    assert payload['state_snapshot'] == {}
     assert payload['display_name'] == 'Pyres at Dawn'
     assert payload['updated_at']
+    assert payload['status'] == 'active'
 
     sessions_response = client.get(f"/api/sessions/campaigns/{ids['campaign_id']}/sessions")
     assert sessions_response.status_code == 200
     sessions_payload = sessions_response.get_json()
     renamed = next(item for item in sessions_payload if item['session_id'] == ids['session_id'])
-    assert renamed['state_snapshot']['name'] == 'Pyres at Dawn'
+    assert renamed['state_snapshot'] == {}
     assert renamed['display_name'] == 'Pyres at Dawn'
     assert renamed['latest_activity_at']
     assert renamed['turn_count'] == 0
     assert renamed['latest_summary'] == ''
+
+
+def test_update_session_rejects_stale_expected_updated_at(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    response = client.patch(
+        f"/api/sessions/{ids['session_id']}",
+        json={'name': 'Old Name', 'expected_updated_at': '1999-01-01T00:00:00'},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()['error_code'] == 'stale_update'
 
 
 def test_list_campaign_sessions_includes_display_metadata(client, app):
@@ -164,12 +443,46 @@ def test_list_campaign_sessions_includes_display_metadata(client, app):
     assert response.status_code == 200
     payload = response.get_json()[0]
     assert payload['session_id'] == ids['session_id']
-    assert payload['display_name'] == f"Session {ids['session_id']}"
+    assert payload['display_name'] == 'Session 1'
     assert payload['turn_count'] == 1
     assert payload['latest_summary'] == 'The relic started glowing.'
     assert payload['latest_activity_at']
     assert payload['updated_at']
     assert payload['is_archived'] is False
+    assert payload['status'] == 'active'
+    assert payload['deleted_at'] is None
+
+
+def test_unnamed_sessions_display_campaign_relative_numbers(client, app):
+    with app.app_context():
+        world = World(name='Numbered World', description='Campaign-relative sessions')
+        db.session.add(world)
+        db.session.flush()
+        first_campaign = Campaign(title='First Campaign', world_id=world.world_id)
+        second_campaign = Campaign(title='Second Campaign', world_id=world.world_id)
+        db.session.add_all([first_campaign, second_campaign])
+        db.session.flush()
+        first_session = Session(campaign_id=first_campaign.campaign_id)
+        second_session = Session(campaign_id=first_campaign.campaign_id)
+        other_campaign_session = Session(campaign_id=second_campaign.campaign_id)
+        db.session.add_all([first_session, second_session, other_campaign_session])
+        db.session.commit()
+        first_campaign_id = first_campaign.campaign_id
+        second_campaign_id = second_campaign.campaign_id
+        first_session_id = first_session.session_id
+        second_session_id = second_session.session_id
+        other_session_id = other_campaign_session.session_id
+
+    first_response = client.get(f'/api/sessions/campaigns/{first_campaign_id}/sessions')
+    second_response = client.get(f'/api/sessions/campaigns/{second_campaign_id}/sessions')
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    first_payload = {session['session_id']: session for session in first_response.get_json()}
+    second_payload = {session['session_id']: session for session in second_response.get_json()}
+    assert first_payload[first_session_id]['display_name'] == 'Session 1'
+    assert first_payload[second_session_id]['display_name'] == 'Session 2'
+    assert second_payload[other_session_id]['display_name'] == 'Session 1'
 
 
 def test_update_session_rejects_empty_and_overlong_names(client, app):
@@ -212,7 +525,7 @@ def test_delete_session_removes_session_owned_rows(client, app):
         db.session.commit()
         turn_id = turn.turn_id
 
-    response = client.delete(f"/api/sessions/{ids['session_id']}")
+    response = client.delete(f"/api/sessions/{ids['session_id']}?hard=true")
     assert response.status_code == 200
     assert response.get_json()['deleted'] is True
 
@@ -269,7 +582,7 @@ def test_delete_session_clears_canon_turn_references(client, app):
         fact_id = fact.fact_id
         thread_id = thread.thread_id
 
-    response = client.delete(f"/api/sessions/{ids['session_id']}")
+    response = client.delete(f"/api/sessions/{ids['session_id']}?hard=true")
     assert response.status_code == 200
 
     with app.app_context():
@@ -288,17 +601,46 @@ def test_delete_session_clears_canon_turn_references(client, app):
         assert thread.resolved_turn_id is None
 
 
-def test_delete_missing_and_repeated_session_returns_404(client, app):
+def test_delete_session_archives_and_restore_resurfaces_in_lists(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    first_response = client.delete(f"/api/sessions/{ids['session_id']}")
+    assert first_response.status_code == 200
+    first_payload = first_response.get_json()
+    assert first_payload['deleted'] is True
+    assert first_payload['archived'] is True
+    assert first_payload['session']['is_archived'] is True
+    assert first_payload['session']['deleted_at']
+
+    default_list = client.get(f"/api/sessions/campaigns/{ids['campaign_id']}/sessions")
+    assert default_list.status_code == 200
+    assert default_list.get_json() == []
+
+    archived_list = client.get(f"/api/sessions/campaigns/{ids['campaign_id']}/sessions?include_archived=true")
+    assert archived_list.status_code == 200
+    archived_payload = archived_list.get_json()[0]
+    assert archived_payload['session_id'] == ids['session_id']
+    assert archived_payload['status'] == 'archived'
+
+    restore_response = client.post(f"/api/sessions/{ids['session_id']}/restore")
+    assert restore_response.status_code == 200
+    restore_payload = restore_response.get_json()
+    assert restore_payload['restored'] is True
+    assert restore_payload['session']['status'] == 'active'
+    assert restore_payload['session']['deleted_at'] is None
+
+
+def test_delete_missing_and_repeated_hard_delete_returns_404(client, app):
     ids = seed_world_campaign_player_session(app)
 
     missing_response = client.delete('/api/sessions/99999')
     assert missing_response.status_code == 404
     assert missing_response.get_json()['error_code'] == 'session_not_found'
 
-    first_response = client.delete(f"/api/sessions/{ids['session_id']}")
+    first_response = client.delete(f"/api/sessions/{ids['session_id']}?hard=true")
     assert first_response.status_code == 200
 
-    repeated_response = client.delete(f"/api/sessions/{ids['session_id']}")
+    repeated_response = client.delete(f"/api/sessions/{ids['session_id']}?hard=true")
     assert repeated_response.status_code == 404
     assert repeated_response.get_json()['error_code'] == 'session_not_found'
 
@@ -321,6 +663,16 @@ def test_session_log_endpoint_returns_most_recent_entries_in_order(client, app):
     payload = response.get_json()
 
     assert [entry['message'] for entry in payload['entries']] == ['second', 'third']
+    assert payload['has_more'] is True
+    assert payload['next_cursor'] == payload['entries'][0]['id']
+
+    previous_response = client.get(
+        f"/api/sessions/{ids['session_id']}/log?limit=2&before_id={payload['next_cursor']}"
+    )
+    assert previous_response.status_code == 200
+    previous_payload = previous_response.get_json()
+    assert [entry['message'] for entry in previous_payload['entries']] == ['first']
+    assert previous_payload['has_more'] is False
 
 
 def test_session_events_endpoint_returns_most_recent_events_in_order(client, app):
@@ -361,6 +713,16 @@ def test_session_events_endpoint_returns_most_recent_events_in_order(client, app
     assert [event['event_type'] for event in payload['events']] == ['dm_response', 'canon_applied']
     assert payload['events'][0]['payload']['message'] == 'second'
     assert payload['events'][1]['payload']['status'] == 'applied'
+    assert payload['has_more'] is True
+    assert payload['next_cursor'] == payload['events'][0]['event_id']
+
+    previous_response = client.get(
+        f"/api/sessions/{ids['session_id']}/events?limit=2&before_id={payload['next_cursor']}"
+    )
+    assert previous_response.status_code == 200
+    previous_payload = previous_response.get_json()
+    assert [event['event_type'] for event in previous_payload['events']] == ['player_message']
+    assert previous_payload['has_more'] is False
 
 
 def test_list_campaign_sessions_returns_404_for_missing_campaign(client):

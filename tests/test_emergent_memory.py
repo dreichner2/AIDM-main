@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sqlalchemy import event
+
 from aidm_server.database import db
 from aidm_server.emergent_memory import (
     apply_canon_patch,
@@ -194,6 +196,105 @@ def test_subject_singleton_fact_replacement_only_supersedes_matching_subject(app
         assert [fact.fact_status for fact in bob_facts] == ['accepted']
         assert bob_facts[0].value_text == 'wounded'
         assert alice_facts[1].supersedes_fact_id == alice_facts[0].fact_id
+
+
+def test_validate_canon_patch_batches_existing_fact_lookup(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        first_turn = _create_turn(
+            app,
+            ids,
+            player_input='I study the witnesses.',
+            dm_output='Alice is alive and the party is in the chapel.',
+        )
+        campaign = first_turn.campaign
+        setup_patch = {
+            'entities': [{'entity_type': 'npc', 'name': 'Alice'}],
+            'facts': [
+                {'subject': 'Alice', 'predicate': 'status', 'value_text': 'alive'},
+                {'predicate': 'current_location', 'value_text': 'Chapel'},
+            ],
+        }
+        validated_setup, setup_rejections = validate_canon_patch(first_turn, campaign, setup_patch)
+        assert setup_rejections == []
+        apply_canon_patch(first_turn, campaign, validated_setup, 'test-extractor', setup_rejections)
+        db.session.commit()
+
+        second_turn = _create_turn(
+            app,
+            ids,
+            player_input='I check the witnesses again.',
+            dm_output='Alice is wounded and the party reaches the harbor.',
+        )
+        replacement_patch = {
+            'facts': [
+                {'subject': 'Alice', 'predicate': 'status', 'value_text': 'wounded', 'replace_existing': True},
+                {'predicate': 'current_location', 'value_text': 'Harbor', 'replace_existing': True},
+            ],
+        }
+        story_fact_selects = []
+
+        def count_story_fact_selects(_conn, _cursor, statement, _parameters, _context, _executemany):
+            normalized = ' '.join(statement.lower().split())
+            if normalized.startswith('select') and ' from story_facts' in normalized:
+                story_fact_selects.append(statement)
+
+        event.listen(db.engine, 'before_cursor_execute', count_story_fact_selects)
+        try:
+            validated_replacement, replacement_rejections = validate_canon_patch(
+                second_turn,
+                campaign,
+                replacement_patch,
+            )
+        finally:
+            event.remove(db.engine, 'before_cursor_execute', count_story_fact_selects)
+
+        assert replacement_rejections == []
+        assert len(validated_replacement['facts']) == 2
+        assert len(story_fact_selects) == 1
+
+
+def test_apply_canon_patch_batches_thread_title_lookup(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        turn = _create_turn(
+            app,
+            ids,
+            player_input='I review active threads.',
+            dm_output='The bell and gate threads both move forward.',
+        )
+        campaign = turn.campaign
+        db.session.add_all(
+            [
+                StoryThread(campaign_id=ids['campaign_id'], title='Bell Tower', summary='Old summary.'),
+                StoryThread(campaign_id=ids['campaign_id'], title='Ash Gate', summary='Old summary.'),
+            ]
+        )
+        db.session.commit()
+        patch = {
+            'threads': [
+                {'title': 'Bell Tower', 'summary': 'The bell tolls again.', 'priority': 3},
+                {'title': 'Ash Gate', 'summary': 'The gate opens.', 'priority': 2},
+            ]
+        }
+        story_thread_selects = []
+
+        def count_story_thread_selects(_conn, _cursor, statement, _parameters, _context, _executemany):
+            normalized = ' '.join(statement.lower().split())
+            if normalized.startswith('select') and ' from story_threads' in normalized:
+                story_thread_selects.append(statement)
+
+        event.listen(db.engine, 'before_cursor_execute', count_story_thread_selects)
+        try:
+            summary = apply_canon_patch(turn, campaign, patch, 'test-extractor', [])
+        finally:
+            event.remove(db.engine, 'before_cursor_execute', count_story_thread_selects)
+
+        assert len(summary['threads_created_or_updated']) == 2
+        assert len(story_thread_selects) == 1
+        assert StoryThread.query.filter_by(campaign_id=ids['campaign_id']).count() == 2
 
 
 def test_inventory_validation_rejects_abstract_or_directional_phrases(app):
@@ -501,3 +602,78 @@ def test_build_emergent_context_prioritizes_relevant_older_canon(app):
     fact_subjects = {fact['subject'] for fact in context['facts']}
     assert 'Captain Liora Vale' in entity_names
     assert 'Captain Liora Vale' in fact_subjects
+
+
+def test_build_emergent_context_caps_candidate_pools(app, monkeypatch):
+    ids = seed_world_campaign_player_session(app)
+    import aidm_server.emergent_memory as emergent_memory
+
+    monkeypatch.setattr(emergent_memory, 'EMERGENT_ENTITY_CANDIDATE_LIMIT', 3)
+    monkeypatch.setattr(emergent_memory, 'EMERGENT_FACT_CANDIDATE_LIMIT', 3)
+    monkeypatch.setattr(emergent_memory, 'EMERGENT_THREAD_CANDIDATE_LIMIT', 3)
+
+    with app.app_context():
+        turn = _create_turn(
+            app,
+            ids,
+            player_input='I scan the archive.',
+            dm_output='The archive is full of names.',
+        )
+        entities = [
+            StoryEntity(
+                campaign_id=ids['campaign_id'],
+                session_id=ids['session_id'],
+                entity_type='npc',
+                name=f'Archivist {index}',
+                canonical_name=f'archivist-{index}',
+                summary='Candidate cap test.',
+                last_seen_turn_id=turn.turn_id,
+            )
+            for index in range(8)
+        ]
+        db.session.add_all(entities)
+        db.session.flush()
+        facts = [
+            StoryFact(
+                campaign_id=ids['campaign_id'],
+                subject_entity_id=entities[index].entity_id,
+                predicate='role',
+                value_text=f'Role {index}',
+                fact_status='accepted',
+            )
+            for index in range(8)
+        ]
+        threads = [
+            StoryThread(
+                campaign_id=ids['campaign_id'],
+                title=f'Archive Thread {index}',
+                summary='Candidate cap test.',
+                status='open',
+            )
+            for index in range(8)
+        ]
+        db.session.add_all(facts + threads)
+        db.session.commit()
+
+        context = build_emergent_context(
+            campaign_id=ids['campaign_id'],
+            entity_limit=8,
+            fact_limit=8,
+            thread_limit=8,
+        )
+
+    assert len(context['entities']) == 3
+    assert len(context['facts']) == 3
+    assert len(context['threads']) == 3
+
+    with app.app_context():
+        capped_context = build_emergent_context(
+            campaign_id=ids['campaign_id'],
+            entity_limit=2,
+            fact_limit=2,
+            thread_limit=2,
+        )
+
+    assert len(capped_context['entities']) == 2
+    assert len(capped_context['facts']) == 2
+    assert len(capped_context['threads']) == 2

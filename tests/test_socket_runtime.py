@@ -1,0 +1,53 @@
+from aidm_server.socket_runtime import SocketRuntime
+from aidm_server.socket_state import SocketState
+
+
+def test_socket_runtime_clears_bound_player_and_room():
+    state = SocketState()
+    runtime = SocketRuntime(state)
+    emitted = []
+    left_rooms = []
+    player = {'id': 7, 'character_name': 'Ember', 'name': 'Danny'}
+
+    state.set_connection('sid-a', {'authorized': True, 'session_id': 3, 'player_id': 7})
+    state.track_active_player(3, player, 'sid-a')
+
+    record = runtime.clear_connection_binding(
+        'sid-a',
+        leave_bound_room=True,
+        leave_room_fn=left_rooms.append,
+        emit_fn=lambda name, payload, **kwargs: emitted.append((name, payload, kwargs)),
+    )
+
+    assert record == {'authorized': True, 'session_id': None, 'player_id': None}
+    assert left_rooms == ['3']
+    assert ('player_left', {'id': 7}, {'room': '3'}) in emitted
+    assert ('active_players', [], {'room': '3'}) in emitted
+    assert state.active_player_payloads(3) == []
+
+
+def test_socket_runtime_keeps_player_until_last_socket_disconnects():
+    state = SocketState()
+    runtime = SocketRuntime(state)
+    emitted = []
+    player = {'id': 7, 'character_name': 'Ember', 'name': 'Danny'}
+
+    state.set_connection('sid-a', {'authorized': True, 'session_id': 3, 'player_id': 7})
+    state.set_connection('sid-b', {'authorized': True, 'session_id': 3, 'player_id': 7})
+    state.track_active_player(3, player, 'sid-a')
+    state.track_active_player(3, player, 'sid-b')
+
+    runtime.release_disconnect(
+        'sid-a',
+        emit_fn=lambda name, payload, **kwargs: emitted.append((name, payload, kwargs)),
+    )
+    assert state.active_player_payloads(3) == [player]
+    assert emitted == []
+
+    runtime.release_disconnect(
+        'sid-b',
+        emit_fn=lambda name, payload, **kwargs: emitted.append((name, payload, kwargs)),
+    )
+    assert state.active_player_payloads(3) == []
+    assert ('player_left', {'id': 7}, {'room': '3'}) in emitted
+    assert ('active_players', [], {'room': '3'}) in emitted

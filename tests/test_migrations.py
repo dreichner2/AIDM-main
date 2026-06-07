@@ -31,6 +31,13 @@ def _inspect_db(db_uri: str):
         engine.dispose()
 
 
+def _fk_ondelete(inspector, table_name: str, constrained_column: str) -> str | None:
+    for foreign_key in inspector.get_foreign_keys(table_name):
+        if constrained_column in foreign_key.get('constrained_columns', []):
+            return (foreign_key.get('options') or {}).get('ondelete')
+    return None
+
+
 def test_migration_chain_upgrade_and_downgrade(tmp_path):
     db_path = tmp_path / 'migration_chain.db'
     db_uri = f'sqlite:///{db_path}'
@@ -70,10 +77,37 @@ def test_migration_chain_upgrade_and_downgrade(tmp_path):
     assert 'story_threads' in tables
     assert 'turn_canon_updates' in tables
     assert 'turn_events' in tables
+    assert 'rate_limit_events' in tables
+    assert 'canon_jobs' in tables
     entry_cols_head = {col['name'] for col in inspector.get_columns('session_log_entries')}
     assert 'metadata_json' in entry_cols_head
     dm_turn_cols_head = {col['name'] for col in inspector.get_columns('dm_turns')}
     assert {'confidence', 'roll_value', 'outcome_status'}.issubset(dm_turn_cols_head)
+    campaign_cols_head = {col['name'] for col in inspector.get_columns('campaigns')}
+    assert {'updated_at', 'status'}.issubset(campaign_cols_head)
+    session_cols_head = {col['name'] for col in inspector.get_columns('sessions')}
+    assert {'name', 'status', 'updated_at', 'deleted_at', 'client_session_id', 'archived_by_campaign_id'}.issubset(session_cols_head)
+    assert _fk_ondelete(inspector, 'dm_turns', 'session_id') == 'CASCADE'
+    assert _fk_ondelete(inspector, 'session_log_entries', 'session_id') == 'CASCADE'
+    assert _fk_ondelete(inspector, 'session_states', 'session_id') == 'CASCADE'
+    assert _fk_ondelete(inspector, 'story_entities', 'session_id') == 'SET NULL'
+    assert _fk_ondelete(inspector, 'story_entities', 'first_seen_turn_id') == 'SET NULL'
+    assert _fk_ondelete(inspector, 'story_facts', 'source_turn_id') == 'SET NULL'
+    assert _fk_ondelete(inspector, 'story_threads', 'origin_turn_id') == 'SET NULL'
+    assert _fk_ondelete(inspector, 'turn_canon_updates', 'turn_id') == 'CASCADE'
+    assert _fk_ondelete(inspector, 'canon_jobs', 'turn_id') == 'CASCADE'
+    assert _fk_ondelete(inspector, 'canon_jobs', 'session_id') == 'CASCADE'
+    assert _fk_ondelete(inspector, 'sessions', 'archived_by_campaign_id') == 'SET NULL'
+    session_indexes_head = {index['name'] for index in inspector.get_indexes('sessions')}
+    assert 'ix_sessions_campaign_id_status_updated_at' in session_indexes_head
+    assert 'ix_sessions_archived_by_campaign_id' in session_indexes_head
+    assert 'uq_sessions_campaign_client_session_id' in session_indexes_head
+    map_checks_head = {constraint['name'] for constraint in inspector.get_check_constraints('maps')}
+    assert 'ck_maps_maps_has_owner' in map_checks_head
+    log_indexes_head = {index['name'] for index in inspector.get_indexes('session_log_entries')}
+    assert 'ix_session_log_entries_session_id_timestamp_id' in log_indexes_head
+    fact_indexes_head = {index['name'] for index in inspector.get_indexes('story_facts')}
+    assert 'ix_story_facts_campaign_subject_predicate' in fact_indexes_head
 
     _run_flask_db(['downgrade', '0001_initial_core'], env)
 
@@ -87,8 +121,14 @@ def test_migration_chain_upgrade_and_downgrade(tmp_path):
     assert 'story_threads' not in tables
     assert 'turn_canon_updates' not in tables
     assert 'turn_events' not in tables
+    assert 'rate_limit_events' not in tables
+    assert 'canon_jobs' not in tables
     entry_cols_after_down = {col['name'] for col in inspector.get_columns('session_log_entries')}
     assert 'metadata_json' not in entry_cols_after_down
+    campaign_cols_after_down = {col['name'] for col in inspector.get_columns('campaigns')}
+    assert 'updated_at' not in campaign_cols_after_down
+    session_cols_after_down = {col['name'] for col in inspector.get_columns('sessions')}
+    assert 'name' not in session_cols_after_down
 
     _run_flask_db(['upgrade', 'head'], env)
 
@@ -102,6 +142,12 @@ def test_migration_chain_upgrade_and_downgrade(tmp_path):
     assert 'story_threads' in tables
     assert 'turn_canon_updates' in tables
     assert 'turn_events' in tables
+    assert 'rate_limit_events' in tables
+    assert 'canon_jobs' in tables
+    session_cols_after_reupgrade = {col['name'] for col in inspector.get_columns('sessions')}
+    assert {'name', 'status', 'updated_at', 'deleted_at', 'client_session_id', 'archived_by_campaign_id'}.issubset(
+        session_cols_after_reupgrade
+    )
 
 
 def test_migration_chain_downgrade_to_base_and_reupgrade(tmp_path):
@@ -136,3 +182,11 @@ def test_migration_chain_downgrade_to_base_and_reupgrade(tmp_path):
     assert 'story_threads' in tables
     assert 'turn_canon_updates' in tables
     assert 'turn_events' in tables
+    assert 'rate_limit_events' in tables
+    assert 'canon_jobs' in tables
+    campaign_cols = {col['name'] for col in inspector.get_columns('campaigns')}
+    session_cols = {col['name'] for col in inspector.get_columns('sessions')}
+    assert {'updated_at', 'status'}.issubset(campaign_cols)
+    assert {'name', 'status', 'updated_at', 'deleted_at', 'client_session_id', 'archived_by_campaign_id'}.issubset(
+        session_cols
+    )

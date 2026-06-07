@@ -54,6 +54,28 @@ def test_segment_keywords_trigger():
     assert spec['trigger_type'] == 'keywords'
 
 
+def test_segment_trigger_non_object_json_falls_back_to_keywords():
+    matched, reason, spec = evaluate_segment_trigger(
+        trigger_condition='altar, gate',
+        player_message='I inspect the gate.',
+        session_state={},
+        campaign_state={},
+    )
+    assert matched is True
+    assert reason == 'keywords:altar,gate'
+    assert spec['trigger_type'] == 'keywords'
+
+    matched, reason, spec = evaluate_segment_trigger(
+        trigger_condition='["altar"]',
+        player_message='I inspect the altar.',
+        session_state={},
+        campaign_state={},
+    )
+    assert matched is False
+    assert reason == 'keywords:["altar"]'
+    assert spec['trigger_type'] == 'keywords'
+
+
 def test_create_segment_coerces_string_false_to_false(client, app):
     ids = seed_world_campaign_player_session(app)
 
@@ -74,6 +96,42 @@ def test_create_segment_coerces_string_false_to_false(client, app):
         assert segment.is_triggered is False
 
 
+def test_create_segment_validates_request_body_and_fields(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    non_json_response = client.post('/api/segments', data='not-json', content_type='text/plain')
+    assert non_json_response.status_code == 400
+    assert non_json_response.get_json()['error_code'] == 'validation_error'
+
+    invalid_campaign_response = client.post(
+        '/api/segments',
+        json={'campaign_id': 'not-an-id', 'title': 'Quiet Door'},
+    )
+    assert invalid_campaign_response.status_code == 400
+    assert invalid_campaign_response.get_json()['error_code'] == 'validation_error'
+
+    empty_title_response = client.post(
+        '/api/segments',
+        json={'campaign_id': ids['campaign_id'], 'title': '   '},
+    )
+    assert empty_title_response.status_code == 400
+    assert empty_title_response.get_json()['error_code'] == 'validation_error'
+
+    numeric_title_response = client.post(
+        '/api/segments',
+        json={'campaign_id': ids['campaign_id'], 'title': 123},
+    )
+    assert numeric_title_response.status_code == 400
+    assert numeric_title_response.get_json()['error_code'] == 'validation_error'
+
+    overlong_tags_response = client.post(
+        '/api/segments',
+        json={'campaign_id': ids['campaign_id'], 'title': 'Quiet Door', 'tags': 'x' * 501},
+    )
+    assert overlong_tags_response.status_code == 400
+    assert overlong_tags_response.get_json()['error_code'] == 'validation_error'
+
+
 def test_update_segment_rejects_ambiguous_boolean(client, app):
     ids = seed_world_campaign_player_session(app)
     create_response = client.post('/api/segments', json={'campaign_id': ids['campaign_id'], 'title': 'Quiet Door'})
@@ -86,8 +144,53 @@ def test_update_segment_rejects_ambiguous_boolean(client, app):
     assert response.get_json()['error_code'] == 'validation_error'
 
 
+def test_update_segment_validates_text_fields(client, app):
+    ids = seed_world_campaign_player_session(app)
+    create_response = client.post('/api/segments', json={'campaign_id': ids['campaign_id'], 'title': 'Quiet Door'})
+    assert create_response.status_code == 201
+    segment_id = create_response.get_json()['segment_id']
+
+    non_json_response = client.patch(f'/api/segments/{segment_id}', data='not-json', content_type='text/plain')
+    assert non_json_response.status_code == 400
+    assert non_json_response.get_json()['error_code'] == 'validation_error'
+
+    empty_title_response = client.patch(f'/api/segments/{segment_id}', json={'title': '   '})
+    assert empty_title_response.status_code == 400
+    assert empty_title_response.get_json()['error_code'] == 'validation_error'
+
+    numeric_description_response = client.patch(f'/api/segments/{segment_id}', json={'description': 123})
+    assert numeric_description_response.status_code == 400
+    assert numeric_description_response.get_json()['error_code'] == 'validation_error'
+
+
 def test_list_segments_returns_404_for_missing_campaign(client):
     response = client.get('/api/segments?campaign_id=99999')
 
     assert response.status_code == 404
     assert response.get_json()['error_code'] == 'campaign_not_found'
+
+
+def test_activate_segment_exclusive_updates_campaign_segments_in_one_request(client, app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        first = CampaignSegment(campaign_id=ids['campaign_id'], title='First', is_triggered=True)
+        second = CampaignSegment(campaign_id=ids['campaign_id'], title='Second', is_triggered=False)
+        db.session.add_all([first, second])
+        db.session.commit()
+        first_id = first.segment_id
+        second_id = second.segment_id
+
+    response = client.post(
+        '/api/segments/activate',
+        json={'campaign_id': ids['campaign_id'], 'segment_id': second_id, 'exclusive': True},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    states = {item['segment_id']: item['is_triggered'] for item in payload['segments']}
+    assert states[first_id] is False
+    assert states[second_id] is True
+
+    with app.app_context():
+        assert db.session.get(CampaignSegment, first_id).is_triggered is False
+        assert db.session.get(CampaignSegment, second_id).is_triggered is True

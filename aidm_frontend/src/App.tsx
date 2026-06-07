@@ -8,60 +8,76 @@ import {
   useState,
   type FormEvent,
 } from 'react'
+import type { Socket } from 'socket.io-client'
 import {
-  ArrowDown,
   ChevronDown,
-  Circle,
-  ClipboardList,
-  Download,
   ExternalLink,
   Flame,
   Lock,
   Maximize2,
   Menu,
   Minimize2,
-  MoreHorizontal,
-  Plus,
   Radio,
   Settings,
-  Share2,
   Sun,
   UserCircle,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react'
-import { io, type Socket } from 'socket.io-client'
-import { ApiClientError, apiFetch, normalizeBaseUrl } from './api'
+import { StatusDot, ThinIcon } from './AppChrome'
+import { CampaignRail, type CampaignCard, type SessionCard } from './CampaignRail'
+import {
+  InspectorPanel,
+  type InspectorTab,
+} from './InspectorPanel'
+import { ApiClientError, apiFetch } from './api'
+import { SessionBoard, type MainTab } from './SessionBoard'
+import {
+  abilityOptionsFromStatBlock,
+  buildMapMeta,
+  buildTimeline,
+  canonFactsFromMemorySnippets,
+  formatCompactNumber,
+  inventoryCapacity,
+  inventoryWeightLabel as buildInventoryWeightLabel,
+  isRecord,
+  itemOptionsFromInventory,
+  memorySnippetRecords,
+  normalizeInventory,
+  normalizeStats,
+  normalizeXp,
+  pendingRollOptionsFromTimeline,
+  stringValue,
+  truncateText,
+} from './gameSelectors'
 import './App.css'
 import type {
+  ActivePlayer,
   BetaSummary,
   Campaign,
-  CampaignCanon,
-  CampaignWorkspace,
-  CampaignSegment,
   Health,
-  JsonRecord,
   LlmRuntimeConfig,
-  MapItem,
   Player,
   PlayerDetail,
-  RulesHint,
-  SessionLogEntry,
-  SessionLogResponse,
-  SessionEventsResponse,
-  SessionState,
   SessionSummary,
-  SocketErrorPayload,
   StreamingTurn,
   TimelineEntry,
-  TimelineRole,
   TtsRuntimeConfig,
   World,
 } from './types'
+import { useCampaignActions, type CampaignActionDialogState } from './useCampaignActions'
+import { useComposerActions } from './useComposerActions'
+import { usePlayerProfileActions } from './usePlayerProfileActions'
+import { useSessionActions, type SessionActionDialogState } from './useSessionActions'
+import { useSessionSocket } from './useSessionSocket'
+import { useRuntimeSettings } from './useRuntimeSettings'
+import { useTtsNarration } from './useTtsNarration'
+import { useWorldMapSegmentActions } from './useWorldMapSegmentActions'
+import { useWorkspaceQueries, type CampaignSessionMeta } from './useWorkspaceQueries'
+import { useWorkspaceStore } from './useWorkspaceStore'
 
-const DEFAULT_BASE_URL =
-  import.meta.env.VITE_AIDM_API_BASE_URL ?? 'http://127.0.0.1:5050'
+const DEFAULT_BASE_URL = import.meta.env.VITE_AIDM_API_BASE_URL ?? ''
 
 const loadDiceRollDialog = () => import('./DiceRollDialog')
 const DiceRollDialog = lazy(loadDiceRollDialog)
@@ -70,150 +86,88 @@ function preloadDiceRollDialog() {
   void loadDiceRollDialog()
 }
 
-type MainTab = 'turns' | 'dm' | 'notes'
-type InspectorTab = 'party' | 'map' | 'canon' | 'inventory'
-type ComposerMode = 'action' | 'roll' | 'ability' | 'item' | 'emote' | 'ooc'
 type ThemeMode = 'dark' | 'light'
-type TtsPlaybackStatus = 'off' | 'ready' | 'queued' | 'requesting' | 'speaking' | 'failed'
 
-type CampaignCard = {
-  id: number
-  title: string
-  meta: string
-  avatar: string
+function isEditableShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
 }
 
-type CampaignSessionMeta = {
-  count: number
-  updatedAt: string | null
-  latestSessionId: number | null
-}
-
-type SessionCard = {
-  id: number
-  title: string
-  meta: string
-}
-
-type CreateCampaignForm = {
-  title: string
-  description: string
-  worldName: string
-}
-
-type RuntimeSettingsForm = {
-  baseUrl: string
-  authToken: string
-}
-
-type DiceRollState = {
-  die: string
-  result: number
-  rollKey: number
-  status: 'rolling' | 'sending'
-}
-
-const DICE_OPTIONS = ['d4', 'd6', 'd8', 'd10', 'd12', 'd20', 'd100']
-const TTS_AUDIO_MIME = 'audio/mpeg'
-const TTS_MIN_PARTIAL_FLUSH_CHARS = 48
-const TTS_FORCE_PARTIAL_FLUSH_CHARS = 180
-const TTS_PARTIAL_FLUSH_DELAY_MS = 2500
-const TTS_RECENT_TEXT_DEDUPE_MS = 120_000
-
-const COMPOSER_PREFIX_PATTERNS = [
-  /^\[OOC\]\s*/i,
-  /^I roll a d(?:4|6|8|10|12|20|100):\s*/i,
-  /^\/emote\s*/i,
-  /^[^:\n]{1,80}\s+attempts an ability check:\s*/i,
-  /^[^:\n]{1,80}\s+uses\s*/i,
-]
-
-type InventoryRow = {
-  item: string
-  count: string
-  weight: string
-  icon: string
-  weightValue: number | null
-}
-
-type StatBlock = {
-  hp: string
-  ac: string
-  init: string
-  speed: string
-  abilities: Array<[string, string, string]>
-  proficiency: string
-  inspiration: boolean
-}
-
-type XpProgress = {
-  current: number
-  max: number
-  percent: number
-  label: string
-}
-
-type TtsQueueItem = {
-  text: string
-  audioUrlPromise: Promise<string | null>
-  controller: AbortController
-  cleanup?: () => void
-  streamDone?: Promise<void>
-}
-
-type MapPanelMeta = {
-  explored: string
-  threat: string
-  threatTone: 'low' | 'medium' | 'high'
-  weather: string
-}
-
-type ThinIconName =
-  | 'archive'
-  | 'bolt'
-  | 'book'
-  | 'briefcase'
-  | 'chevron'
-  | 'cloud'
-  | 'cog'
-  | 'cube'
-  | 'dice'
-  | 'dot'
-  | 'map'
-  | 'refresh'
-  | 'send'
-  | 'settings'
-  | 'smile'
-  | 'spark'
-  | 'turns'
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function stringValue(value: unknown, fallback = '') {
-  if (typeof value === 'string' && value.trim()) return value.trim()
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
-  return fallback
-}
-
-function formatDateTime(value: string | null) {
-  if (!value) return 'Not recorded'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return 'Not recorded'
-  return date.toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
+function focusableDialogElements(container: HTMLElement) {
+  const selector = [
+    'button:not([disabled])',
+    'input:not([disabled])',
+    'textarea:not([disabled])',
+    'select:not([disabled])',
+    'a[href]',
+    '[tabindex]:not([tabindex="-1"])',
+  ].join(',')
+  return Array.from(container.querySelectorAll<HTMLElement>(selector)).filter((element) => {
+    if (element.getAttribute('aria-hidden') === 'true') return false
+    const style = window.getComputedStyle(element)
+    return style.display !== 'none' && style.visibility !== 'hidden'
   })
 }
 
-function formatClock(value: string | null) {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+type UiErrorCategory = 'connection' | 'tts' | 'validation' | 'persistence' | 'workspace' | 'system'
+
+type UiError = {
+  id: string
+  category: UiErrorCategory
+  message: string
+  createdAt: number
+}
+
+type WorldFormState = {
+  mode: 'create' | 'edit'
+  worldId: number | null
+  name: string
+  description: string
+  error: string
+  pending: boolean
+}
+
+type WorldDeleteDialogState = {
+  world: World
+  error: string
+  pending: boolean
+  canForce: boolean
+} | null
+
+type CampaignArchiveDialogState = {
+  items: Campaign[]
+  loading: boolean
+  error: string
+  pendingId: number | null
+} | null
+
+type SessionArchiveDialogState = {
+  items: SessionSummary[]
+  loading: boolean
+  error: string
+  pendingId: number | null
+} | null
+
+const emptyWorldForm: WorldFormState = {
+  mode: 'create',
+  worldId: null,
+  name: '',
+  description: '',
+  error: '',
+  pending: false,
+}
+
+function isUnauthorizedError(error: unknown) {
+  return error instanceof ApiClientError && error.status === 401
+}
+
+function isNotFoundError(error: unknown) {
+  return error instanceof ApiClientError && error.status === 404
+}
+
+function isAuthTokenWorkspaceError(error: UiError) {
+  return error.category === 'workspace' && error.message.includes('Missing or invalid bearer token')
 }
 
 function formatShortAge(value: string | null) {
@@ -247,20 +201,6 @@ function formatDurationFrom(value: string | null, nowMs: number) {
   return `${minutes}m ${String(remainingSeconds).padStart(2, '0')}s`
 }
 
-function latestTimestamp(values: Array<string | null | undefined>): string | null {
-  let latest: string | null = null
-  let latestMs = 0
-  values.forEach((value) => {
-    if (!value) return
-    const time = new Date(value).getTime()
-    if (!Number.isNaN(time) && time >= latestMs) {
-      latestMs = time
-      latest = value
-    }
-  })
-  return latest
-}
-
 function snapshotRecord(session: SessionSummary | null | undefined) {
   return isRecord(session?.state_snapshot) ? session.state_snapshot : {}
 }
@@ -275,160 +215,63 @@ function sessionDisplayName(session: SessionSummary, fallbackPrefix: string | nu
   )
 }
 
-function sessionMetaFromCampaign(campaign: Campaign): CampaignSessionMeta {
-  return {
-    count: campaign.session_count ?? 0,
-    updatedAt: campaign.latest_activity_at ?? campaign.created_at,
-    latestSessionId: campaign.latest_session_id ?? null,
-  }
-}
-
-function truncateText(value: string, maxLength: number) {
-  const compact = value.replace(/\s+/g, ' ').trim()
-  if (compact.length <= maxLength) return compact
-  return `${compact.slice(0, maxLength - 1).trim()}…`
-}
-
-function stripMarkdown(value: string) {
-  return value
-    .replace(/\*\*/g, '')
-    .replace(/\*/g, '')
-    .replace(/---+/g, '')
-    .replace(/#+\s*/g, '')
-}
-
-function cleanNarrationText(value: string) {
-  return stripMarkdown(value.replace(/<thought>[\s\S]*?(?:<\/thought>|$)/gi, ''))
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
 function parsePositiveInt(value: string | null) {
   if (!value) return null
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null
 }
 
-function stripComposerCommand(value: string) {
-  let next = value.trimStart()
-  COMPOSER_PREFIX_PATTERNS.forEach((pattern) => {
-    next = next.replace(pattern, '')
-  })
-  return next
+type SelectionStorageName = 'selectedCampaignId' | 'selectedSessionId' | 'selectedPlayerId'
+
+function selectionStorageScope(auth: string) {
+  const token = auth.trim()
+  return token ? `auth:${hashString(token).toString(36)}` : 'open'
 }
 
-function composerModeLabel(mode: ComposerMode, die: string) {
-  if (mode === 'ooc') return 'Out of Character'
-  if (mode === 'roll') return `Roll ${die.toUpperCase()}`
-  if (mode === 'ability') return 'Ability Check'
-  if (mode === 'item') return 'Item Use'
-  if (mode === 'emote') return 'Emote'
-  return 'In Character'
+function selectionStorageKey(scope: string, name: SelectionStorageName) {
+  return `aidm:${scope}:${name}`
 }
 
-function composerTextForMode(
-  mode: ComposerMode,
-  current: string,
-  characterName: string,
-  die: string,
-) {
-  const body = stripComposerCommand(current)
-  const suffix = body ? body : ''
-  if (mode === 'roll') return `I roll a ${die}: ${suffix}`
-  if (mode === 'ooc') return `[OOC] ${suffix}`
-  if (mode === 'ability') return `${characterName} attempts an ability check: ${suffix}`
-  if (mode === 'item') return `${characterName} uses ${suffix}`
-  if (mode === 'emote') return `/emote ${suffix}`
-  return suffix
-}
-
-function dieSides(die: string) {
-  const parsed = Number(die.replace(/^d/i, ''))
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : 20
-}
-
-function rollDie(die: string) {
-  const sides = dieSides(die)
-  if (typeof window.crypto?.getRandomValues === 'function') {
-    const value = new Uint32Array(1)
-    window.crypto.getRandomValues(value)
-    return (value[0] % sides) + 1
-  }
-  return Math.floor(Math.random() * sides) + 1
-}
-
-function diceRollMessage(die: string, result: number) {
-  return `I roll a ${die.toLowerCase()}: ${result}`
-}
-
-function formatCompactNumber(value: number) {
-  return new Intl.NumberFormat(undefined, {
-    notation: value >= 1000 ? 'compact' : 'standard',
-    maximumFractionDigits: value >= 1000 ? 1 : 0,
-  }).format(value)
-}
-
-function numberValue(value: unknown) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string') {
-    const parsed = Number(value.replace(/[^0-9.-]/g, ''))
-    return Number.isFinite(parsed) ? parsed : null
-  }
-  return null
-}
-
-function metadataTurnId(metadata: JsonRecord) {
-  const parsed = numberValue(metadata.turn_id)
-  return parsed !== null && Number.isInteger(parsed) ? parsed : null
-}
-
-function ttsDedupeKeysForText(text: string, turnId: number | null) {
-  const cleanText = cleanNarrationText(text)
-  const keys: string[] = []
-  if (turnId !== null) {
-    keys.push(`turn:${turnId}`)
-  }
-  if (cleanText) {
-    keys.push(`text:${hashString(cleanText)}:${cleanText.length}`)
-  }
-  return keys
-}
-
-function ttsDedupeKeysForEntry(entry: TimelineEntry) {
-  return ttsDedupeKeysForText(entry.text, metadataTurnId(entry.metadata))
-}
-
-function collectRecords(value: unknown): JsonRecord[] {
-  if (!isRecord(value)) return []
-  const records: JsonRecord[] = [value]
-  ;[
-    'stats',
-    'ability_scores',
-    'abilities',
-    'attributes',
-    'combat',
-    'derived',
-    'health',
-    'character',
-  ].forEach((key) => {
-    if (isRecord(value[key])) records.push(value[key] as JsonRecord)
-  })
-  return records
-}
-
-function findValue(records: JsonRecord[], keys: string[]) {
-  for (const record of records) {
-    for (const key of keys) {
-      if (record[key] !== undefined && record[key] !== null && record[key] !== '') {
-        return record[key]
-      }
-    }
-  }
-  return null
+function readInitialSelection(scope: string, name: SelectionStorageName, queryName?: string) {
+  const queryValue = queryName ? new URLSearchParams(window.location.search).get(queryName) : null
+  const scopedValue = localStorage.getItem(selectionStorageKey(scope, name))
+  const legacyValue = scope === 'open' ? localStorage.getItem(`aidm:${name}`) : null
+  return parsePositiveInt(queryValue ?? scopedValue ?? legacyValue)
 }
 
 function pluralize(value: number, singular: string, plural = `${singular}s`) {
   return `${value} ${value === 1 ? singular : plural}`
+}
+
+function worldDeleteErrorMessage(error: unknown) {
+  if (error instanceof ApiClientError && isRecord(error.payload)) {
+    const details = isRecord(error.payload.details) ? error.payload.details : {}
+    if (error.payload.error_code === 'world_in_use') {
+      const campaigns = Number(details.campaign_count ?? 0)
+      const maps = Number(details.map_count ?? 0)
+      const npcs = Number(details.npc_count ?? 0)
+      const campaignRows = Array.isArray(details.campaigns)
+        ? details.campaigns.filter(isRecord)
+        : []
+      const campaignLabels = campaignRows
+        .map((item) => {
+          const title = stringValue(item.title) || `Campaign ${item.campaign_id ?? ''}`.trim()
+          const status = stringValue(item.status) || 'active'
+          return `${title} (${status})`
+        })
+        .filter(Boolean)
+      const blockers = [
+        campaigns > 0 ? pluralize(campaigns, 'campaign') : '',
+        maps > 0 ? pluralize(maps, 'map') : '',
+        npcs > 0 ? pluralize(npcs, 'NPC') : '',
+      ].filter(Boolean)
+      const blockerText = blockers.length ? blockers.join(', ') : 'saved records'
+      const campaignText = campaignLabels.length ? ` Campaigns: ${campaignLabels.join(', ')}.` : ''
+      return `World is still used by ${blockerText}.${campaignText}`
+    }
+    if (typeof error.payload.error === 'string') return error.payload.error
+  }
+  return error instanceof Error ? error.message : String(error)
 }
 
 function providerLabel(value: string) {
@@ -483,606 +326,22 @@ function avatarDataUri(seed: string, variant: 'campaign' | 'character' = 'campai
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
 }
 
-function normalizeInventory(value: unknown): InventoryRow[] {
-  const source = Array.isArray(value)
-    ? value
-    : isRecord(value) && Array.isArray(value.items)
-      ? value.items
-      : []
-  const iconFor = (item: string, index: number) => {
-    const normalized = item.toLowerCase()
-    if (normalized.includes('sword') || normalized.includes('blade')) return 'sword'
-    if (normalized.includes('shield')) return 'shield'
-    if (normalized.includes('potion') || normalized.includes('vial')) return 'potion'
-    if (normalized.includes('armor') || normalized.includes('mail')) return 'armor'
-    if (normalized.includes('ration') || normalized.includes('food')) return 'ration'
-    return ['sword', 'shield', 'potion', 'armor', 'ration'][index % 5]
-  }
-  return source.map((entry, index) => {
-    if (typeof entry === 'string') {
-      return { item: entry, count: '1', weight: '—', icon: iconFor(entry, index), weightValue: null }
-    }
-    if (!isRecord(entry)) {
-      return { item: `Item ${index + 1}`, count: '1', weight: '—', icon: 'ration', weightValue: null }
-    }
-    const item =
-      stringValue(entry.name) ||
-      stringValue(entry.item) ||
-      stringValue(entry.label) ||
-      `Item ${index + 1}`
-    const countNumber = numberValue(entry.quantity ?? entry.count) ?? 1
-    const weightNumber = numberValue(entry.weight)
-    const weightValue =
-      weightNumber === null ? null : Math.round(weightNumber * countNumber * 10) / 10
-    return {
-      item,
-      count: stringValue(entry.quantity ?? entry.count, '1'),
-      weight: weightNumber === null ? '—' : `${weightValue} lb`,
-      icon: stringValue(entry.icon, iconFor(item, index)),
-      weightValue,
-    }
-  })
-}
-
-function normalizeStats(statsValue: unknown, sheetValue: unknown, level: number | null): StatBlock {
-  const records = [...collectRecords(statsValue), ...collectRecords(sheetValue)]
-  const scoreFor = (longKey: string, shortKey: string) =>
-    numberValue(findValue(records, [longKey, shortKey, `${longKey}_score`, `${shortKey}_score`]))
-  const statLabel = (keys: string[], fallback = '—') =>
-    stringValue(findValue(records, keys), fallback)
-  const hpCurrent = statLabel(['current_hp', 'hp_current', 'hp', 'hit_points', 'currentHitPoints'])
-  const hpMax = statLabel(['max_hp', 'hp_max', 'max_hit_points', 'maxHitPoints'])
-  const hp = hpMax !== '—' && hpMax !== hpCurrent ? `${hpCurrent} / ${hpMax}` : hpCurrent
-  const abilityEntries: Array<[string, string, string]> = [
-    ['STR', 'strength', 'str'],
-    ['DEX', 'dexterity', 'dex'],
-    ['CON', 'constitution', 'con'],
-    ['INT', 'intelligence', 'int'],
-    ['WIS', 'wisdom', 'wis'],
-    ['CHA', 'charisma', 'cha'],
-  ].map(([label, longKey, shortKey]) => {
-    const score = scoreFor(longKey, shortKey)
-    if (score === null) return [label, '—', '—']
-    const modifier = Math.floor((score - 10) / 2)
-    return [label, String(score), modifier >= 0 ? `+${modifier}` : String(modifier)]
-  })
-  const proficiencyValue = statLabel(['proficiency_bonus', 'proficiency', 'prof_bonus'])
-
-  return {
-    hp,
-    ac: statLabel(['ac', 'armor_class', 'armorClass']),
-    init: statLabel(['initiative', 'init']),
-    speed: statLabel(['speed', 'movement', 'walk_speed']),
-    abilities: abilityEntries,
-    proficiency: proficiencyValue !== '—' ? proficiencyValue : level ? `+${2 + Math.floor((level - 1) / 4)}` : '—',
-    inspiration: Boolean(findValue(records, ['inspiration', 'inspired'])),
-  }
-}
-
-function displayStatValue(value: string) {
-  return value
-}
-
-function normalizeXp(value: unknown, level: number | string): XpProgress {
-  const records = collectRecords(value)
-  const current = numberValue(findValue(records, ['xp', 'experience', 'current_xp'])) ?? 0
-  const max =
-    numberValue(findValue(records, ['xp_to_next', 'next_level_xp', 'max_xp'])) ??
-    Math.max(300, Number(level) * 300)
-  const percent = max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0
-  return {
-    current,
-    max,
-    percent,
-    label: `${formatCompactNumber(current)} / ${formatCompactNumber(max)} XP`,
-  }
-}
-
-function inventoryCapacity(value: unknown) {
-  const records = collectRecords(value)
-  return numberValue(findValue(records, ['carrying_capacity', 'capacity', 'max_weight', 'maxWeight']))
-}
-
-function buildMapMeta(map: MapItem | undefined, segment: CampaignSegment | null): MapPanelMeta {
-  const data = map?.map_data ?? {}
-  const exploredNumber =
-    numberValue(data.explored_percent ?? data.exploredPercent ?? data.explored ?? data.progress) ??
-    (map ? 0 : null)
-  const rawThreat =
-    stringValue(data.threat_level) ||
-    stringValue(data.threat) ||
-    (segment?.tags.toLowerCase().includes('high') ? 'High' : '') ||
-    (segment?.is_triggered ? 'Elevated' : 'Unknown')
-  const normalizedThreat = rawThreat.toLowerCase()
-  const threatTone =
-    normalizedThreat.includes('high') || normalizedThreat.includes('danger')
-      ? 'high'
-      : normalizedThreat.includes('medium') || normalizedThreat.includes('elevated')
-        ? 'medium'
-        : 'low'
-  return {
-    explored: exploredNumber === null ? '—' : `${Math.round(exploredNumber)}%`,
-    threat: rawThreat,
-    threatTone,
-    weather: stringValue(data.weather) || stringValue(data.climate) || 'Not recorded',
-  }
-}
-
-function turnNumber(entry: TimelineEntry, fallbackIndex: number) {
-  const metadataTurn = entry.metadata.turn_id
-  return typeof metadataTurn === 'number' ? metadataTurn : fallbackIndex + 1
-}
-
-function speakerDetail(entry: TimelineEntry, selectedPlayer: Player | null) {
-  if (entry.role === 'dm') return 'Narration'
-  if (entry.role === 'system') return 'System'
-  if (selectedPlayer && entry.speaker === selectedPlayer.character_name) {
-    return `${selectedPlayer.race || 'Adventurer'} ${selectedPlayer.char_class || selectedPlayer.class_ || ''}`.trim()
-  }
-  return 'Player'
-}
-
-function stripSpeakerPrefix(message: string, speaker: string) {
-  const prefix = `${speaker}:`
-  return message.startsWith(prefix) ? message.slice(prefix.length).trim() : message
-}
-
-function timelineFromLog(entry: SessionLogEntry): TimelineEntry {
-  let role: TimelineRole = entry.entry_type === 'player' ? 'player' : 'dm'
-  let speaker = role === 'player' ? 'Player' : 'DM'
-  let text = entry.message
-
-  if (text.startsWith('**')) {
-    role = 'system'
-    speaker = 'System'
-    text = text.replaceAll('**', '')
-  } else if (text.startsWith('DM:')) {
-    speaker = 'DM'
-    text = stripSpeakerPrefix(text, 'DM')
-  } else if (role === 'player' && text.includes(':')) {
-    const splitIndex = text.indexOf(':')
-    speaker = text.slice(0, splitIndex)
-    text = text.slice(splitIndex + 1).trim()
-  }
-
-  return {
-    id: `log-${entry.id}`,
-    role,
-    speaker,
-    text,
-    timestamp: entry.timestamp,
-    metadata: entry.metadata ?? {},
-  }
-}
-
-function socketMessage(payload: SocketErrorPayload) {
-  return payload.error ?? payload.message ?? payload.error_code ?? 'Socket error'
-}
-
-function supportsStreamingTtsAudio() {
-  return typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported(TTS_AUDIO_MIME)
-}
-
-async function ttsErrorMessage(response: Response) {
-  let message = `TTS request failed with status ${response.status}`
-  try {
-    const payload = await response.json()
-    if (payload && typeof payload === 'object' && 'error' in payload) {
-      message = String((payload as JsonRecord).error)
-    }
-  } catch {
-    // Keep the status-based message when the server did not return JSON.
-  }
-  return message
-}
-
-function ttsPlaybackErrorMessage(error: unknown) {
-  if (error instanceof Error && error.message) return error.message
-  if (error instanceof Event) return error.type ? `Audio ${error.type}` : 'Audio playback error'
-  return String(error || 'Audio playback error')
-}
-
-function waitForSourceBufferIdle(sourceBuffer: SourceBuffer, signal: AbortSignal) {
-  if (!sourceBuffer.updating) return Promise.resolve()
-
-  return new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      sourceBuffer.removeEventListener('updateend', handleUpdateEnd)
-      sourceBuffer.removeEventListener('error', handleError)
-      signal.removeEventListener('abort', handleAbort)
-    }
-    const handleUpdateEnd = () => {
-      cleanup()
-      resolve()
-    }
-    const handleError = () => {
-      cleanup()
-      reject(new Error('TTS audio buffer failed to update.'))
-    }
-    const handleAbort = () => {
-      cleanup()
-      reject(new Error('TTS request aborted.'))
-    }
-
-    sourceBuffer.addEventListener('updateend', handleUpdateEnd)
-    sourceBuffer.addEventListener('error', handleError)
-    signal.addEventListener('abort', handleAbort, { once: true })
-  })
-}
-
-function exactArrayBuffer(bytes: Uint8Array) {
-  const copy = new Uint8Array(bytes.byteLength)
-  copy.set(bytes)
-  return copy.buffer
-}
-
-async function appendTtsAudioChunk(
-  sourceBuffer: SourceBuffer,
-  bytes: Uint8Array,
-  signal: AbortSignal,
-) {
-  if (signal.aborted) throw new Error('TTS request aborted.')
-  await waitForSourceBufferIdle(sourceBuffer, signal)
-  sourceBuffer.appendBuffer(exactArrayBuffer(bytes))
-  await waitForSourceBufferIdle(sourceBuffer, signal)
-}
-
-function createStreamingTtsSource(
-  requestAudio: () => Promise<Response>,
-  controller: AbortController,
-  onError: (message: string) => void,
-) {
-  if (!supportsStreamingTtsAudio()) return null
-
-  const mediaSource = new MediaSource()
-  const audioUrl = URL.createObjectURL(mediaSource)
-  let sourceBuffer: SourceBuffer | null = null
-  let cleaned = false
-
-  const cleanup = () => {
-    if (cleaned) return
-    cleaned = true
-    try {
-      if (sourceBuffer?.updating) {
-        sourceBuffer.abort()
-      }
-      if (mediaSource.readyState === 'open') {
-        mediaSource.endOfStream()
-      }
-    } catch {
-      // The audio element may already have torn the MediaSource down.
-    }
-    URL.revokeObjectURL(audioUrl)
-  }
-
-  const streamDone = new Promise<void>((resolve) => {
-    mediaSource.addEventListener(
-      'sourceopen',
-      () => {
-        void (async () => {
-          try {
-            sourceBuffer = mediaSource.addSourceBuffer(TTS_AUDIO_MIME)
-            sourceBuffer.mode = 'sequence'
-
-            const response = await requestAudio()
-            if (!response.ok) {
-              throw new Error(await ttsErrorMessage(response))
-            }
-
-            const reader = response.body?.getReader()
-            if (!reader) {
-              const bytes = new Uint8Array(await response.arrayBuffer())
-              await appendTtsAudioChunk(sourceBuffer, bytes, controller.signal)
-            } else {
-              while (true) {
-                const { done, value } = await reader.read()
-                if (done) break
-                if (value) {
-                  await appendTtsAudioChunk(sourceBuffer, value, controller.signal)
-                }
-              }
-            }
-
-            await waitForSourceBufferIdle(sourceBuffer, controller.signal)
-            if (mediaSource.readyState === 'open') {
-              mediaSource.endOfStream()
-            }
-          } catch (error) {
-            if (!controller.signal.aborted) {
-              onError(error instanceof Error ? error.message : String(error))
-              try {
-                if (mediaSource.readyState === 'open') {
-                  mediaSource.endOfStream('network')
-                }
-              } catch {
-                // Ignore cleanup errors after a failed stream.
-              }
-            }
-          } finally {
-            resolve()
-          }
-        })()
-      },
-      { once: true },
-    )
-  })
-
-  return {
-    audioUrl,
-    cleanup,
-    streamDone,
-  }
-}
-
-function ttsFlushLength(text: string, forcePartial: boolean) {
-  if (!text.trim()) return 0
-
-  const sentenceMatch = text.match(/.*?(?:[.!?]+["'*\])_]*(?=\s|$)|[\n]+)/s)
-  if (sentenceMatch) return sentenceMatch[0].length
-
-  const limit = Math.min(text.length, TTS_FORCE_PARTIAL_FLUSH_CHARS)
-  if (text.length >= TTS_FORCE_PARTIAL_FLUSH_CHARS || forcePartial) {
-    const windowText = text.slice(0, limit)
-    const naturalBreak = Math.max(
-      windowText.lastIndexOf(','),
-      windowText.lastIndexOf(';'),
-      windowText.lastIndexOf(':'),
-      windowText.lastIndexOf(' - '),
-    )
-    if (naturalBreak >= TTS_MIN_PARTIAL_FLUSH_CHARS) return naturalBreak + 1
-
-    const wordBreak = windowText.lastIndexOf(' ')
-    if (wordBreak >= TTS_MIN_PARTIAL_FLUSH_CHARS) return wordBreak + 1
-    if (forcePartial && windowText.trim().length >= TTS_MIN_PARTIAL_FLUSH_CHARS) return limit
-  }
-
-  return 0
-}
-
-function StatusDot({
-  label,
-  tone = 'good',
-}: {
-  label: string
-  tone?: 'good' | 'neutral' | 'warn'
-}) {
-  return (
-    <span className={`status-dot ${tone}`}>
-      <Circle size={8} fill="currentColor" />
-      {label}
-    </span>
-  )
-}
-
-function ThinIcon({
-  name,
-  size = 18,
-  className,
-}: {
-  name: ThinIconName
-  size?: number
-  className?: string
-}) {
-  const common = {
-    fill: 'none',
-    stroke: 'currentColor',
-    strokeLinecap: 'round' as const,
-    strokeLinejoin: 'round' as const,
-    strokeWidth: 1.35,
-  }
-  return (
-    <svg
-      aria-hidden="true"
-      className={className}
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-    >
-      {name === 'archive' ? (
-        <>
-          <path {...common} d="M5 6.5h14v12H5z" />
-          <path {...common} d="M8 6.5V4h8v2.5M9 10h6" />
-        </>
-      ) : null}
-      {name === 'bolt' ? <path {...common} d="M13 2 5.5 13h5L9 22l8-12h-5z" /> : null}
-      {name === 'book' ? (
-        <>
-          <path {...common} d="M6 4.5h8.5A2.5 2.5 0 0 1 17 7v12H8.5A2.5 2.5 0 0 1 6 16.5z" />
-          <path {...common} d="M17 7h1.5v12H17M9 8h4" />
-        </>
-      ) : null}
-      {name === 'briefcase' ? (
-        <>
-          <path {...common} d="M4.5 8h15v10.5h-15z" />
-          <path {...common} d="M9 8V5.5h6V8M4.5 12h15" />
-        </>
-      ) : null}
-      {name === 'chevron' ? <path {...common} d="m7 9 5 5 5-5" /> : null}
-      {name === 'cloud' ? (
-        <path {...common} d="M7.5 18h9a4 4 0 0 0 .2-8 5.6 5.6 0 0 0-10.7 1.8A3.2 3.2 0 0 0 7.5 18Z" />
-      ) : null}
-      {name === 'cog' ? (
-        <>
-          <circle {...common} cx="12" cy="12" r="2.8" />
-          <path {...common} d="M12 3.5v2M12 18.5v2M4.6 7.8l1.7 1M17.7 15.2l1.7 1M4.6 16.2l1.7-1M17.7 8.8l1.7-1M3.5 12h2M18.5 12h2" />
-        </>
-      ) : null}
-      {name === 'cube' ? (
-        <>
-          <path {...common} d="m12 3 7 4v10l-7 4-7-4V7z" />
-          <path {...common} d="m5 7 7 4 7-4M12 11v10" />
-        </>
-      ) : null}
-      {name === 'dice' ? (
-        <>
-          <rect {...common} x="5" y="5" width="14" height="14" rx="2" />
-          <circle cx="9" cy="9" r="1" fill="currentColor" />
-          <circle cx="15" cy="15" r="1" fill="currentColor" />
-          <circle cx="15" cy="9" r="1" fill="currentColor" />
-          <circle cx="9" cy="15" r="1" fill="currentColor" />
-        </>
-      ) : null}
-      {name === 'dot' ? <circle cx="12" cy="12" r="2.3" fill="currentColor" /> : null}
-      {name === 'map' ? (
-        <>
-          <path {...common} d="m4 6 5-2 6 2 5-2v14l-5 2-6-2-5 2z" />
-          <path {...common} d="M9 4v14M15 6v14" />
-        </>
-      ) : null}
-      {name === 'refresh' ? (
-        <>
-          <path {...common} d="M18.5 8.5A7 7 0 0 0 6 6.3L4.5 8.5" />
-          <path {...common} d="M4.5 4.5v4h4M5.5 15.5A7 7 0 0 0 18 17.7l1.5-2.2" />
-          <path {...common} d="M19.5 19.5v-4h-4" />
-        </>
-      ) : null}
-      {name === 'send' ? <path {...common} d="M4 12.5 20 4l-5.8 16-3.1-6.9zM11.1 13.1 20 4" /> : null}
-      {name === 'settings' ? (
-        <>
-          <circle {...common} cx="12" cy="12" r="3" />
-          <path {...common} d="M12 4.5v2M12 17.5v2M5.6 6.7 7 8.1M17 15.9l1.4 1.4M4.5 12h2M17.5 12h2M5.6 17.3 7 15.9M17 8.1l1.4-1.4" />
-        </>
-      ) : null}
-      {name === 'smile' ? (
-        <>
-          <circle {...common} cx="12" cy="12" r="8" />
-          <path {...common} d="M8.8 14.2a4.4 4.4 0 0 0 6.4 0" />
-          <path {...common} d="M9 10h.01M15 10h.01" />
-        </>
-      ) : null}
-      {name === 'spark' ? <path {...common} d="m12 3 1.7 5.1L19 10l-5.3 1.9L12 17l-1.7-5.1L5 10l5.3-1.9z" /> : null}
-      {name === 'turns' ? (
-        <>
-          <path {...common} d="M6 7h9a3 3 0 0 1 0 6H8" />
-          <path {...common} d="m9 4-3 3 3 3M18 17H9" />
-        </>
-      ) : null}
-    </svg>
-  )
-}
-
-function ToolbarButton({
-  children,
-  icon,
-  onClick,
-  title,
-}: {
-  children?: React.ReactNode
-  icon: React.ReactNode
-  onClick?: () => void
-  title: string
-}) {
-  return (
-    <button
-      type="button"
-      className="toolbar-button"
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-    >
-      {icon}
-      {children ? <span>{children}</span> : null}
-    </button>
-  )
-}
-
-function Thumbnail({
-  index,
-  selected,
-  src,
-  title,
-}: {
-  index: number
-  selected?: boolean
-  src: string
-  title: string
-}) {
-  return (
-    <span className={`thumb thumb-${index} ${selected ? 'selected-thumb' : ''}`}>
-      <img src={src} alt="" aria-hidden="true" />
-      <span className="thumb-letter">{title.slice(0, 1).toUpperCase()}</span>
-    </span>
-  )
-}
-
-function NavItem({
-  icon,
-  label,
-  onClick,
-  selected,
-}: {
-  icon: React.ReactNode
-  label: string
-  onClick?: () => void
-  selected?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      className={`nav-item ${selected ? 'active' : ''}`}
-      onClick={onClick}
-    >
-      {icon}
-      <span>{label}</span>
-    </button>
-  )
-}
-
 function App() {
-  const [baseUrl, setBaseUrl] = useState(() =>
-    normalizeBaseUrl(localStorage.getItem('aidm:baseUrl') ?? DEFAULT_BASE_URL),
-  )
-  const [authToken, setAuthToken] = useState(() => localStorage.getItem('aidm:authToken') ?? '')
   const [health, setHealth] = useState<Health | null>(null)
   const [llmConfig, setLlmConfig] = useState<LlmRuntimeConfig | null>(null)
   const [ttsConfig, setTtsConfig] = useState<TtsRuntimeConfig | null>(null)
-  const [ttsEnabled, setTtsEnabled] = useState(() => localStorage.getItem('aidm:ttsEnabled') === 'true')
-  const [ttsSpeaking, setTtsSpeaking] = useState(false)
-  const [ttsQueueCount, setTtsQueueCount] = useState(0)
-  const [ttsStatus, setTtsStatus] = useState<TtsPlaybackStatus>(() =>
-    localStorage.getItem('aidm:ttsEnabled') === 'true' ? 'ready' : 'off',
-  )
   const [runtimePending, setRuntimePending] = useState(false)
-  const [campaigns, setCampaigns] = useState<Campaign[]>([])
   const [campaignSessionMeta, setCampaignSessionMeta] = useState<
     Record<number, CampaignSessionMeta>
   >({})
-  const [selectedCampaignId, setSelectedCampaignId] = useState<number | null>(() =>
-    parsePositiveInt(
-      new URLSearchParams(window.location.search).get('campaign') ??
-        localStorage.getItem('aidm:selectedCampaignId'),
-    ),
-  )
-  const [campaign, setCampaign] = useState<Campaign | null>(null)
-  const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [selectedSessionId, setSelectedSessionId] = useState<number | null>(() =>
-    parsePositiveInt(
-      new URLSearchParams(window.location.search).get('session') ??
-        localStorage.getItem('aidm:selectedSessionId'),
-    ),
-  )
-  const [players, setPlayers] = useState<Player[]>([])
-  const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(() =>
-    parsePositiveInt(
-      new URLSearchParams(window.location.search).get('player') ??
-        localStorage.getItem('aidm:selectedPlayerId'),
-    ),
-  )
-  const [playerDetail, setPlayerDetail] = useState<PlayerDetail | null>(null)
-  const [maps, setMaps] = useState<MapItem[]>([])
-  const [segments, setSegments] = useState<CampaignSegment[]>([])
-  const [sessionState, setSessionState] = useState<SessionState | null>(null)
-  const [logEntries, setLogEntries] = useState<SessionLogEntry[]>([])
   const [metrics, setMetrics] = useState<BetaSummary | null>(null)
   const [socketStatus, setSocketStatus] = useState('idle')
+  const [activePlayers, setActivePlayers] = useState<ActivePlayer[]>([])
   const [sendPending, setSendPending] = useState(false)
-  const [actionText, setActionText] = useState('')
-  const [composerMode, setComposerMode] = useState<ComposerMode>('action')
-  const [selectedDie, setSelectedDie] = useState('d20')
-  const [diceRoll, setDiceRoll] = useState<DiceRollState | null>(null)
-  const [errors, setErrors] = useState<string[]>([])
+  const [errors, setErrors] = useState<UiError[]>([])
   const [optimisticEntries, setOptimisticEntries] = useState<TimelineEntry[]>([])
   const [streamingTurn, setStreamingTurn] = useState<StreamingTurn | null>(null)
+  const [turnStatuses, setTurnStatuses] = useState<Record<number, string>>({})
   const [mainTab, setMainTab] = useState<MainTab>('turns')
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('party')
   const [campaignFilter, setCampaignFilter] = useState('')
@@ -1096,77 +355,217 @@ function App() {
   const [theme, setTheme] = useState<ThemeMode>(() =>
     localStorage.getItem('aidm:theme') === 'light' ? 'light' : 'dark',
   )
-  const [createCampaignOpen, setCreateCampaignOpen] = useState(false)
-  const [createCampaignPending, setCreateCampaignPending] = useState(false)
-  const [createCampaignError, setCreateCampaignError] = useState('')
-  const [runtimeSettingsOpen, setRuntimeSettingsOpen] = useState(false)
-  const [runtimeSettingsError, setRuntimeSettingsError] = useState('')
-  const [runtimeSettingsForm, setRuntimeSettingsForm] = useState<RuntimeSettingsForm>(() => ({
-    baseUrl: normalizeBaseUrl(localStorage.getItem('aidm:baseUrl') ?? DEFAULT_BASE_URL),
-    authToken: localStorage.getItem('aidm:authToken') ?? '',
-  }))
-  const [createPlayerPending, setCreatePlayerPending] = useState(false)
-  const [createMapPending, setCreateMapPending] = useState(false)
-  const [createCampaignForm, setCreateCampaignForm] = useState<CreateCampaignForm>({
-    title: '',
-    description: '',
-    worldName: '',
-  })
+  const [worlds, setWorlds] = useState<World[]>([])
+  const [worldManagerOpen, setWorldManagerOpen] = useState(false)
+  const [worldForm, setWorldForm] = useState<WorldFormState>(emptyWorldForm)
+  const [worldDeleteDialog, setWorldDeleteDialog] = useState<WorldDeleteDialogState>(null)
+  const [profileSettingsOpen, setProfileSettingsOpen] = useState(false)
+  const [campaignArchiveDialog, setCampaignArchiveDialog] =
+    useState<CampaignArchiveDialogState>(null)
+  const [sessionArchiveDialog, setSessionArchiveDialog] =
+    useState<SessionArchiveDialogState>(null)
+  const [campaignChooserOpen, setCampaignChooserOpen] = useState(false)
+  const [campaignChooserDismissedKey, setCampaignChooserDismissedKey] = useState('')
+  const [characterJoinDialogOpen, setCharacterJoinDialogOpen] = useState(false)
   const [socketReconnectKey, setSocketReconnectKey] = useState(0)
-  const [workspaceLoading, setWorkspaceLoading] = useState(false)
-  const [loadingCampaignId, setLoadingCampaignId] = useState<number | null>(null)
-  const [sessionLoading, setSessionLoading] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const resetRuntimeState = useCallback(() => {
+    setHealth(null)
+    setLlmConfig(null)
+    setTtsConfig(null)
+    setMetrics(null)
+    setWorlds([])
+  }, [])
+  const reconnectSocket = useCallback(() => {
+    setSocketReconnectKey((current) => current + 1)
+  }, [])
+  const {
+    authToken,
+    baseUrl,
+    clearAuthToken: clearRuntimeAuthToken,
+    closeRuntimeSettings,
+    openAuthTokenPrompt,
+    openRuntimeSettings,
+    runtimeSettingsError,
+    runtimeSettingsForm,
+    runtimeSettingsMode,
+    runtimeSettingsOpen,
+    setRuntimeSettingsForm,
+    submitRuntimeSettings,
+  } = useRuntimeSettings({
+    defaultBaseUrl: DEFAULT_BASE_URL,
+    reconnectSocket,
+    resetRuntimeState,
+  })
   const rootRef = useRef<HTMLDivElement | null>(null)
   const accountMenuRef = useRef<HTMLDivElement | null>(null)
   const sessionMenuRef = useRef<HTMLDivElement | null>(null)
+  const sessionImportInputRef = useRef<HTMLInputElement | null>(null)
+  const modalDialogRef = useRef<HTMLElement | null>(null)
+  const dialogReturnFocusRef = useRef<HTMLElement | null>(null)
+  const closeCurrentDialogRef = useRef<() => void>(() => undefined)
+  const promptedCharacterCampaignIdsRef = useRef<Set<number>>(new Set())
+  const selectedPlayerByCampaignRef = useRef<Record<number, number>>({})
+  const lastSelectedCampaignIdRef = useRef<number | null>(null)
+  const actionInputRef = useRef<HTMLTextAreaElement | null>(null)
   const turnFeedRef = useRef<HTMLElement | null>(null)
-  const ttsAudioRef = useRef<HTMLAudioElement | null>(null)
-  const ttsAudioUrlRef = useRef<string | null>(null)
-  const lastSpokenDmEntryRef = useRef<string | null>(null)
-  const speakDmEntryRef = useRef<((entry: TimelineEntry) => void) | null>(null)
-  const queueTtsNarrationRef = useRef<((text: string) => void) | null>(null)
-  const ttsEnabledRef = useRef(ttsEnabled)
-  const lastSpokenTurnIdRef = useRef<number | null>(null)
+  const submitActionRef = useRef<(() => void) | null>(null)
+  const toggleFullscreenRef = useRef<(() => Promise<void>) | null>(null)
   const socketRef = useRef<Socket | null>(null)
-  const workspaceRequestRef = useRef(0)
-  const sessionRequestRef = useRef(0)
   const playerRequestRef = useRef(0)
-  const ttsQueueRef = useRef<TtsQueueItem[]>([])
-  const ttsCurrentItemRef = useRef<TtsQueueItem | null>(null)
-  const ttsPlayingRef = useRef(false)
-  const spokenTextLengthRef = useRef(0)
-  const speakableStreamingTextRef = useRef('')
-  const ttsPartialFlushTimerRef = useRef<number | null>(null)
-  const ttsLoopIdRef = useRef(0)
-  const lastSpokenTextRef = useRef<string | null>(null)
-  const spokenTtsKeysRef = useRef<Map<string, number>>(new Map())
+  const sessionActionDialogRef = useRef<SessionActionDialogState>(null)
+  const campaignActionDialogRef = useRef<CampaignActionDialogState>(null)
 
   const auth = authToken.trim()
+  const storedSelectionScope = selectionStorageScope(auth)
+  const {
+    campaigns,
+    campaign,
+    sessions,
+    players,
+    maps,
+    segments,
+    selectedCampaignId,
+    setSelectedCampaignId,
+    selectedSessionId,
+    setSelectedSessionId,
+    selectedPlayerId,
+    setSelectedPlayerId,
+    playerDetail,
+    setPlayerDetail,
+    sessionState,
+    setSessionState,
+    logEntries,
+    setLogEntries,
+    sessionLogCursor,
+    setSessionLogCursor,
+    sessionLogHasMore,
+    setSessionLogHasMore,
+    workspaceLoading,
+    setWorkspaceLoading,
+    loadingCampaignId,
+    setLoadingCampaignId,
+    sessionLoading,
+    setSessionLoading,
+    rootCampaignsLoaded,
+    campaignWorkspaceLoaded,
+    campaignUpserted,
+    campaignRemoved,
+    sessionUpserted,
+    playerUpserted,
+  } = useWorkspaceStore({
+    selectedCampaignId: readInitialSelection(storedSelectionScope, 'selectedCampaignId', 'campaign'),
+    selectedSessionId: readInitialSelection(storedSelectionScope, 'selectedSessionId', 'session'),
+    selectedPlayerId: readInitialSelection(storedSelectionScope, 'selectedPlayerId'),
+  })
+  const pushError = useCallback((category: UiErrorCategory, message: string) => {
+    const createdAt = Date.now()
+    setErrors((current) => {
+      const duplicate = current.find(
+        (item) =>
+          item.category === category &&
+          item.message === message &&
+          createdAt - item.createdAt < 15_000,
+      )
+      if (duplicate) return current
+      return [
+        {
+          id: `${createdAt}-${Math.random().toString(36).slice(2, 8)}`,
+          category,
+          message,
+          createdAt,
+        },
+        ...current.slice(0, 7),
+      ]
+    })
+  }, [])
+  const clearAuthTokenErrors = useCallback(() => {
+    setErrors((current) =>
+      current.filter((item) => item.category !== 'connection' && !isAuthTokenWorkspaceError(item)),
+    )
+  }, [])
+  const clearResolvedOperationalErrors = useCallback(() => {
+    setErrors((current) =>
+      current.filter((item) => {
+        if (
+          item.category === 'connection' &&
+          item.message.startsWith('Socket connection failed:')
+        ) {
+          return false
+        }
+        if (
+          item.category === 'workspace' &&
+          (item.message.startsWith('Workspace load failed:') ||
+            item.message.startsWith('Session refresh failed:') ||
+            item.message.startsWith('Player load failed:'))
+        ) {
+          return false
+        }
+        return true
+      }),
+    )
+  }, [])
+  useEffect(() => {
+    if (health?.status !== 'ok') return
+    clearAuthTokenErrors()
+  }, [clearAuthTokenErrors, health?.status])
   const selectedPlayer = useMemo(
     () => players.find((player) => player.player_id === selectedPlayerId) ?? null,
     [players, selectedPlayerId],
   )
+  useEffect(() => {
+    if (lastSelectedCampaignIdRef.current !== selectedCampaignId) {
+      lastSelectedCampaignIdRef.current = selectedCampaignId
+      if (!selectedCampaignId) return
 
-  const timeline = useMemo(() => {
-    const entries = logEntries.map(timelineFromLog).concat(optimisticEntries)
-    if (streamingTurn) {
-      entries.push({
-        id: `stream-${streamingTurn.turnId}`,
-        role: 'dm',
-        speaker: 'DM',
-        text: streamingTurn.text || '...',
-        timestamp: null,
-        metadata: {
-          turn_id: streamingTurn.turnId,
-          requires_roll: streamingTurn.requiresRoll,
-          ...streamingTurn.rulesHint,
-        },
-        streaming: true,
+      const rememberedPlayerId = selectedPlayerByCampaignRef.current[selectedCampaignId]
+      if (!rememberedPlayerId) return
+
+      const rememberedPlayerAvailable = players.some(
+        (player) => player.player_id === rememberedPlayerId,
+      )
+      if (!rememberedPlayerAvailable) {
+        delete selectedPlayerByCampaignRef.current[selectedCampaignId]
+        return
+      }
+      if (rememberedPlayerId !== selectedPlayerId) {
+        setSelectedPlayerId(rememberedPlayerId)
+      }
+      return
+    }
+
+    if (selectedCampaignId && selectedPlayerId && selectedPlayer) {
+      selectedPlayerByCampaignRef.current[selectedCampaignId] = selectedPlayerId
+    }
+  }, [players, selectedCampaignId, selectedPlayer, selectedPlayerId, setSelectedPlayerId])
+  const statBlock = normalizeStats(
+    playerDetail?.stats,
+    playerDetail?.character_sheet,
+    selectedPlayer?.level ?? null,
+  )
+  const inventoryRows = normalizeInventory(playerDetail?.inventory)
+  const abilityOptions = abilityOptionsFromStatBlock(statBlock)
+  const itemOptions = itemOptionsFromInventory(inventoryRows)
+  const campaignWorldId = campaign?.world_id ?? campaigns[0]?.world_id ?? null
+  const worldSelectOptions = useMemo(() => {
+    const options = new Map<number, World>()
+    worlds.forEach((world) => options.set(world.world_id, world))
+    if (campaignWorldId && !options.has(campaignWorldId)) {
+      options.set(campaignWorldId, {
+        world_id: campaignWorldId,
+        name: `World ${campaignWorldId}`,
+        description: null,
+        created_at: null,
       })
     }
-    return entries
-  }, [logEntries, optimisticEntries, streamingTurn])
+    return [...options.values()].sort((left, right) => left.name.localeCompare(right.name))
+  }, [campaignWorldId, worlds])
+
+  const timeline = useMemo(
+    () => buildTimeline({ logEntries, optimisticEntries, streamingTurn, turnStatuses }),
+    [logEntries, optimisticEntries, streamingTurn, turnStatuses],
+  )
+  const pendingRollOptions = useMemo(() => pendingRollOptionsFromTimeline(timeline), [timeline])
 
   const activeSession =
     sessions.find((session) => session.session_id === selectedSessionId) ?? null
@@ -1185,46 +584,97 @@ function App() {
   const welcomeText = activeSession
     ? `Welcome to ${activeSessionName}. Choose an opening move and the DM will begin the scene.`
     : 'Start or select a session to begin play.'
+
   const latestDmText =
     currentResponseEntry?.text ||
     sessionState?.rolling_summary ||
     welcomeText
 
-  const ttsDedupeScope = selectedSessionId ? `session:${selectedSessionId}` : 'session:none'
-  const scopedTtsKey = useCallback(
-    (key: string) => `${ttsDedupeScope}:${key}`,
-    [ttsDedupeScope],
-  )
-  const rememberSpokenTts = useCallback(
-    (text: string, turnId: number | null) => {
-      const now = Date.now()
-      const keys = ttsDedupeKeysForText(text, turnId)
-      keys.forEach((key) => spokenTtsKeysRef.current.set(scopedTtsKey(key), now))
-      for (const [storedKey, spokenAt] of spokenTtsKeysRef.current) {
-        if (storedKey.includes(':text:') && now - spokenAt > TTS_RECENT_TEXT_DEDUPE_MS) {
-          spokenTtsKeysRef.current.delete(storedKey)
-        }
-      }
-      if (spokenTtsKeysRef.current.size > 160) {
-        spokenTtsKeysRef.current = new Map([...spokenTtsKeysRef.current].slice(-80))
-      }
-    },
-    [scopedTtsKey],
-  )
-  const wasTtsAlreadySpoken = useCallback(
-    (entry: TimelineEntry) => {
-      const now = Date.now()
-      const entryTurnId = metadataTurnId(entry.metadata)
-      return ttsDedupeKeysForEntry(entry).some((key) => {
-        if (entryTurnId !== null && key.startsWith('text:')) return false
-        const spokenAt = spokenTtsKeysRef.current.get(scopedTtsKey(key))
-        if (spokenAt === undefined) return false
-        if (key.startsWith('turn:')) return true
-        return now - spokenAt <= TTS_RECENT_TEXT_DEDUPE_MS
-      })
-    },
-    [scopedTtsKey],
-  )
+  const {
+    ttsEnabled,
+    ttsSpeaking,
+    effectiveTtsStatus,
+    ttsStatusLabel,
+    ttsLatencyLabel,
+    canStopTts,
+    stopTtsAudio,
+    toggleTts,
+    resetTtsFailureForNextResponse,
+    rememberStreamedTtsTurn,
+    spokenTextLengthRef,
+    speakableStreamingTextRef,
+    queueTtsNarrationRef,
+    ttsEnabledRef,
+    ttsQueueSuppressedRef,
+    ttsFailureReportedRef,
+    ttsPartialFlushTimerRef,
+    lastSpokenDmEntryRef,
+    lastSpokenTurnIdRef,
+    lastSpokenTextRef,
+  } = useTtsNarration({
+    auth,
+    baseUrl,
+    ttsConfig,
+    selectedSessionId,
+    sendPending,
+    streamingTurn,
+    speakableDmEntry,
+    pushError,
+  })
+
+  const {
+    actionText,
+    adminPasscode,
+    adminToolsUnlocked,
+    applyComposerMode,
+    closeDiceRoll,
+    completeDiceRoll,
+    composerMode,
+    diceRoll,
+    interactionTargets,
+    rollMode,
+    rollModifier,
+    rollReason,
+    rollTargetPendingTurnId,
+    selectedAbility,
+    selectedDie,
+    selectedInteractionTarget,
+    selectedInteractionTargetId,
+    selectedInteractionType,
+    selectedItem,
+    setActionText,
+    setAdminPasscode,
+    setSelectedInteractionTargetId,
+    setSelectedInteractionType,
+    setRollMode,
+    setRollModifier,
+    setRollReason,
+    setRollTargetPendingTurnId,
+    setSelectedAbilityKey,
+    setSelectedItemName,
+    startDiceRoll,
+    submitAction,
+    toggleAdminTools,
+    updateSelectedDie,
+  } = useComposerActions({
+    activePlayers,
+    abilityOptions,
+    campaign,
+    itemOptions,
+    pendingRollOptions,
+    players,
+    selectedCampaignId,
+    selectedPlayer,
+    selectedPlayerId,
+    selectedSessionId,
+    sendPending,
+    setOptimisticEntries,
+    setSendPending,
+    socketRef,
+    stopTtsAudio,
+    streamingTurn,
+    pushError,
+  })
 
   const campaignTitle = campaign?.title ?? 'No campaign selected'
   const activeSessionTitle = activeSession
@@ -1232,20 +682,6 @@ function App() {
     : selectedCampaignId
       ? 'No session selected'
       : 'Select a campaign'
-  const effectiveTtsStatus: TtsPlaybackStatus = ttsEnabled ? ttsStatus : 'off'
-  const ttsStatusLabel =
-    effectiveTtsStatus === 'off'
-      ? 'Off'
-      : effectiveTtsStatus === 'ready'
-        ? 'Ready'
-        : effectiveTtsStatus === 'queued'
-          ? `${ttsQueueCount} queued`
-          : effectiveTtsStatus === 'requesting'
-            ? 'Requesting'
-            : effectiveTtsStatus === 'speaking'
-              ? 'Speaking'
-              : 'Failed'
-  const canStopTts = ['queued', 'requesting', 'speaking'].includes(effectiveTtsStatus)
   const realtimeLabel =
     socketStatus === 'joined'
       ? 'Joined'
@@ -1265,280 +701,73 @@ function App() {
         ? 'warn'
         : 'neutral'
 
-  const loadSessionData = useCallback(
-    async (sessionId: number) => {
-      const requestId = ++sessionRequestRef.current
-      setSessionLoading(true)
-      try {
-        const [logData, stateData] = await Promise.all([
-          apiFetch<SessionLogResponse>(
-            baseUrl,
-            `/api/sessions/${sessionId}/log?limit=200`,
-            auth,
-          ),
-          apiFetch<SessionState>(baseUrl, `/api/sessions/${sessionId}/state`, auth),
-        ])
-        if (sessionRequestRef.current !== requestId) return
-        setLogEntries(logData.entries)
-        setSessionState(stateData)
-        setCampaignSessionMeta((current) => {
-          const existing = current[stateData.campaign_id]
-          return {
-            ...current,
-            [stateData.campaign_id]: {
-              count: existing?.count ?? sessions.length,
-              latestSessionId: existing?.latestSessionId ?? sessionId,
-              updatedAt: latestTimestamp([
-                existing?.updatedAt,
-                stateData.updated_at,
-                sessions.find((session) => session.session_id === sessionId)?.created_at,
-              ]),
-            },
-          }
-        })
-      } finally {
-        if (sessionRequestRef.current === requestId) {
-          setSessionLoading(false)
-        }
-      }
-    },
-    [auth, baseUrl, sessions],
-  )
-
-  const refreshRoot = useCallback(async () => {
-    try {
-      const [healthData, campaignData, metricData, llmData] = await Promise.all([
-        apiFetch<Health>(baseUrl, '/api/health', auth),
-        apiFetch<Campaign[]>(baseUrl, '/api/campaigns', auth),
-        apiFetch<BetaSummary>(baseUrl, '/api/beta/summary', auth),
-        apiFetch<LlmRuntimeConfig>(baseUrl, '/api/llm/config', auth),
-      ])
-      setHealth(healthData)
-      setCampaigns(campaignData)
-      setMetrics(metricData)
-      setLlmConfig(llmData)
-      setCampaignSessionMeta(
-        Object.fromEntries(
-          campaignData.map((item) => [item.campaign_id, sessionMetaFromCampaign(item)]),
-        ),
-      )
-      void apiFetch<TtsRuntimeConfig>(baseUrl, '/api/tts/config', auth)
-        .then(setTtsConfig)
-        .catch(() => {
-          setTtsConfig({ provider: 'deepgram', configured: false, model: 'aura-2-draco-en' })
-        })
-      setSelectedCampaignId((current) => {
-        if (campaignData.some((item) => item.campaign_id === current)) {
-          return current
-        }
-        return campaignData[0]?.campaign_id ?? null
-      })
-    } catch (error) {
-      setHealth(null)
-      setErrors((current) => [
-        `Connection failed: ${error instanceof Error ? error.message : String(error)}`,
-        ...current.slice(0, 3),
-      ])
-    }
-  }, [auth, baseUrl])
-
-  const refreshCampaignWorkspace = useCallback(
-    async (campaignId: number) => {
-      const requestId = ++workspaceRequestRef.current
-      setWorkspaceLoading(true)
-      setLoadingCampaignId(campaignId)
-      try {
-        const workspace = await apiFetch<CampaignWorkspace>(
-          baseUrl,
-          `/api/campaigns/${campaignId}/workspace`,
-          auth,
-        )
-        if (workspaceRequestRef.current !== requestId) return
-        const campaignData = workspace.campaign
-        const sessionData = workspace.sessions
-        const playerData = workspace.players
-        const mapData = workspace.maps
-        const segmentData = workspace.segments
-        setCampaign(campaignData)
-        setSessions(sessionData)
-        setCampaignSessionMeta((current) => ({
-          ...current,
-          [campaignId]: {
-            count: workspace.summary.session_count,
-            updatedAt: workspace.summary.latest_activity_at ?? campaignData.created_at,
-            latestSessionId: workspace.summary.latest_session_id,
-          },
-        }))
-        setPlayers(playerData)
-        setMaps(mapData)
-        setSegments(segmentData)
-        setSelectedSessionId((current) => {
-          if (sessionData.some((item) => item.session_id === current)) {
-            return current
-          }
-          return sessionData[0]?.session_id ?? null
-        })
-        setSelectedPlayerId((current) => {
-          if (playerData.some((item) => item.player_id === current)) {
-            return current
-          }
-          return playerData[0]?.player_id ?? null
-        })
-        setOptimisticEntries([])
-        setStreamingTurn(null)
-        setSendPending(false)
-      } catch (error) {
-        if (workspaceRequestRef.current === requestId) {
-          setErrors((current) => [
-            `Workspace load failed: ${error instanceof Error ? error.message : String(error)}`,
-            ...current.slice(0, 3),
-          ])
-        }
-      } finally {
-        if (workspaceRequestRef.current === requestId) {
-          setWorkspaceLoading(false)
-          setLoadingCampaignId(null)
-        }
-      }
-    },
-    [auth, baseUrl],
-  )
-
-  const startSession = async () => {
-    if (!selectedCampaignId) return
-    try {
-      const result = await apiFetch<{ session_id: number }>(
-        baseUrl,
-        '/api/sessions/start',
-        auth,
-        {
-          method: 'POST',
-          body: JSON.stringify({ campaign_id: selectedCampaignId }),
-        },
-      )
-      setSelectedSessionId(result.session_id)
-      await refreshCampaignWorkspace(selectedCampaignId)
-    } catch (error) {
-      setErrors((current) => [
-        `Could not start session: ${error instanceof Error ? error.message : String(error)}`,
-        ...current.slice(0, 3),
-      ])
-    }
-  }
-
-  const createDefaultPlayer = async () => {
-    if (!selectedCampaignId) return
-    setCreatePlayerPending(true)
-    try {
-      const result = await apiFetch<{ player_id: number }>(
-        baseUrl,
-        `/api/players/campaigns/${selectedCampaignId}/players`,
-        auth,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            name: 'Local Player',
-            character_name: 'New Adventurer',
-            race: '',
-            char_class: '',
-            level: 1,
-          }),
-        },
-      )
-      await refreshCampaignWorkspace(selectedCampaignId)
-      setSelectedPlayerId(result.player_id)
-      setInspectorTab('party')
-    } catch (error) {
-      setErrors((current) => [
-        `Could not create player: ${error instanceof Error ? error.message : String(error)}`,
-        ...current.slice(0, 3),
-      ])
-    } finally {
-      setCreatePlayerPending(false)
-    }
-  }
-
-  const createDefaultMap = async () => {
-    if (!selectedCampaignId || !campaign) return
-    setCreateMapPending(true)
-    try {
-      await apiFetch<{ map_id: number }>(baseUrl, '/api/maps', auth, {
-        method: 'POST',
-        body: JSON.stringify({
-          campaign_id: selectedCampaignId,
-          world_id: campaign.world_id,
-          title: `${campaign.title} Map`,
-          description: campaign.location || 'Campaign map notes.',
-          map_data: {},
-        }),
-      })
-      await refreshCampaignWorkspace(selectedCampaignId)
-      setInspectorTab('map')
-    } catch (error) {
-      setErrors((current) => [
-        `Could not create map: ${error instanceof Error ? error.message : String(error)}`,
-        ...current.slice(0, 3),
-      ])
-    } finally {
-      setCreateMapPending(false)
-    }
-  }
-
-  const submitAction = (overrideMessage?: string) => {
-    if (
-      !socketRef.current ||
-      !selectedSessionId ||
-      !selectedCampaignId ||
-      !campaign ||
-      !selectedPlayerId
-    ) {
-      setErrors((current) => [
-        'Choose a campaign, session, and player before sending.',
-        ...current.slice(0, 3),
-      ])
-      return
-    }
-    const message = (overrideMessage ?? actionText).trim()
-    if (!message) return
-
-    stopTtsAudio()
-    setSendPending(true)
-    setOptimisticEntries((current) => [
-      ...current,
-      {
-        id: `local-${Date.now()}`,
-        role: 'player',
-        speaker: selectedPlayer?.character_name ?? 'Player',
-        text: message,
-        timestamp: new Date().toISOString(),
-        metadata: {},
-      },
-    ])
-    socketRef.current.emit('send_message', {
-      session_id: selectedSessionId,
-      campaign_id: selectedCampaignId,
-      world_id: campaign.world_id,
-      player_id: selectedPlayerId,
-      message,
-    })
-    setActionText('')
-  }
-
-  const refreshCurrentWorkspace = useCallback(async () => {
-    await refreshRoot()
-    if (selectedCampaignId) {
-      await refreshCampaignWorkspace(selectedCampaignId)
-    }
-    if (selectedSessionId) {
-      await loadSessionData(selectedSessionId)
-    }
-  }, [
+  const {
+    clearSessionData,
+    loadOlderSessionLog,
     loadSessionData,
+    olderLogLoading,
     refreshCampaignWorkspace,
+    refreshCurrentWorkspace,
     refreshRoot,
+  } = useWorkspaceQueries({
+    auth,
+    baseUrl,
+    sessions,
     selectedCampaignId,
     selectedSessionId,
-  ])
+    sessionLogCursor,
+    sessionLogHasMore,
+    setHealth,
+    setMetrics,
+    setLlmConfig,
+    setTtsConfig,
+    setWorlds,
+    setCampaignSessionMeta,
+    setSelectedCampaignId,
+    setSelectedSessionId,
+    setSelectedPlayerId,
+    setSessionState,
+    setLogEntries,
+    setSessionLogCursor,
+    setSessionLogHasMore,
+    setWorkspaceLoading,
+    setLoadingCampaignId,
+    setSessionLoading,
+    rootCampaignsLoaded,
+    campaignWorkspaceLoaded,
+    setOptimisticEntries,
+    setStreamingTurn,
+    setSendPending,
+    pushError,
+    onUnauthorized: openAuthTokenPrompt,
+  })
+
+  const {
+    activateSegment,
+    createDefaultMap,
+    createMapPending,
+    createPlayerPending,
+    createSegment,
+    deleteSegment,
+    mapManagementForm,
+    mapSavePending,
+    saveMapManagement,
+    segmentDeletePendingId,
+    segmentManagementForm,
+    segmentSavePending,
+    setMapManagementForm,
+    setSegmentManagementForm,
+  } = useWorldMapSegmentActions({
+    auth,
+    baseUrl,
+    campaign,
+    maps,
+    selectedCampaignId,
+    refreshCampaignWorkspace,
+    setSelectedPlayerId,
+    setInspectorTab,
+    pushError,
+  })
 
   const updateJumpToLatestVisibility = useCallback(() => {
     const feed = turnFeedRef.current
@@ -1569,317 +798,6 @@ function App() {
     return () => window.cancelAnimationFrame(frame)
   }, [latestDmText, mainTab, showJumpToLatest, timeline.length])
 
-  const downloadSessionJson = async () => {
-    const warnings: string[] = []
-    const [turnEventsResult, canonResult] = await Promise.allSettled([
-      selectedSessionId
-        ? apiFetch<SessionEventsResponse>(
-            baseUrl,
-            `/api/sessions/${selectedSessionId}/events?limit=1000`,
-            auth,
-          )
-        : Promise.resolve<SessionEventsResponse | null>(null),
-      selectedCampaignId
-        ? apiFetch<CampaignCanon>(baseUrl, `/api/campaigns/${selectedCampaignId}/canon`, auth)
-        : Promise.resolve<CampaignCanon | null>(null),
-    ])
-
-    const turnEvents =
-      turnEventsResult.status === 'fulfilled' ? turnEventsResult.value : null
-    const canon = canonResult.status === 'fulfilled' ? canonResult.value : null
-    if (turnEventsResult.status === 'rejected') {
-      warnings.push(`turn events unavailable: ${turnEventsResult.reason}`)
-    }
-    if (canonResult.status === 'rejected') {
-      warnings.push(`canon unavailable: ${canonResult.reason}`)
-    }
-
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      selectedIds: {
-        campaignId: selectedCampaignId,
-        sessionId: selectedSessionId,
-        playerId: selectedPlayerId,
-      },
-      campaign,
-      selectedSession: activeSession,
-      players,
-      selectedPlayer: playerDetail ?? selectedPlayer,
-      sessionState,
-      logEntries,
-      turnEvents: turnEvents?.events ?? [],
-      canon,
-      maps,
-      segments,
-      metrics,
-      warnings,
-    }
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: 'application/json',
-    })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `aidm-session-${selectedSessionId ?? 'export'}.json`
-    link.click()
-    URL.revokeObjectURL(url)
-    if (warnings.length) {
-      setErrors((current) => [
-        `Export completed with missing live data: ${warnings.join('; ')}`,
-        ...current.slice(0, 3),
-      ])
-    }
-  }
-
-  const shareSession = () => {
-    const params = new URLSearchParams()
-    if (selectedCampaignId) params.set('campaign', String(selectedCampaignId))
-    if (selectedSessionId) params.set('session', String(selectedSessionId))
-    const shareUrl = `${window.location.origin}${window.location.pathname}?${params.toString()}`
-    if (!navigator.clipboard) {
-      setErrors((current) => ['Clipboard unavailable for sharing.', ...current.slice(0, 2)])
-      return
-    }
-    void navigator.clipboard.writeText(shareUrl).then(
-      () => {
-        setErrors((current) => ['Session link copied.', ...current.slice(0, 2)])
-      },
-      () => {
-        setErrors((current) => ['Clipboard unavailable for sharing.', ...current.slice(0, 2)])
-      },
-    )
-  }
-
-  const stopTtsAudio = useCallback(() => {
-    ttsLoopIdRef.current += 1
-
-    if (ttsPartialFlushTimerRef.current !== null) {
-      window.clearTimeout(ttsPartialFlushTimerRef.current)
-      ttsPartialFlushTimerRef.current = null
-    }
-
-    ttsCurrentItemRef.current?.controller.abort()
-    ttsCurrentItemRef.current?.cleanup?.()
-    ttsCurrentItemRef.current = null
-
-    for (const item of ttsQueueRef.current) {
-      item.controller.abort()
-      item.cleanup?.()
-    }
-    ttsQueueRef.current = []
-    setTtsQueueCount(0)
-
-    ttsAudioRef.current?.pause()
-    ttsAudioRef.current = null
-    ttsPlayingRef.current = false
-    spokenTextLengthRef.current = 0
-    speakableStreamingTextRef.current = ''
-    if (ttsAudioUrlRef.current) {
-      URL.revokeObjectURL(ttsAudioUrlRef.current)
-      ttsAudioUrlRef.current = null
-    }
-    setTtsSpeaking(false)
-    setTtsStatus(ttsEnabledRef.current ? 'ready' : 'off')
-  }, [])
-
-  const toggleTts = () => {
-    if (ttsEnabled) {
-      stopTtsAudio()
-      setTtsEnabled(false)
-      setTtsStatus('off')
-      return
-    }
-    if (ttsConfig && !ttsConfig.configured) {
-      setErrors((current) => [
-        'Deepgram TTS is not configured on the backend.',
-        ...current.slice(0, 3),
-      ])
-      return
-    }
-    setTtsEnabled(true)
-    setTtsStatus('ready')
-  }
-
-  const processTtsQueue = useCallback(async () => {
-    if (ttsPlayingRef.current || ttsQueueRef.current.length === 0 || !ttsEnabled) return
-    ttsPlayingRef.current = true
-
-    ttsLoopIdRef.current += 1
-    const currentLoopId = ttsLoopIdRef.current
-
-    while (ttsQueueRef.current.length > 0) {
-      if (!ttsEnabled || ttsLoopIdRef.current !== currentLoopId) break
-
-      const item = ttsQueueRef.current.shift()
-      if (!item) continue
-      setTtsQueueCount(ttsQueueRef.current.length)
-      ttsCurrentItemRef.current = item
-
-      setTtsSpeaking(false)
-      setTtsStatus('requesting')
-      let audioUrl: string | null = null
-
-      try {
-        audioUrl = await item.audioUrlPromise
-
-        if (ttsLoopIdRef.current !== currentLoopId || item.controller.signal.aborted) {
-          if (audioUrl) URL.revokeObjectURL(audioUrl)
-          break
-        }
-
-        if (!audioUrl) continue
-
-        const audio = new Audio(audioUrl)
-        audio.preload = 'auto'
-        ttsAudioRef.current = audio
-        ttsAudioUrlRef.current = audioUrl
-        setTtsSpeaking(true)
-        setTtsStatus('speaking')
-
-        await new Promise<void>((resolve, reject) => {
-          audio.onended = () => resolve()
-          audio.onerror = (e) => reject(e)
-          audio.onpause = () => resolve()
-          audio.play().catch(reject)
-        })
-
-        await item.streamDone?.catch(() => undefined)
-        if (ttsAudioUrlRef.current === audioUrl) {
-          URL.revokeObjectURL(audioUrl)
-          ttsAudioUrlRef.current = null
-        }
-      } catch (error) {
-        if (!item.controller.signal.aborted && ttsLoopIdRef.current === currentLoopId) {
-          setTtsStatus('failed')
-          setTtsSpeaking(false)
-          setErrors((current) => [
-            `TTS playback failed: ${ttsPlaybackErrorMessage(error)}`,
-            ...current.slice(0, 3),
-          ])
-        }
-        if (audioUrl && ttsAudioUrlRef.current === audioUrl) {
-          URL.revokeObjectURL(audioUrl)
-          ttsAudioUrlRef.current = null
-        }
-      } finally {
-        item.cleanup?.()
-        if (ttsCurrentItemRef.current === item) {
-          ttsCurrentItemRef.current = null
-        }
-      }
-    }
-
-    if (ttsLoopIdRef.current === currentLoopId) {
-      setTtsSpeaking(false)
-      ttsPlayingRef.current = false
-      ttsAudioRef.current = null
-      setTtsQueueCount(ttsQueueRef.current.length)
-      if (ttsQueueRef.current.length === 0 && ttsEnabledRef.current) {
-        setTtsStatus('ready')
-      }
-    }
-  }, [ttsEnabled])
-
-  const queueTtsText = useCallback(
-    (text: string) => {
-      if (!ttsEnabled) return
-      let cleanText = text.replace(/<thought>[\s\S]*?(?:<\/thought>|$)/gi, '')
-      cleanText = stripMarkdown(cleanText).replace(/\s+/g, ' ').trim()
-      if (!cleanText) return
-
-      const controller = new AbortController()
-
-      const headers = new Headers({ 'Content-Type': 'application/json' })
-      if (auth) {
-        headers.set('Authorization', `Bearer ${auth}`)
-      }
-
-      const requestAudio = () =>
-        fetch(`${normalizeBaseUrl(baseUrl)}/api/tts/speak`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ text: cleanText }),
-          signal: controller.signal,
-        })
-
-      const reportTtsError = (message: string) => {
-        setTtsStatus('failed')
-        setErrors((current) => [`TTS failed: ${message}`, ...current.slice(0, 3)])
-      }
-
-      const streamedSource = createStreamingTtsSource(requestAudio, controller, reportTtsError)
-      const promise =
-        streamedSource?.audioUrl
-          ? Promise.resolve(streamedSource.audioUrl)
-          : requestAudio()
-              .then(async (response) => {
-                if (!response.ok) {
-                  reportTtsError(await ttsErrorMessage(response))
-                  return null
-                }
-                const blob = await response.blob()
-                if (controller.signal.aborted) return null
-                return URL.createObjectURL(blob)
-              })
-              .catch((error) => {
-                if (error.name !== 'AbortError') {
-                  reportTtsError(error instanceof Error ? error.message : String(error))
-                }
-                return null
-              })
-
-      ttsQueueRef.current.push({
-        text: cleanText,
-        audioUrlPromise: promise,
-        controller,
-        cleanup: streamedSource?.cleanup,
-        streamDone: streamedSource?.streamDone,
-      })
-      setTtsQueueCount(ttsQueueRef.current.length)
-      setTtsStatus('queued')
-      void processTtsQueue()
-    },
-    [auth, baseUrl, processTtsQueue, ttsEnabled],
-  )
-
-  const queueTtsNarration = useCallback(
-    (text: string) => {
-      let remaining = text.replace(/<thought>[\s\S]*?(?:<\/thought>|$)/gi, '').trim()
-      while (remaining.trim()) {
-        const flushLength = ttsFlushLength(remaining, true) || remaining.length
-        queueTtsText(remaining.slice(0, flushLength))
-        remaining = remaining.slice(flushLength)
-      }
-    },
-    [queueTtsText],
-  )
-
-  const speakDmEntry = useCallback(
-    async (entry: TimelineEntry) => {
-      if (!ttsEnabled) return
-      stopTtsAudio()
-      queueTtsNarration(entry.text)
-    },
-    [queueTtsNarration, stopTtsAudio, ttsEnabled],
-  )
-
-  const flushStreamingTtsChunks = useCallback(
-    (forcePartial = false) => {
-      let pending = speakableStreamingTextRef.current.slice(spokenTextLengthRef.current)
-      while (pending.trim()) {
-        const flushLength = ttsFlushLength(pending, forcePartial)
-        if (flushLength <= 0) break
-
-        const chunk = pending.slice(0, flushLength)
-        spokenTextLengthRef.current += flushLength
-        queueTtsText(chunk)
-        pending = speakableStreamingTextRef.current.slice(spokenTextLengthRef.current)
-        forcePartial = false
-      }
-    },
-    [queueTtsText],
-  )
-
   const toggleFullscreen = async () => {
     try {
       if (fullscreenFallback) {
@@ -1893,285 +811,592 @@ function App() {
       await rootRef.current?.requestFullscreen()
     } catch {
       setFullscreenFallback(true)
-      setErrors((current) => [
-        'Native fullscreen was blocked by this browser, so app fullscreen mode is active.',
-        ...current.slice(0, 3),
-      ])
+      pushError('system', 'Native fullscreen was blocked by this browser, so app fullscreen mode is active.')
     }
   }
 
-  const openCreateCampaignDialog = () => {
-    setCreateCampaignForm({
-      title: '',
-      description: '',
-      worldName: '',
-    })
-    setCreateCampaignError('')
-    setCreateCampaignOpen(true)
-  }
-
-  const closeCreateCampaignDialog = () => {
-    if (createCampaignPending) return
-    setCreateCampaignOpen(false)
-    setCreateCampaignError('')
-  }
-
-  const openRuntimeSettingsDialog = () => {
-    setRuntimeSettingsForm({ baseUrl, authToken })
-    setRuntimeSettingsError('')
-    setAccountMenuOpen(false)
-    setRuntimeSettingsOpen(true)
-  }
-
-  const closeRuntimeSettingsDialog = () => {
-    setRuntimeSettingsOpen(false)
-    setRuntimeSettingsError('')
-  }
-
-  const submitRuntimeSettings = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const nextBaseUrl = normalizeBaseUrl(runtimeSettingsForm.baseUrl)
-    const nextAuthToken = runtimeSettingsForm.authToken.trim()
-
-    if (!nextBaseUrl) {
-      setRuntimeSettingsError('Backend URL is required.')
+  const rememberDialogTrigger = useCallback((fallback?: HTMLElement | null) => {
+    if (fallback) {
+      dialogReturnFocusRef.current = fallback
       return
     }
+    const activeElement = document.activeElement
+    dialogReturnFocusRef.current =
+      activeElement instanceof HTMLElement && activeElement !== document.body
+        ? activeElement
+        : fallback ?? null
+  }, [])
 
+  const {
+    closeShareSessionDialog,
+    closeSessionActionDialog,
+    copyShareSessionUrl,
+    downloadSessionJson,
+    importSessionJson,
+    openDeleteSessionDialog,
+    openRenameSessionDialog,
+    sessionActionDialog,
+    sessionImportPending,
+    setSessionActionDialog,
+    shareSession,
+    shareSessionUrl,
+    startSession,
+    submitSessionActionDialog,
+  } = useSessionActions({
+    auth,
+    baseUrl,
+    campaign,
+    activeSession,
+    sessionDisplayFallback: campaign?.world_id ?? selectedCampaignId,
+    selectedCampaignId,
+    selectedSessionId,
+    selectedPlayerId,
+    players,
+    selectedPlayer,
+    playerDetail,
+    sessionState,
+    logEntries,
+    maps,
+    segments,
+    metrics,
+    rememberDialogTrigger,
+    sessionMenuButton: () =>
+      sessionMenuRef.current?.querySelector<HTMLElement>('button[aria-label="Session menu"]') ?? null,
+    sessionDisplayName,
+    loadSessionData,
+    refreshRoot,
+    refreshCampaignWorkspace,
+    sessionUpserted,
+    setSelectedCampaignId,
+    setSelectedSessionId,
+    setLogEntries,
+    setSessionState,
+    setOptimisticEntries,
+    setStreamingTurn,
+    setMainTab,
+    setSessionMenuOpen,
+    pushError,
+  })
+
+  const {
+    campaignActionDialog,
+    closeCampaignActionDialog,
+    closeCreateCampaignDialog,
+    createCampaignError,
+    createCampaignForm,
+    createCampaignOpen,
+    createCampaignPending,
+    openCreateCampaignDialog,
+    openDeleteCampaignDialog,
+    openRenameCampaignDialog,
+    setCampaignActionDialog,
+    setCreateCampaignForm,
+    submitCampaignActionDialog,
+    submitCreateCampaign,
+  } = useCampaignActions({
+    auth,
+    baseUrl,
+    campaign,
+    selectedCampaignId,
+    defaultWorldId: campaignWorldId,
+    rememberDialogTrigger,
+    refreshRoot,
+    refreshCampaignWorkspace,
+    campaignUpserted,
+    campaignRemoved,
+    setSelectedCampaignId,
+    setSelectedSessionId,
+    setLogEntries,
+    setSessionState,
+    setOptimisticEntries,
+    setStreamingTurn,
+    setMainTab,
+    setInspectorTab,
+    pushError,
+  })
+
+  const loadArchivedCampaigns = useCallback(async () => {
+    setCampaignArchiveDialog((current) => ({
+      items: current?.items ?? [],
+      loading: true,
+      error: '',
+      pendingId: null,
+    }))
     try {
-      const url = new URL(nextBaseUrl)
-      if (!['http:', 'https:'].includes(url.protocol)) {
-        setRuntimeSettingsError('Backend URL must start with http:// or https://.')
+      const allCampaigns = await apiFetch<Campaign[]>(
+        baseUrl,
+        '/api/campaigns?include_archived=true',
+        auth,
+      )
+      setCampaignArchiveDialog({
+        items: allCampaigns.filter((item) => item.is_archived),
+        loading: false,
+        error: '',
+        pendingId: null,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setCampaignArchiveDialog((current) => ({
+        items: current?.items ?? [],
+        loading: false,
+        error: message,
+        pendingId: null,
+      }))
+      pushError('persistence', `Could not load campaign archive: ${message}`)
+    }
+  }, [auth, baseUrl, pushError])
+
+  const openCampaignArchiveManager = useCallback(() => {
+    rememberDialogTrigger()
+    void loadArchivedCampaigns()
+  }, [loadArchivedCampaigns, rememberDialogTrigger])
+
+  const closeCampaignArchiveDialog = useCallback(() => {
+    if (campaignArchiveDialog?.pendingId) return
+    setCampaignArchiveDialog(null)
+  }, [campaignArchiveDialog?.pendingId])
+
+  const archiveSelectedCampaignFromManager = useCallback(async () => {
+    if (!campaign || !selectedCampaignId) {
+      setCampaignArchiveDialog((current) =>
+        current
+          ? { ...current, error: 'Select an active campaign before archiving.' }
+          : current,
+      )
+      return
+    }
+    const campaignId = campaign.campaign_id
+    setCampaignArchiveDialog((current) =>
+      current ? { ...current, pendingId: campaignId, error: '' } : current,
+    )
+    try {
+      await apiFetch<{ deleted: boolean; archived?: boolean }>(
+        baseUrl,
+        `/api/campaigns/${campaignId}`,
+        auth,
+        { method: 'DELETE' },
+      )
+      setSelectedCampaignId(null)
+      setSelectedSessionId(null)
+      campaignRemoved(campaignId)
+      setLogEntries([])
+      setSessionState(null)
+      setOptimisticEntries([])
+      setStreamingTurn(null)
+      await refreshRoot()
+      await loadArchivedCampaigns()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setCampaignArchiveDialog((current) =>
+        current ? { ...current, pendingId: null, error: message } : current,
+      )
+      pushError('persistence', `Could not archive campaign: ${message}`)
+    }
+  }, [
+    auth,
+    baseUrl,
+    campaign,
+    campaignRemoved,
+    loadArchivedCampaigns,
+    pushError,
+    refreshRoot,
+    selectedCampaignId,
+    setLogEntries,
+    setOptimisticEntries,
+    setSelectedCampaignId,
+    setSelectedSessionId,
+    setSessionState,
+    setStreamingTurn,
+  ])
+
+  const restoreCampaignFromArchive = useCallback(
+    async (campaignId: number) => {
+      setCampaignArchiveDialog((current) =>
+        current ? { ...current, pendingId: campaignId, error: '' } : current,
+      )
+      try {
+        const response = await apiFetch<{ restored: boolean; campaign: Campaign }>(
+          baseUrl,
+          `/api/campaigns/${campaignId}/restore`,
+          auth,
+          { method: 'POST' },
+        )
+        campaignUpserted(response.campaign)
+        await refreshRoot()
+        setSelectedCampaignId(response.campaign.campaign_id)
+        await loadArchivedCampaigns()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        setCampaignArchiveDialog((current) =>
+          current ? { ...current, pendingId: null, error: message } : current,
+        )
+        pushError('persistence', `Could not restore campaign: ${message}`)
+      }
+    },
+    [
+      auth,
+      baseUrl,
+      campaignUpserted,
+      loadArchivedCampaigns,
+      pushError,
+      refreshRoot,
+      setSelectedCampaignId,
+    ],
+  )
+
+  const loadArchivedSessions = useCallback(
+    async (campaignId = selectedCampaignId) => {
+      setSessionArchiveDialog((current) => ({
+        items: current?.items ?? [],
+        loading: true,
+        error: '',
+        pendingId: null,
+      }))
+      if (!campaignId) {
+        setSessionArchiveDialog({
+          items: [],
+          loading: false,
+          error: 'Select a campaign to view archived sessions.',
+          pendingId: null,
+        })
         return
       }
-    } catch {
-      setRuntimeSettingsError('Enter a valid backend URL.')
-      return
-    }
-
-    localStorage.setItem('aidm:baseUrl', nextBaseUrl)
-    if (nextAuthToken) {
-      localStorage.setItem('aidm:authToken', nextAuthToken)
-    } else {
-      localStorage.removeItem('aidm:authToken')
-    }
-
-    setBaseUrl(nextBaseUrl)
-    setAuthToken(nextAuthToken)
-    setHealth(null)
-    setLlmConfig(null)
-    setTtsConfig(null)
-    setMetrics(null)
-    setSocketReconnectKey((current) => current + 1)
-    setRuntimeSettingsOpen(false)
-    setRuntimeSettingsError('')
-  }
-
-  const createWorldForCampaign = async (title: string, description: string) => {
-    const worldName = createCampaignForm.worldName.trim() || `${title} World`
-    const world = await apiFetch<Pick<World, 'world_id'>>(baseUrl, '/api/worlds', auth, {
-      method: 'POST',
-      body: JSON.stringify({
-        name: worldName,
-        description: description || `World for ${title}`,
-      }),
-    })
-    return world.world_id
-  }
-
-  const submitCreateCampaign = async (event?: FormEvent<HTMLFormElement>) => {
-    event?.preventDefault()
-    const title = createCampaignForm.title.trim()
-    const description = createCampaignForm.description.trim()
-    if (!title) {
-      setCreateCampaignError('Campaign name is required.')
-      return
-    }
-
-    setCreateCampaignPending(true)
-    setCreateCampaignError('')
-
-    try {
-      let createdWorld = false
-      let worldId: number | null = null
-      if (createCampaignForm.worldName.trim() || !campaigns.length) {
-        worldId = await createWorldForCampaign(title, description)
-        createdWorld = true
-      } else {
-        worldId = campaign?.world_id ?? campaigns[0]?.world_id ?? null
-      }
-
-      const createCampaign = (nextWorldId: number) =>
-        apiFetch<{ campaign_id: number }>(baseUrl, '/api/campaigns', auth, {
-          method: 'POST',
-          body: JSON.stringify({
-            title,
-            world_id: nextWorldId,
-            description,
-          }),
-        })
-
-      let result: { campaign_id: number }
-      if (!worldId) {
-        worldId = await createWorldForCampaign(title, description)
-        createdWorld = true
-      }
-
       try {
-        result = await createCampaign(worldId)
+        const allSessions = await apiFetch<SessionSummary[]>(
+          baseUrl,
+          `/api/sessions/campaigns/${campaignId}/sessions?include_archived=true`,
+          auth,
+        )
+        setSessionArchiveDialog({
+          items: allSessions.filter((item) => item.is_archived),
+          loading: false,
+          error: '',
+          pendingId: null,
+        })
       } catch (error) {
-        if (error instanceof ApiClientError && error.status === 404 && !createdWorld) {
-          worldId = await createWorldForCampaign(title, description)
-          result = await createCampaign(worldId)
-        } else {
-          throw error
-        }
+        const message = error instanceof Error ? error.message : String(error)
+        setSessionArchiveDialog((current) => ({
+          items: current?.items ?? [],
+          loading: false,
+          error: message,
+          pendingId: null,
+        }))
+        pushError('persistence', `Could not load session archive: ${message}`)
       }
+    },
+    [auth, baseUrl, pushError, selectedCampaignId],
+  )
 
-      setCreateCampaignOpen(false)
-      setCreateCampaignForm({ title: '', description: '', worldName: '' })
+  const openSessionArchiveManager = useCallback(() => {
+    rememberDialogTrigger()
+    void loadArchivedSessions()
+  }, [loadArchivedSessions, rememberDialogTrigger])
+
+  const closeSessionArchiveDialog = useCallback(() => {
+    if (sessionArchiveDialog?.pendingId) return
+    setSessionArchiveDialog(null)
+  }, [sessionArchiveDialog?.pendingId])
+
+  const archiveSelectedSessionFromManager = useCallback(async () => {
+    if (!activeSession || !selectedCampaignId) {
+      setSessionArchiveDialog((current) =>
+        current
+          ? { ...current, error: 'Select an active session before archiving.' }
+          : current,
+      )
+      return
+    }
+    const sessionId = activeSession.session_id
+    setSessionArchiveDialog((current) =>
+      current ? { ...current, pendingId: sessionId, error: '' } : current,
+    )
+    try {
+      await apiFetch<{ archived: boolean; session: SessionSummary }>(
+        baseUrl,
+        `/api/sessions/${sessionId}/archive`,
+        auth,
+        { method: 'POST' },
+      )
       setSelectedSessionId(null)
       setLogEntries([])
       setSessionState(null)
       setOptimisticEntries([])
       setStreamingTurn(null)
-      setMainTab('turns')
-      setInspectorTab('party')
-      await refreshRoot()
-      setSelectedCampaignId(result.campaign_id)
+      await refreshCampaignWorkspace(selectedCampaignId)
+      await loadArchivedSessions(selectedCampaignId)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      setCreateCampaignError(message)
-      setErrors((current) => [`Could not create campaign: ${message}`, ...current.slice(0, 3)])
-    } finally {
-      setCreateCampaignPending(false)
+      setSessionArchiveDialog((current) =>
+        current ? { ...current, pendingId: null, error: message } : current,
+      )
+      pushError('persistence', `Could not archive session: ${message}`)
     }
-  }
+  }, [
+    activeSession,
+    auth,
+    baseUrl,
+    loadArchivedSessions,
+    pushError,
+    refreshCampaignWorkspace,
+    selectedCampaignId,
+    setLogEntries,
+    setOptimisticEntries,
+    setSelectedSessionId,
+    setSessionState,
+    setStreamingTurn,
+  ])
 
-  const renameSelectedSession = async () => {
-    if (!activeSession) return
-    const currentName = sessionDisplayName(activeSession, campaign?.world_id ?? selectedCampaignId)
-    const nextName = window.prompt('Session name', currentName)
-    if (!nextName?.trim() || nextName.trim() === currentName) {
-      setSessionMenuOpen(false)
-      return
-    }
-    try {
-      const updated = await apiFetch<SessionSummary>(
-        baseUrl,
-        `/api/sessions/${activeSession.session_id}`,
-        auth,
-        {
-          method: 'PATCH',
-          body: JSON.stringify({ name: nextName.trim() }),
-        },
+  const restoreSessionFromArchive = useCallback(
+    async (sessionId: number) => {
+      setSessionArchiveDialog((current) =>
+        current ? { ...current, pendingId: sessionId, error: '' } : current,
       )
-      setSessions((current) =>
-        current.map((session) => (session.session_id === updated.session_id ? updated : session)),
-      )
-      setSessionMenuOpen(false)
-      if (selectedCampaignId) {
-        await refreshCampaignWorkspace(selectedCampaignId)
+      try {
+        const response = await apiFetch<{ restored: boolean; session: SessionSummary }>(
+          baseUrl,
+          `/api/sessions/${sessionId}/restore`,
+          auth,
+          { method: 'POST' },
+        )
+        sessionUpserted(response.session)
+        await refreshCampaignWorkspace(response.session.campaign_id)
+        setSelectedSessionId(response.session.session_id)
+        await loadArchivedSessions(response.session.campaign_id)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        setSessionArchiveDialog((current) =>
+          current ? { ...current, pendingId: null, error: message } : current,
+        )
+        pushError('persistence', `Could not restore session: ${message}`)
       }
-    } catch (error) {
-      setErrors((current) => [
-        `Could not rename session: ${error instanceof Error ? error.message : String(error)}`,
-        ...current.slice(0, 3),
-      ])
-    }
-  }
+    },
+    [
+      auth,
+      baseUrl,
+      loadArchivedSessions,
+      pushError,
+      refreshCampaignWorkspace,
+      sessionUpserted,
+      setSelectedSessionId,
+    ],
+  )
 
-  const deleteSelectedSession = async () => {
-    if (!activeSession || !selectedCampaignId) return
-    const label = sessionDisplayName(activeSession, campaign?.world_id ?? selectedCampaignId)
-    if (!window.confirm(`Delete ${label}? This removes its log and turn history.`)) {
-      setSessionMenuOpen(false)
-      return
-    }
+  const resetWorldForm = useCallback(() => {
+    setWorldForm({ ...emptyWorldForm })
+  }, [])
+
+  const openWorldManagerDialog = useCallback(() => {
+    rememberDialogTrigger()
+    setWorldForm({ ...emptyWorldForm })
+    setWorldManagerOpen(true)
+  }, [rememberDialogTrigger])
+
+  const closeWorldManagerDialog = useCallback(() => {
+    if (worldForm.pending || worldDeleteDialog) return
+    setWorldManagerOpen(false)
+    setWorldForm({ ...emptyWorldForm })
+  }, [worldDeleteDialog, worldForm.pending])
+
+  const editWorld = useCallback((world: World) => {
+    setWorldForm({
+      mode: 'edit',
+      worldId: world.world_id,
+      name: world.name,
+      description: world.description ?? '',
+      error: '',
+      pending: false,
+    })
+  }, [])
+
+  const submitWorldForm = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      const name = worldForm.name.trim()
+      const description = worldForm.description.trim()
+      if (!name) {
+        setWorldForm((current) => ({ ...current, error: 'World name is required.' }))
+        return
+      }
+      if (worldForm.mode === 'edit' && !worldForm.worldId) {
+        setWorldForm((current) => ({ ...current, error: 'Choose a world to edit.' }))
+        return
+      }
+
+      setWorldForm((current) => ({ ...current, pending: true, error: '' }))
+      try {
+        const path =
+          worldForm.mode === 'edit' && worldForm.worldId
+            ? `/api/worlds/${worldForm.worldId}`
+            : '/api/worlds'
+        await apiFetch<World>(baseUrl, path, auth, {
+          method: worldForm.mode === 'edit' ? 'PATCH' : 'POST',
+          body: JSON.stringify({ name, description }),
+        })
+        await refreshRoot()
+        setWorldForm({ ...emptyWorldForm })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        setWorldForm((current) => ({ ...current, pending: false, error: message }))
+        pushError(
+          'persistence',
+          `Could not ${worldForm.mode === 'edit' ? 'update' : 'create'} world: ${message}`,
+        )
+      }
+    },
+    [auth, baseUrl, pushError, refreshRoot, worldForm],
+  )
+
+  const openWorldDeleteDialog = useCallback(
+    (world: World) => {
+      rememberDialogTrigger()
+      setWorldDeleteDialog({
+        world,
+        error: '',
+        pending: false,
+        canForce: false,
+      })
+    },
+    [rememberDialogTrigger],
+  )
+
+  const closeWorldDeleteDialog = useCallback(() => {
+    if (worldDeleteDialog?.pending) return
+    setWorldDeleteDialog(null)
+  }, [worldDeleteDialog?.pending])
+
+  const submitWorldDeleteDialog = useCallback(async (force = false) => {
+    if (!worldDeleteDialog) return
+    const { world } = worldDeleteDialog
+    setWorldDeleteDialog((current) => (current ? { ...current, pending: true, error: '' } : current))
+    setWorldForm((current) => ({ ...current, error: '' }))
     try {
       await apiFetch<{ deleted: boolean }>(
         baseUrl,
-        `/api/sessions/${activeSession.session_id}`,
+        `/api/worlds/${world.world_id}${force ? '?force=true' : ''}`,
         auth,
         { method: 'DELETE' },
       )
-      setSessionMenuOpen(false)
-      setOptimisticEntries([])
-      setStreamingTurn(null)
-      setLogEntries([])
-      setSessionState(null)
-      await refreshCampaignWorkspace(selectedCampaignId)
-    } catch (error) {
-      setErrors((current) => [
-        `Could not delete session: ${error instanceof Error ? error.message : String(error)}`,
-        ...current.slice(0, 3),
-      ])
-    }
-  }
-
-  const applyComposerMode = (mode: ComposerMode, die = selectedDie) => {
-    setComposerMode(mode)
-    setActionText((current) =>
-      composerTextForMode(mode, current, selectedPlayer?.character_name ?? 'I', die),
-    )
-  }
-
-  const updateSelectedDie = (die: string) => {
-    setSelectedDie(die)
-    if (composerMode === 'roll') {
-      setActionText((current) =>
-        composerTextForMode('roll', current, selectedPlayer?.character_name ?? 'I', die),
+      await refreshRoot()
+      setWorldForm((current) =>
+        current.worldId === world.world_id ? { ...emptyWorldForm } : current,
       )
+      setWorldDeleteDialog(null)
+    } catch (error) {
+      const message = worldDeleteErrorMessage(error)
+      const canForce =
+        error instanceof ApiClientError &&
+        isRecord(error.payload) &&
+        error.payload.error_code === 'world_in_use'
+      setWorldDeleteDialog((current) =>
+        current ? { ...current, pending: false, error: message, canForce } : current,
+      )
+      setWorldForm((current) => ({ ...current, error: message }))
+      pushError('persistence', `Could not delete world: ${message}`)
     }
+  }, [auth, baseUrl, pushError, refreshRoot, worldDeleteDialog])
+
+  const openRuntimeSettingsDialog = () => {
+    rememberDialogTrigger()
+    setAccountMenuOpen(false)
+    openRuntimeSettings()
   }
 
-  const startDiceRoll = (die = selectedDie) => {
-    if (sendPending) {
-      setErrors((current) => [
-        'Wait for the current DM response before rolling again.',
-        ...current.slice(0, 3),
-      ])
-      return
-    }
-    if (
-      !socketRef.current ||
-      !selectedSessionId ||
-      !selectedCampaignId ||
-      !campaign ||
-      !selectedPlayerId
-    ) {
-      setErrors((current) => [
-        'Choose a campaign, session, and player before rolling.',
-        ...current.slice(0, 3),
-      ])
-      return
-    }
+  const closeRuntimeSettingsDialog = useCallback(() => {
+    closeRuntimeSettings()
+  }, [closeRuntimeSettings])
 
-    const normalizedDie = DICE_OPTIONS.includes(die.toLowerCase()) ? die.toLowerCase() : 'd20'
-    const result = rollDie(normalizedDie)
-    const message = diceRollMessage(normalizedDie, result)
-    setSelectedDie(normalizedDie)
-    setComposerMode('roll')
-    setActionText(message)
-    setDiceRoll({
-      die: normalizedDie,
-      result,
-      rollKey: Date.now(),
-      status: 'rolling',
-    })
+  const openProfileSettingsDialog = () => {
+    rememberDialogTrigger()
+    setAccountMenuOpen(false)
+    setProfileSettingsOpen(true)
   }
 
-  const completeDiceRoll = () => {
-    if (!diceRoll || diceRoll.status !== 'rolling') return
-    const { die, result, rollKey } = diceRoll
-    const message = diceRollMessage(die, result)
-    setDiceRoll((current) =>
-      current?.rollKey === rollKey ? { ...current, status: 'sending' } : current,
-    )
-    submitAction(message)
-    window.setTimeout(() => {
-      setDiceRoll((current) => (current?.rollKey === rollKey ? null : current))
-    }, 450)
+  const closeProfileSettingsDialog = useCallback(() => {
+    setProfileSettingsOpen(false)
+  }, [])
+
+  const {
+    closePlayerDeleteDialog,
+    closePlayerEditDialog,
+    openCreatePlayerDialog,
+    openPlayerDeleteDialog,
+    openPlayerEditDialog,
+    playerDeleteDialog,
+    playerEditDialog,
+    setPlayerEditDialog,
+    submitPlayerDeleteDialog,
+    submitPlayerEditDialog,
+  } = usePlayerProfileActions({
+    auth,
+    baseUrl,
+    selectedPlayer,
+    selectedCampaignId,
+    rememberDialogTrigger,
+    refreshCampaignWorkspace,
+    setProfileSettingsOpen,
+    setPlayerDetail,
+    setSelectedPlayerId,
+    playerUpserted,
+    pushError,
+  })
+
+  const promptCreatePlayer = useCallback(() => {
+    openCreatePlayerDialog(selectedCampaignId)
+    return Promise.resolve()
+  }, [openCreatePlayerDialog, selectedCampaignId])
+
+  const campaignChooserKey = useMemo(
+    () => `${storedSelectionScope}:${campaigns.map((item) => item.campaign_id).join(',')}`,
+    [campaigns, storedSelectionScope],
+  )
+
+  const closeCampaignChooserDialog = useCallback(() => {
+    setCampaignChooserDismissedKey(campaignChooserKey)
+    setCampaignChooserOpen(false)
+  }, [campaignChooserKey])
+
+  const chooseCampaign = useCallback(
+    (campaignId: number) => {
+      setSelectedCampaignId(campaignId)
+      setCampaignChooserOpen(false)
+      setMainTab('turns')
+    },
+    [setSelectedCampaignId],
+  )
+
+  const createCampaignFromChooser = useCallback(() => {
+    setCampaignChooserOpen(false)
+    openCreateCampaignDialog()
+  }, [openCreateCampaignDialog])
+
+  const openCharacterJoinDialog = useCallback(() => {
+    if (!selectedCampaignId) return
+    rememberDialogTrigger()
+    setProfileSettingsOpen(false)
+    setCharacterJoinDialogOpen(true)
+  }, [rememberDialogTrigger, selectedCampaignId])
+
+  const closeCharacterJoinDialog = useCallback(() => {
+    setCharacterJoinDialogOpen(false)
+  }, [])
+
+  const joinAsExistingPlayer = useCallback(
+    (player: Player) => {
+      setSelectedPlayerId(player.player_id)
+      setCharacterJoinDialogOpen(false)
+    },
+    [setSelectedPlayerId],
+  )
+
+  const createCharacterFromJoinDialog = useCallback(() => {
+    setCharacterJoinDialogOpen(false)
+    openCreatePlayerDialog(selectedCampaignId)
+  }, [openCreatePlayerDialog, selectedCampaignId])
+
+  const clearAuthToken = () => {
+    clearRuntimeAuthToken()
+    setAccountMenuOpen(false)
+    setProfileSettingsOpen(false)
   }
 
   const switchRuntime = useCallback(
@@ -2198,15 +1423,12 @@ function App() {
             : current,
         )
       } catch (error) {
-        setErrors((current) => [
-          `Runtime switch failed: ${error instanceof Error ? error.message : String(error)}`,
-          ...current.slice(0, 3),
-        ])
+        pushError('system', `Runtime switch failed: ${error instanceof Error ? error.message : String(error)}`)
       } finally {
         setRuntimePending(false)
       }
     },
-    [auth, baseUrl],
+    [auth, baseUrl, pushError],
   )
 
   useEffect(() => {
@@ -2223,104 +1445,322 @@ function App() {
   }, [theme])
 
   useEffect(() => {
-    localStorage.setItem('aidm:ttsEnabled', String(ttsEnabled))
-  }, [ttsEnabled])
+    const currentMap = maps[0]
+    setMapManagementForm({
+      title: currentMap?.title ?? (campaign ? `${campaign.title} Map` : ''),
+      description: currentMap?.description ?? campaign?.location ?? '',
+    })
+  }, [campaign, maps, setMapManagementForm])
 
   useEffect(() => {
-    if (!ttsEnabled) {
-      stopTtsAudio()
-    }
-  }, [stopTtsAudio, ttsEnabled])
+    submitActionRef.current = submitAction
+    toggleFullscreenRef.current = toggleFullscreen
+  })
 
   useEffect(() => {
-    return () => stopTtsAudio()
-  }, [stopTtsAudio])
+    sessionActionDialogRef.current = sessionActionDialog
+  }, [sessionActionDialog])
 
-  // Keep ref in sync so the socket handler can call the latest speakDmEntry
-  // without adding it as a socket-effect dependency (which would reconnect).
   useEffect(() => {
-    ttsEnabledRef.current = ttsEnabled
-    speakDmEntryRef.current = ttsEnabled ? speakDmEntry : null
-    queueTtsNarrationRef.current = ttsEnabled ? queueTtsNarration : null
-  }, [queueTtsNarration, speakDmEntry, ttsEnabled])
+    campaignActionDialogRef.current = campaignActionDialog
+  }, [campaignActionDialog])
 
-  // Trigger TTS for DM entries that appear from log refresh / page reload.
-  // The streaming→TTS path is handled directly in the dm_response_end handler.
-  useEffect(() => {
-    if (!ttsEnabled || !speakableDmEntry || sendPending || streamingTurn) return
-    if (lastSpokenDmEntryRef.current === speakableDmEntry.id) return
-    const entryTurnId = metadataTurnId(speakableDmEntry.metadata)
-    if (wasTtsAlreadySpoken(speakableDmEntry)) {
-      lastSpokenDmEntryRef.current = speakableDmEntry.id
-      lastSpokenTextRef.current = speakableDmEntry.text
-      if (entryTurnId !== null) {
-        lastSpokenTurnIdRef.current = entryTurnId
+  const closeCurrentDialog = useCallback(() => {
+    const activeCampaignDialog = campaignActionDialogRef.current
+    if (activeCampaignDialog) {
+      if (!activeCampaignDialog.pending) {
+        setCampaignActionDialog(null)
       }
       return
     }
-    // Skip if this entry's turn was already spoken via the streaming path.
-    if (
-      entryTurnId !== null &&
-      lastSpokenTurnIdRef.current !== null &&
-      entryTurnId === lastSpokenTurnIdRef.current
-    ) {
-      lastSpokenDmEntryRef.current = speakableDmEntry.id
-      lastSpokenTextRef.current = speakableDmEntry.text
-      rememberSpokenTts(speakableDmEntry.text, entryTurnId)
+    const activeSessionDialog = sessionActionDialogRef.current
+    if (activeSessionDialog) {
+      if (!activeSessionDialog.pending) {
+        setSessionActionDialog(null)
+      }
       return
     }
-
-    const cleanSpeakableText = cleanNarrationText(speakableDmEntry.text)
-    const cleanLastSpokenText = lastSpokenTextRef.current ? cleanNarrationText(lastSpokenTextRef.current) : null
-    if (
-      entryTurnId === null &&
-      lastSpokenTurnIdRef.current !== null &&
-      cleanSpeakableText === cleanLastSpokenText
-    ) {
-      lastSpokenDmEntryRef.current = speakableDmEntry.id
-      lastSpokenTextRef.current = speakableDmEntry.text
-      rememberSpokenTts(speakableDmEntry.text, entryTurnId)
+    if (runtimeSettingsOpen) {
+      closeRuntimeSettingsDialog()
       return
     }
-
-    lastSpokenDmEntryRef.current = speakableDmEntry.id
-    lastSpokenTextRef.current = speakableDmEntry.text
-    rememberSpokenTts(speakableDmEntry.text, entryTurnId)
-    void speakDmEntry(speakableDmEntry)
+    if (shareSessionUrl) {
+      closeShareSessionDialog()
+      return
+    }
+    if (worldDeleteDialog) {
+      closeWorldDeleteDialog()
+      return
+    }
+    if (worldManagerOpen) {
+      closeWorldManagerDialog()
+      return
+    }
+    if (campaignArchiveDialog) {
+      closeCampaignArchiveDialog()
+      return
+    }
+    if (sessionArchiveDialog) {
+      closeSessionArchiveDialog()
+      return
+    }
+    if (campaignChooserOpen) {
+      closeCampaignChooserDialog()
+      return
+    }
+    if (characterJoinDialogOpen) {
+      closeCharacterJoinDialog()
+      return
+    }
+    if (profileSettingsOpen) {
+      closeProfileSettingsDialog()
+      return
+    }
+    if (playerDeleteDialog) {
+      if (!playerDeleteDialog.pending) {
+        closePlayerDeleteDialog()
+      }
+      return
+    }
+    if (playerEditDialog) {
+      if (!playerEditDialog.pending) {
+        closePlayerEditDialog()
+      }
+      return
+    }
+    if (createCampaignOpen) {
+      closeCreateCampaignDialog()
+    }
   }, [
-    rememberSpokenTts,
-    sendPending,
-    speakDmEntry,
-    speakableDmEntry,
-    streamingTurn,
-    ttsEnabled,
-    wasTtsAlreadySpoken,
+    closeCreateCampaignDialog,
+    closePlayerDeleteDialog,
+    closeShareSessionDialog,
+    closePlayerEditDialog,
+    closeCharacterJoinDialog,
+    closeProfileSettingsDialog,
+    closeRuntimeSettingsDialog,
+    closeWorldManagerDialog,
+    closeWorldDeleteDialog,
+    closeCampaignArchiveDialog,
+    closeSessionArchiveDialog,
+    closeCampaignChooserDialog,
+    campaignArchiveDialog,
+    campaignChooserOpen,
+    characterJoinDialogOpen,
+    createCampaignOpen,
+    playerDeleteDialog,
+    playerEditDialog,
+    profileSettingsOpen,
+    runtimeSettingsOpen,
+    setCampaignActionDialog,
+    setSessionActionDialog,
+    sessionArchiveDialog,
+    shareSessionUrl,
+    worldDeleteDialog,
+    worldManagerOpen,
   ])
 
-  const speakableStreamingText = useMemo(() => {
-    if (!streamingTurn?.text) return ''
-    return streamingTurn.text.replace(/<thought>[\s\S]*?(?:<\/thought>|$)/gi, '')
-  }, [streamingTurn?.text])
-
-  // Process streaming text for TTS in chunks as it appears.
   useEffect(() => {
-    speakableStreamingTextRef.current = speakableStreamingText
-    if (ttsPartialFlushTimerRef.current !== null) {
-      window.clearTimeout(ttsPartialFlushTimerRef.current)
-      ttsPartialFlushTimerRef.current = null
-    }
-    if (!speakableStreamingText) return
+    closeCurrentDialogRef.current = closeCurrentDialog
+  }, [closeCurrentDialog])
 
-    flushStreamingTtsChunks(false)
+  const activeModalKey = campaignActionDialog
+    ? 'campaign-action'
+    : sessionActionDialog
+      ? 'session-action'
+      : worldDeleteDialog
+      ? 'world-delete'
+      : worldManagerOpen
+        ? 'world-manager'
+        : campaignArchiveDialog
+          ? 'campaign-archive'
+          : sessionArchiveDialog
+            ? 'session-archive'
+            : campaignChooserOpen
+              ? 'campaign-chooser'
+              : characterJoinDialogOpen
+                ? 'character-join'
+                : playerDeleteDialog
+                  ? 'player-delete'
+                  : playerEditDialog
+                    ? `player-edit-${playerEditDialog.mode}`
+                    : runtimeSettingsOpen
+                      ? 'runtime-settings'
+                      : shareSessionUrl
+                        ? 'share-session'
+                        : profileSettingsOpen
+                          ? 'profile-settings'
+                          : createCampaignOpen
+                            ? 'create-campaign'
+                            : null
+  const modalOpen = Boolean(activeModalKey)
+  const runtimeSettingsIsAuthPrompt = runtimeSettingsMode === 'auth'
+  const runtimeSettingsEyebrow = runtimeSettingsIsAuthPrompt ? 'Access' : 'Runtime'
+  const runtimeSettingsTitle = runtimeSettingsIsAuthPrompt
+    ? 'Auth Token Required'
+    : 'Backend Settings'
+  const runtimeSettingsCloseLabel = runtimeSettingsIsAuthPrompt
+    ? 'Close auth token prompt'
+    : 'Close backend settings'
+  const runtimeSettingsHelpText = runtimeSettingsIsAuthPrompt
+    ? 'Paste the shared token for this AIDM session.'
+    : 'Leave Backend URL blank when the frontend and backend share one origin. Auth tokens are kept for this tab session and used for API, Socket.IO, and TTS requests.'
 
-    const remaining = speakableStreamingTextRef.current.slice(spokenTextLengthRef.current).trim()
-    if (remaining.length >= TTS_MIN_PARTIAL_FLUSH_CHARS) {
-      ttsPartialFlushTimerRef.current = window.setTimeout(() => {
-        ttsPartialFlushTimerRef.current = null
-        flushStreamingTtsChunks(true)
-      }, TTS_PARTIAL_FLUSH_DELAY_MS)
+  useEffect(() => {
+    if (
+      !auth ||
+      selectedCampaignId ||
+      health?.status !== 'ok' ||
+      workspaceLoading ||
+      loadingCampaignId !== null ||
+      modalOpen ||
+      campaignChooserDismissedKey === campaignChooserKey
+    ) {
+      return
     }
-  }, [flushStreamingTtsChunks, speakableStreamingText])
+    rememberDialogTrigger()
+    setCampaignChooserOpen(true)
+  }, [
+    auth,
+    campaignChooserDismissedKey,
+    campaignChooserKey,
+    health?.status,
+    loadingCampaignId,
+    modalOpen,
+    rememberDialogTrigger,
+    selectedCampaignId,
+    workspaceLoading,
+  ])
+
+  useEffect(() => {
+    if (!activeModalKey) return undefined
+    const previouslyFocused =
+      dialogReturnFocusRef.current ??
+      (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    const focusTimer = window.setTimeout(() => {
+      const dialog = modalDialogRef.current
+      const focusTarget = dialog
+        ?.querySelector<HTMLElement>('[data-autofocus]')
+        ?? dialog?.querySelector<HTMLElement>(
+          'input:not([disabled]), textarea:not([disabled]), button:not([disabled])',
+        )
+      focusTarget?.focus()
+    }, 0)
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const dialog = modalDialogRef.current
+      if (!dialog) return
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        closeCurrentDialogRef.current()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = focusableDialogElements(dialog)
+      if (!focusable.length) {
+        event.preventDefault()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.clearTimeout(focusTimer)
+      document.removeEventListener('keydown', handleKeyDown)
+      if (previouslyFocused?.isConnected) {
+        previouslyFocused.focus()
+      }
+      dialogReturnFocusRef.current = null
+    }
+  }, [activeModalKey])
+
+  useEffect(() => {
+    if (
+      !selectedCampaignId ||
+      !campaign ||
+      selectedPlayerId ||
+      workspaceLoading ||
+      loadingCampaignId === selectedCampaignId ||
+      modalOpen
+    ) {
+      return
+    }
+    if (promptedCharacterCampaignIdsRef.current.has(selectedCampaignId)) return
+    promptedCharacterCampaignIdsRef.current.add(selectedCampaignId)
+    setCharacterJoinDialogOpen(true)
+  }, [
+    campaign,
+    loadingCampaignId,
+    modalOpen,
+    selectedCampaignId,
+    selectedPlayerId,
+    workspaceLoading,
+  ])
+
+  useEffect(() => {
+    if (modalOpen || diceRoll) return undefined
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase()
+      const modifier = event.metaKey || event.ctrlKey
+      if (!modifier) return
+
+      if (key === 'k') {
+        event.preventDefault()
+        actionInputRef.current?.focus()
+        return
+      }
+
+      if (key === 'enter') {
+        event.preventDefault()
+        submitActionRef.current?.()
+        return
+      }
+
+      if (key === '.' && canStopTts) {
+        event.preventDefault()
+        stopTtsAudio()
+        return
+      }
+
+      if (event.shiftKey && key === 'f') {
+        event.preventDefault()
+        void toggleFullscreenRef.current?.()
+        return
+      }
+
+      if (event.shiftKey && key === 'r') {
+        event.preventDefault()
+        void refreshCurrentWorkspace()
+        return
+      }
+
+      if (key === 'j' && !isEditableShortcutTarget(event.target)) {
+        event.preventDefault()
+        setMainTab('turns')
+        scrollTurnFeedToLatest()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [
+    canStopTts,
+    diceRoll,
+    modalOpen,
+    refreshCurrentWorkspace,
+    scrollTurnFeedToLatest,
+    stopTtsAudio,
+  ])
 
   useEffect(() => {
     const updateFullscreenState = () => {
@@ -2380,29 +1820,42 @@ function App() {
     const params = new URLSearchParams(window.location.search)
     if (selectedCampaignId) {
       params.set('campaign', String(selectedCampaignId))
-      localStorage.setItem('aidm:selectedCampaignId', String(selectedCampaignId))
+      localStorage.setItem(
+        selectionStorageKey(storedSelectionScope, 'selectedCampaignId'),
+        String(selectedCampaignId),
+      )
     } else {
       params.delete('campaign')
-      localStorage.removeItem('aidm:selectedCampaignId')
+      localStorage.removeItem(selectionStorageKey(storedSelectionScope, 'selectedCampaignId'))
     }
     if (selectedSessionId) {
       params.set('session', String(selectedSessionId))
-      localStorage.setItem('aidm:selectedSessionId', String(selectedSessionId))
+      localStorage.setItem(
+        selectionStorageKey(storedSelectionScope, 'selectedSessionId'),
+        String(selectedSessionId),
+      )
     } else {
       params.delete('session')
-      localStorage.removeItem('aidm:selectedSessionId')
+      localStorage.removeItem(selectionStorageKey(storedSelectionScope, 'selectedSessionId'))
     }
     if (selectedPlayerId) {
-      params.set('player', String(selectedPlayerId))
-      localStorage.setItem('aidm:selectedPlayerId', String(selectedPlayerId))
+      localStorage.setItem(
+        selectionStorageKey(storedSelectionScope, 'selectedPlayerId'),
+        String(selectedPlayerId),
+      )
     } else {
-      params.delete('player')
-      localStorage.removeItem('aidm:selectedPlayerId')
+      localStorage.removeItem(selectionStorageKey(storedSelectionScope, 'selectedPlayerId'))
     }
+    localStorage.removeItem('aidm:selectedCampaignId')
+    localStorage.removeItem('aidm:selectedSessionId')
+    localStorage.removeItem('aidm:selectedPlayerId')
+    params.delete('player')
+    params.delete('backend')
+    params.delete('api')
     const query = params.toString()
     const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}`
     window.history.replaceState(null, '', nextUrl)
-  }, [selectedCampaignId, selectedPlayerId, selectedSessionId])
+  }, [selectedCampaignId, selectedPlayerId, selectedSessionId, storedSelectionScope])
 
   useEffect(() => {
     if (selectedCampaignId) {
@@ -2412,19 +1865,31 @@ function App() {
 
   useEffect(() => {
     if (!selectedSessionId) {
-      sessionRequestRef.current += 1
-      setLogEntries([])
-      setSessionState(null)
-      setSessionLoading(false)
+      clearSessionData()
+      setTurnStatuses({})
       return
     }
-    loadSessionData(selectedSessionId).catch((error: unknown) => {
-      setErrors((current) => [
-        `Session refresh failed: ${error instanceof Error ? error.message : String(error)}`,
-        ...current.slice(0, 3),
-      ])
+    setSessionLogCursor(null)
+    setSessionLogHasMore(false)
+    setTurnStatuses({})
+    loadSessionData(selectedSessionId).then(clearAuthTokenErrors).catch((error: unknown) => {
+      if (isUnauthorizedError(error)) {
+        openAuthTokenPrompt()
+        clearAuthTokenErrors()
+        return
+      }
+      pushError('workspace', `Session refresh failed: ${error instanceof Error ? error.message : String(error)}`)
     })
-  }, [loadSessionData, selectedSessionId])
+  }, [
+    clearAuthTokenErrors,
+    clearSessionData,
+    loadSessionData,
+    openAuthTokenPrompt,
+    pushError,
+    selectedSessionId,
+    setSessionLogCursor,
+    setSessionLogHasMore,
+  ])
 
   useEffect(() => {
     if (!selectedPlayerId) {
@@ -2437,189 +1902,75 @@ function App() {
       .then((detail) => {
         if (playerRequestRef.current === requestId) {
           setPlayerDetail(detail)
+          clearAuthTokenErrors()
         }
       })
       .catch((error: unknown) => {
         if (playerRequestRef.current === requestId) {
           setPlayerDetail(null)
-          setErrors((current) => [
-            `Player load failed: ${error instanceof Error ? error.message : String(error)}`,
-            ...current.slice(0, 3),
-          ])
+          if (isUnauthorizedError(error)) {
+            openAuthTokenPrompt()
+            clearAuthTokenErrors()
+            return
+          }
+          if (isNotFoundError(error)) {
+            setSelectedPlayerId((current) => (current === selectedPlayerId ? null : current))
+            return
+          }
+          pushError('workspace', `Player load failed: ${error instanceof Error ? error.message : String(error)}`)
         }
       })
-  }, [auth, baseUrl, selectedPlayerId])
-
-  useEffect(() => {
-    if (!selectedSessionId || !selectedPlayerId || !selectedCampaignId) {
-      socketRef.current?.disconnect()
-      socketRef.current = null
-      setSocketStatus('idle')
-      return
-    }
-
-    const socket = io(baseUrl, {
-      auth: auth ? { token: auth } : undefined,
-      transports: ['polling'],
-      upgrade: false,
-    })
-    socketRef.current = socket
-    setSocketStatus('connecting')
-
-    socket.on('connect', () => {
-      setSocketStatus('joining')
-      socket.emit('join_session', {
-        session_id: selectedSessionId,
-        player_id: selectedPlayerId,
-      })
-    })
-
-    socket.on('connect_error', (error) => {
-      setSocketStatus('error')
-      setErrors((current) => [
-        `Socket connection failed: ${error.message}`,
-        ...current.slice(0, 3),
-      ])
-    })
-
-    socket.on('active_players', () => {
-      setSocketStatus('joined')
-    })
-
-    socket.on(
-      'dm_response_start',
-      (payload: {
-        turn_id: number
-        requires_roll?: boolean
-        rules_hint?: RulesHint
-      }) => {
-        stopTtsAudio()
-        setSendPending(true)
-        spokenTextLengthRef.current = 0
-        setStreamingTurn({
-          turnId: payload.turn_id,
-          text: '',
-          requiresRoll: Boolean(payload.requires_roll),
-          rulesHint: payload.rules_hint ?? {},
-        })
-      },
-    )
-
-    socket.on(
-      'dm_chunk',
-      (payload: {
-        turn_id: number
-        chunk?: string
-        requires_roll?: boolean
-        rules_hint?: RulesHint
-      }) => {
-        setStreamingTurn((current) => {
-          if (!current || current.turnId !== payload.turn_id) {
-            return {
-              turnId: payload.turn_id,
-              text: payload.chunk ?? '',
-              requiresRoll: Boolean(payload.requires_roll),
-              rulesHint: payload.rules_hint ?? {},
-            }
-          }
-          return {
-            ...current,
-            text: `${current.text}${payload.chunk ?? ''}`,
-            requiresRoll: Boolean(payload.requires_roll),
-            rulesHint: payload.rules_hint ?? current.rulesHint,
-          }
-        })
-      },
-    )
-
-    socket.on('dm_response_end', () => {
-      setSendPending(false)
-      // Flush the remaining text to TTS queue
-      setStreamingTurn((current) => {
-        if (current) {
-          const syntheticEntry: TimelineEntry = {
-            id: `stream-${current.turnId}`,
-            role: 'dm',
-            speaker: 'DM',
-            text: current.text,
-            timestamp: null,
-            metadata: {
-              turn_id: current.turnId,
-              requires_roll: current.requiresRoll,
-              ...current.rulesHint,
-            },
-            streaming: false,
-          }
-          setOptimisticEntries((opt) => [...opt, syntheticEntry])
-
-          if (current.text) {
-            const cleanText = current.text.replace(/<thought>[\s\S]*?(?:<\/thought>|$)/gi, '')
-            const remaining = cleanText.slice(spokenTextLengthRef.current).trim()
-            if (remaining && ttsEnabledRef.current) {
-              queueTtsNarrationRef.current?.(remaining)
-            }
-            lastSpokenDmEntryRef.current = syntheticEntry.id
-            lastSpokenTurnIdRef.current = current.turnId
-            lastSpokenTextRef.current = current.text
-            rememberSpokenTts(current.text, current.turnId)
-          }
-        }
-        if (ttsPartialFlushTimerRef.current !== null) {
-          window.clearTimeout(ttsPartialFlushTimerRef.current)
-          ttsPartialFlushTimerRef.current = null
-        }
-        spokenTextLengthRef.current = 0
-        speakableStreamingTextRef.current = ''
-        return null // Clear the streaming turn so the indicator goes away immediately
-      })
-    })
-
-    socket.on('session_log_update', (payload: { session_id?: number }) => {
-      if (payload.session_id === selectedSessionId) {
-        loadSessionData(selectedSessionId)
-          .then(() => {
-            setOptimisticEntries([])
-            setStreamingTurn(null)
-          })
-          .catch((error: unknown) => {
-            setErrors((current) => [
-              `Log refresh failed: ${error instanceof Error ? error.message : String(error)}`,
-              ...current.slice(0, 3),
-            ])
-          })
-      }
-    })
-
-    socket.on('error', (payload: SocketErrorPayload) => {
-      setSendPending(false)
-      setErrors((current) => [socketMessage(payload), ...current.slice(0, 3)])
-    })
-
-    socket.on('disconnect', () => {
-      setSocketStatus('offline')
-    })
-
-    return () => {
-      socket.emit('leave_session', {
-        session_id: selectedSessionId,
-        player_id: selectedPlayerId,
-      })
-      socket.disconnect()
-      if (socketRef.current === socket) {
-        socketRef.current = null
-      }
-    }
   }, [
     auth,
     baseUrl,
-    loadSessionData,
-    rememberSpokenTts,
-    selectedCampaignId,
+    clearAuthTokenErrors,
+    openAuthTokenPrompt,
+    pushError,
     selectedPlayerId,
-    selectedSessionId,
-    socketReconnectKey,
-    stopTtsAudio,
+    setPlayerDetail,
+    setSelectedPlayerId,
   ])
+
+  useSessionSocket({
+    auth,
+    baseUrl,
+    selectedSessionId,
+    selectedPlayerId,
+    selectedCampaignId,
+    socketReconnectKey,
+    socketRef,
+    loadSessionData,
+    pushError,
+    rememberStreamedTtsTurn,
+    resetTtsFailureForNextResponse,
+    stopTtsAudio,
+    setActivePlayers,
+    setSocketStatus,
+    setSendPending,
+    setOptimisticEntries,
+    setStreamingTurn,
+    setTurnStatuses,
+    spokenTextLengthRef,
+    speakableStreamingTextRef,
+    queueTtsNarrationRef,
+    ttsEnabledRef,
+    ttsQueueSuppressedRef,
+    ttsFailureReportedRef,
+    ttsPartialFlushTimerRef,
+    lastSpokenDmEntryRef,
+    lastSpokenTurnIdRef,
+    lastSpokenTextRef,
+  })
+
+  useEffect(() => {
+    if (health?.status !== 'ok' || workspaceLoading || sessionLoading) return
+    clearResolvedOperationalErrors()
+  }, [clearResolvedOperationalErrors, health?.status, sessionLoading, workspaceLoading])
+
+  useEffect(() => {
+    if (socketStatus !== 'joined' && socketStatus !== 'idle') return
+    clearResolvedOperationalErrors()
+  }, [clearResolvedOperationalErrors, socketStatus])
 
   const displayCharacter = {
     name: selectedPlayer?.character_name ?? 'No player selected',
@@ -2629,35 +1980,11 @@ function App() {
     level: selectedPlayer?.level ?? '—',
     detailId: selectedPlayer?.player_id ? `Player #${selectedPlayer.player_id}` : 'No player',
   }
-  const statBlock = normalizeStats(
-    playerDetail?.stats,
-    playerDetail?.character_sheet,
-    selectedPlayer?.level ?? null,
-  )
   const xpProgress = normalizeXp(playerDetail?.character_sheet, displayCharacter.level)
-  const inventoryRows = normalizeInventory(playerDetail?.inventory)
-  const carriedWeight = inventoryRows.reduce(
-    (total, row) => total + (row.weightValue ?? 0),
-    0,
-  )
   const capacity = inventoryCapacity(playerDetail?.character_sheet)
-  const inventoryWeightLabel =
-    capacity === null
-      ? `Weight ${carriedWeight ? carriedWeight.toFixed(carriedWeight % 1 ? 1 : 0) : '—'} / — lb`
-      : `Weight ${carriedWeight.toFixed(carriedWeight % 1 ? 1 : 0)} / ${capacity} lb`
-  const memorySnippets = (sessionState?.memory_snippets ?? []).filter(isRecord)
-  const canonFacts = memorySnippets
-    .reverse()
-    .map((snippet) => {
-      const source = stringValue(snippet.turn_id, '—')
-      const text = stripMarkdown(
-        stringValue(snippet.dm_output) || stringValue(snippet.player_input),
-      )
-      return [
-        truncateText(text || 'Memory snippet has no text.', 86),
-        `S${selectedSessionId ?? '—'}E${source}`,
-      ]
-    })
+  const inventoryWeightLabel = buildInventoryWeightLabel(inventoryRows, capacity)
+  const memorySnippets = memorySnippetRecords(sessionState?.memory_snippets)
+  const canonFacts = canonFactsFromMemorySnippets(memorySnippets, selectedSessionId)
   const visibleCanonFacts = inspectorTab === 'canon' ? canonFacts : canonFacts.slice(0, 3)
   const selectedSegment =
     segments.find((segment) => segment.is_triggered) ?? segments[0] ?? null
@@ -2675,26 +2002,42 @@ function App() {
   const sessionCards: SessionCard[] = sessions.map((session, index) => ({
     id: session.session_id,
     title: sessionDisplayName(session, campaign?.world_id ?? selectedCampaignId),
-    meta:
-      session.session_id === selectedSessionId
-        ? `Active  •  Started ${formatShortAge(session.created_at)}`
-        : `${index === 0 ? 'Latest' : 'Past'}  •  Started ${formatShortAge(session.created_at)}`,
+    meta: `${
+      session.is_archived
+        ? 'Archived'
+        : session.session_id === selectedSessionId
+          ? 'Active'
+          : index === 0
+            ? 'Latest'
+            : 'Past'
+    }  •  Started ${formatShortAge(session.created_at)}`,
   }))
   const filteredCampaigns = campaigns.filter((item) =>
     item.title.toLowerCase().includes(campaignFilter.trim().toLowerCase()),
   )
+  const worldNameById = new Map<number, string>()
+  worlds.forEach((world) => worldNameById.set(world.world_id, world.name))
+  campaigns.forEach((item) => {
+    if (item.world_name) {
+      worldNameById.set(item.world_id, item.world_name)
+    }
+  })
   const campaignCards: CampaignCard[] = [...filteredCampaigns]
     .sort((left, right) => {
       if (left.campaign_id === selectedCampaignId) return -1
       if (right.campaign_id === selectedCampaignId) return 1
       return 0
     })
-    .map((item) => ({
-      title: item.title,
-      meta: `World ${item.world_id}  •  ${pluralize(campaignSessionMeta[item.campaign_id]?.count ?? 0, 'Session')}  •  Updated ${formatShortAge(campaignSessionMeta[item.campaign_id]?.updatedAt ?? item.created_at)}`,
-      id: item.campaign_id,
-      avatar: avatarDataUri(`${item.campaign_id}-${item.title}`),
-    }))
+    .map((item) => {
+      const worldLabel = worldNameById.get(item.world_id) ?? `World ${item.world_id}`
+      const statusLabel = item.is_archived ? 'Archived' : 'Active'
+      return {
+        title: item.title,
+        meta: `${statusLabel}  •  ${worldLabel}  •  ${pluralize(campaignSessionMeta[item.campaign_id]?.count ?? 0, 'Session')}  •  Updated ${formatShortAge(campaignSessionMeta[item.campaign_id]?.updatedAt ?? item.created_at)}`,
+        id: item.campaign_id,
+        avatar: avatarDataUri(`${item.campaign_id}-${item.title}`),
+      }
+    })
   const lastSync = sessionState?.updated_at ?? activeSession?.created_at ?? null
   const sessionDuration = activeSession
     ? formatDurationFrom(activeSession.created_at, nowMs)
@@ -2710,10 +2053,18 @@ function App() {
   const runtimeModels = selectedProviderOption?.models ?? [
     { id: configuredModel, label: configuredModel },
   ]
+  const runtimeScopeLabel =
+    llmConfig?.runtime_scope === 'process'
+      ? 'Process-local'
+      : 'Runtime'
+  const runtimeScopeTitle = llmConfig?.restart_required_for_other_workers
+    ? 'Provider changes apply to this backend process; restart other workers to match.'
+    : 'Current runtime scope'
   const backendStatusLabel =
     health === null ? 'Checking' : health.status === 'ok' ? 'Connected' : 'Offline'
   const backendStatusTone =
     health === null ? 'neutral' : health.status === 'ok' ? 'good' : 'warn'
+  const backendDisplayUrl = baseUrl || 'Same origin'
   const runtimeLabel = runtimePending
     ? 'Switching'
     : runtime?.configured
@@ -2773,7 +2124,7 @@ function App() {
             <strong>Backend</strong>
             <StatusDot label={backendStatusLabel} tone={backendStatusTone} />
           </div>
-          <span>{baseUrl}</span>
+          <span>{backendDisplayUrl}</span>
           <ExternalLink size={15} />
           <button
             type="button"
@@ -2829,6 +2180,7 @@ function App() {
             </span>
           </div>
           <StatusDot label={runtimeLabel} tone={runtimeTone} />
+          <span title={runtimeScopeTitle}>{runtimeScopeLabel}</span>
         </div>
         <div className="ops-segment compact">
           <div>
@@ -2915,6 +2267,7 @@ function App() {
               className="top-icon"
               aria-label="Account"
               aria-expanded={accountMenuOpen}
+              aria-controls="account-menu"
               onClick={() => setAccountMenuOpen((current) => !current)}
             >
               <UserCircle size={19} />
@@ -2924,19 +2277,29 @@ function App() {
               className="top-icon small"
               aria-label="More account options"
               aria-expanded={accountMenuOpen}
+              aria-controls="account-menu"
               onClick={() => setAccountMenuOpen((current) => !current)}
             >
               <ChevronDown size={16} />
             </button>
             {accountMenuOpen ? (
-              <div className="account-menu">
-                <strong>{selectedPlayer?.character_name ?? 'No player selected'}</strong>
-                <span>{selectedPlayer?.name ?? 'Local profile'}</span>
-                <button type="button" onClick={() => void refreshCurrentWorkspace()}>
+              <div
+                id="account-menu"
+                className="account-menu"
+                role="menu"
+                aria-label="Account options"
+              >
+                <strong role="presentation">{selectedPlayer?.character_name ?? 'No player selected'}</strong>
+                <span role="presentation">{selectedPlayer?.name ?? 'Local profile'}</span>
+                <button type="button" role="menuitem" onClick={() => void refreshCurrentWorkspace()}>
                   Refresh workspace
+                </button>
+                <button type="button" role="menuitem" onClick={openProfileSettingsDialog}>
+                  Profile settings
                 </button>
                 <button
                   type="button"
+                  role="menuitem"
                   onClick={() => {
                     setSocketReconnectKey((current) => current + 1)
                     setAccountMenuOpen(false)
@@ -2944,741 +2307,200 @@ function App() {
                 >
                   Reconnect socket
                 </button>
-                <button type="button" onClick={openRuntimeSettingsDialog}>
+                <button type="button" role="menuitem" onClick={openRuntimeSettingsDialog}>
                   Runtime settings
                 </button>
+                {authToken ? (
+                  <button type="button" role="menuitem" onClick={clearAuthToken}>
+                    Clear auth token
+                  </button>
+                ) : null}
               </div>
             ) : null}
           </div>
         </div>
       </header>
 
-      <aside className="campaign-rail">
-        <section className="rail-section">
-          <div className="rail-heading">
-            <span>Campaigns</span>
-            <button type="button" aria-label="Add campaign" onClick={openCreateCampaignDialog}>
-              <Plus size={16} />
-            </button>
-          </div>
-          <div className="search-field">
-            <ThinIcon name="spark" size={14} />
-            <input
-              value={campaignFilter}
-              onChange={(event) => setCampaignFilter(event.target.value)}
-              placeholder="Search campaigns..."
-              aria-label="Search campaigns"
-            />
-          </div>
-          <div className="campaign-list">
-            {campaignCards.length ? (
-              campaignCards.map((item, index) => (
-                <button
-                  type="button"
-                  key={item.id}
-                  className={`campaign-card ${item.id === selectedCampaignId ? 'active' : ''} ${
-                    item.id === loadingCampaignId ? 'loading' : ''
-                  }`}
-                  aria-busy={item.id === loadingCampaignId}
-                  onClick={() => {
-                    if (item.id !== selectedCampaignId) {
-                      setSelectedCampaignId(item.id)
-                    }
-                    setMainTab('turns')
-                  }}
-                >
-                  <Thumbnail
-                    index={index}
-                    selected={item.id === selectedCampaignId}
-                    src={item.avatar}
-                    title={item.title}
-                  />
-                  <span>
-                    <strong>{item.title}</strong>
-                    <small>{item.meta}</small>
-                  </span>
-                </button>
-              ))
-            ) : health === null ? (
-              <div className="empty-rail">Loading campaigns...</div>
-            ) : (
-              <div className="empty-rail">No campaigns match.</div>
-            )}
-          </div>
-        </section>
+      <CampaignRail
+        backendStatus={health?.status ?? null}
+        campaignTitle={campaign?.title ? truncateText(campaign.title, 12) : null}
+        campaignCards={campaignCards}
+        sessionCards={sessionCards}
+        campaignFilter={campaignFilter}
+        setCampaignFilter={setCampaignFilter}
+        selectedCampaignId={selectedCampaignId}
+        selectedSessionId={selectedSessionId}
+        loadingCampaignId={loadingCampaignId}
+        sessionLoading={sessionLoading}
+        workspaceLoading={workspaceLoading}
+        mainTab={mainTab}
+        setMainTab={setMainTab}
+        inspectorTab={inspectorTab}
+        setInspectorTab={setInspectorTab}
+        canManageCampaign={Boolean(campaign)}
+        canManageSession={Boolean(activeSession)}
+        canOpenCampaignArchive={health?.status === 'ok'}
+        canOpenSessionArchive={Boolean(selectedCampaignId)}
+        onRenameCampaign={openRenameCampaignDialog}
+        onArchiveCampaign={openCampaignArchiveManager}
+        onDeleteCampaign={openDeleteCampaignDialog}
+        onCreateCampaign={openCreateCampaignDialog}
+        onManageWorlds={openWorldManagerDialog}
+        onRenameSession={openRenameSessionDialog}
+        onArchiveSession={openSessionArchiveManager}
+        onDeleteSession={openDeleteSessionDialog}
+        onStartSession={startSession}
+        onSelectCampaign={(campaignId) => {
+          if (campaignId !== selectedCampaignId) {
+            setSelectedCampaignId(campaignId)
+          }
+          setMainTab('turns')
+        }}
+        onSelectSession={(sessionId) => {
+          if (sessionId !== selectedSessionId) {
+            setSelectedSessionId(sessionId)
+            setOptimisticEntries([])
+            setStreamingTurn(null)
+            setSendPending(false)
+          }
+          setMainTab('turns')
+        }}
+        lastSyncLabel={formatShortAge(lastSync)}
+        onRefreshWorkspace={() => void refreshCurrentWorkspace()}
+        errors={errors}
+      />
 
-        <section className="rail-section session-section">
-          <div className="rail-heading">
-            <span>Sessions ({campaign?.title ? truncateText(campaign.title, 12) : 'None'})</span>
-            <button type="button" onClick={startSession} aria-label="Start session">
-              <Plus size={16} />
-            </button>
-          </div>
-          <div className="session-list">
-            {sessionCards.length ? (
-              sessionCards.map((session) => (
-                <button
-                  type="button"
-                  key={session.id}
-                  className={`session-card ${session.id === selectedSessionId ? 'active' : ''} ${
-                    session.id === selectedSessionId && sessionLoading ? 'loading' : ''
-                  }`}
-                  aria-busy={session.id === selectedSessionId && sessionLoading}
-                  onClick={() => {
-                    if (session.id !== selectedSessionId) {
-                      setSelectedSessionId(session.id)
-                      setOptimisticEntries([])
-                      setStreamingTurn(null)
-                      setSendPending(false)
-                    }
-                    setMainTab('turns')
-                  }}
-                >
-                  <strong>{session.title}</strong>
-                  <small>{session.meta}</small>
-                </button>
-              ))
-            ) : (
-              <div className="empty-rail empty-action-card">
-                <span>No sessions yet.</span>
-                <button type="button" onClick={startSession} disabled={!selectedCampaignId}>
-                  Start session
-                </button>
-              </div>
-            )}
-          </div>
-        </section>
+      <SessionBoard
+        activeSessionTitle={activeSessionTitle}
+        campaignTitle={campaignTitle}
+        workspaceLoading={workspaceLoading}
+        sessionLoading={sessionLoading}
+        mainTab={mainTab}
+        setMainTab={setMainTab}
+        downloadSessionJson={downloadSessionJson}
+        sessionImportPending={sessionImportPending}
+        sessionImportInputRef={sessionImportInputRef}
+        importSessionJson={importSessionJson}
+        shareSession={shareSession}
+        sessionMenuRef={sessionMenuRef}
+        sessionMenuOpen={sessionMenuOpen}
+        setSessionMenuOpen={setSessionMenuOpen}
+        refreshCurrentWorkspace={refreshCurrentWorkspace}
+        activeSession={activeSession}
+        openRenameSessionDialog={openRenameSessionDialog}
+        openDeleteSessionDialog={openDeleteSessionDialog}
+        notesCount={memorySnippets.length}
+        turnFeedRef={turnFeedRef}
+        updateJumpToLatestVisibility={updateJumpToLatestVisibility}
+        sessionLogHasMore={sessionLogHasMore}
+        olderLogLoading={olderLogLoading}
+        loadOlderSessionLog={loadOlderSessionLog}
+        turnRows={turnRows}
+        expandedTurnIds={expandedTurnIds}
+        setExpandedTurnIds={setExpandedTurnIds}
+        selectedPlayer={selectedPlayer}
+        currentResponseEntry={currentResponseEntry}
+        latestDmText={latestDmText}
+        sendPending={sendPending}
+        streamingTurnActive={Boolean(streamingTurn)}
+        dmExecutionStats={dmExecutionStats}
+        welcomeText={welcomeText}
+        showJumpToLatest={showJumpToLatest}
+        scrollTurnFeedToLatest={scrollTurnFeedToLatest}
+        questTitle={questTitle}
+        sessionState={sessionState}
+        campaign={campaign}
+        canonFacts={canonFacts}
+        actionComposerProps={{
+          actionInputRef,
+          actionText,
+          adminPasscode,
+          adminToolsUnlocked,
+          setActionText,
+          setAdminPasscode,
+          selectedCharacterName: selectedPlayer?.character_name ?? null,
+          composerMode,
+          selectedDie,
+          sendPending,
+          ttsEnabled,
+          ttsStatusClassName: effectiveTtsStatus,
+          ttsStatusLabel,
+          ttsLatencyLabel,
+          canStopTts,
+          stopTtsAudio,
+          submitAction,
+          toggleAdminTools,
+          startDiceRoll,
+          preloadDiceRollDialog,
+          applyComposerMode,
+          updateSelectedDie,
+          rollMode,
+          setRollMode,
+          rollModifier,
+          setRollModifier,
+          rollReason,
+          setRollReason,
+          pendingRollOptions,
+          rollTargetPendingTurnId,
+          setRollTargetPendingTurnId,
+          selectedAbility,
+          abilityOptions,
+          setSelectedAbilityKey,
+          interactionTargets,
+          selectedInteractionTarget,
+          selectedInteractionTargetId,
+          selectedInteractionType,
+          setSelectedInteractionTargetId,
+          setSelectedInteractionType,
+          selectedItem,
+          itemOptions,
+          setSelectedItemName,
+        }}
+      />
 
-        <nav className="rail-nav">
-          <NavItem
-            icon={<ThinIcon name="archive" size={18} />}
-            label="Campaigns"
-            selected={mainTab === 'turns' && inspectorTab === 'party'}
-            onClick={() => {
-              setMainTab('turns')
-              setInspectorTab('party')
-            }}
-          />
-          <NavItem
-            icon={<ThinIcon name="turns" size={18} />}
-            label="Turns"
-            selected={mainTab === 'turns'}
-            onClick={() => setMainTab('turns')}
-          />
-          <NavItem
-            icon={<ThinIcon name="map" size={18} />}
-            label="Map"
-            selected={inspectorTab === 'map'}
-            onClick={() => setInspectorTab('map')}
-          />
-          <NavItem
-            icon={<ThinIcon name="book" size={18} />}
-            label="Canon"
-            selected={inspectorTab === 'canon'}
-            onClick={() => setInspectorTab('canon')}
-          />
-          <NavItem
-            icon={<ThinIcon name="briefcase" size={18} />}
-            label="Inventory"
-            selected={inspectorTab === 'inventory'}
-            onClick={() => setInspectorTab('inventory')}
-          />
-          <NavItem
-            icon={<ThinIcon name="settings" size={18} />}
-            label="Settings"
-            selected={mainTab === 'notes'}
-            onClick={() => setMainTab('notes')}
-          />
-        </nav>
-
-        <footer className="rail-footer">
-          <StatusDot
-            label={health?.status === 'ok' ? 'All Systems Operational' : health === null ? 'Checking Backend' : 'Backend Offline'}
-            tone={health?.status === 'ok' ? 'good' : health === null ? 'neutral' : 'warn'}
-          />
-          <span>
-            Last sync: {formatShortAge(lastSync)}
-            <button
-              type="button"
-              className="rail-sync-button"
-              aria-label="Refresh workspace"
-              onClick={() => void refreshCurrentWorkspace()}
-            >
-              <ThinIcon name="refresh" size={13} />
-            </button>
-          </span>
-          {errors[0] ? <small className="rail-error">{errors[0]}</small> : null}
-        </footer>
-      </aside>
-
-      <main className="session-board">
-        <section className="session-header">
-          <div>
-            <h1>
-              {activeSessionTitle}{' '}
-              <span className={workspaceLoading || sessionLoading ? 'loading-badge' : ''}>
-                {workspaceLoading || sessionLoading ? 'Loading' : 'Live'}
-              </span>
-            </h1>
-            <p>{campaignTitle}</p>
-          </div>
-          <div className="session-actions">
-            <ToolbarButton
-              icon={<ClipboardList size={17} />}
-              onClick={() => setMainTab('notes')}
-              title="Summary"
-            >
-              Summary
-            </ToolbarButton>
-            <ToolbarButton
-              icon={<Download size={17} />}
-              onClick={() => void downloadSessionJson()}
-              title="Export"
-            >
-              Export
-            </ToolbarButton>
-            <ToolbarButton icon={<Share2 size={17} />} onClick={shareSession} title="Share">
-              Share
-            </ToolbarButton>
-            <div className="session-menu-wrap" ref={sessionMenuRef}>
-              <ToolbarButton
-                icon={<MoreHorizontal size={18} />}
-                onClick={() => setSessionMenuOpen((current) => !current)}
-                title="Session menu"
-              />
-              {sessionMenuOpen ? (
-                <div className="session-menu">
-                  <button type="button" onClick={() => void refreshCurrentWorkspace()}>
-                    Refresh session
-                  </button>
-                  <button type="button" disabled={!activeSession} onClick={() => void renameSelectedSession()}>
-                    Rename session
-                  </button>
-                  <button type="button" disabled={!activeSession} className="danger" onClick={() => void deleteSelectedSession()}>
-                    Delete session
-                  </button>
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </section>
-
-        <div className="content-tabs">
-          <button
-            type="button"
-            className={mainTab === 'turns' ? 'active' : ''}
-            onClick={() => setMainTab('turns')}
-          >
-            Turns
-          </button>
-          <button
-            type="button"
-            className={mainTab === 'dm' ? 'active' : ''}
-            onClick={() => setMainTab('dm')}
-          >
-            DM Response
-          </button>
-          <button
-            type="button"
-            className={mainTab === 'notes' ? 'active' : ''}
-            onClick={() => setMainTab('notes')}
-          >
-            Notes ({memorySnippets.length})
-          </button>
-        </div>
-
-        {mainTab === 'turns' ? (
-          <>
-          <section
-            className="turn-feed"
-            ref={turnFeedRef}
-            onScroll={updateJumpToLatestVisibility}
-          >
-            {turnRows.length ? (
-              turnRows.map((turn, index) => {
-                const expanded = expandedTurnIds.has(turn.id)
-                return (
-                  <article className="turn-row" key={turn.id}>
-                    <div className="turn-number">{turnNumber(turn, index)}</div>
-                    <div className={`turn-card ${expanded ? 'expanded' : ''}`}>
-                      <div className="turn-speaker">
-                        <strong>{turn.speaker}</strong>
-                        <span>{speakerDetail(turn, selectedPlayer)}</span>
-                      </div>
-                      <p>{expanded ? turn.text : truncateText(turn.text, 180)}</p>
-                      <time>{formatClock(turn.timestamp)}</time>
-                      <button
-                        type="button"
-                        className="turn-expand"
-                        aria-label={expanded ? 'Collapse turn' : 'Expand turn'}
-                        aria-expanded={expanded}
-                        onClick={() => {
-                          setExpandedTurnIds((current) => {
-                            const next = new Set(current)
-                            if (next.has(turn.id)) {
-                              next.delete(turn.id)
-                            } else {
-                              next.add(turn.id)
-                            }
-                            return next
-                          })
-                        }}
-                      >
-                        <ChevronDown size={18} />
-                      </button>
-                    </div>
-                  </article>
-                )
-              })
-            ) : (
-              <div className="empty-state">
-                {activeSession ? welcomeText : 'No turn log entries loaded for this session.'}
-              </div>
-            )}
-
-            <article className="turn-row current">
-              <div className="turn-number">
-                {currentResponseEntry ? turnNumber(currentResponseEntry, turnRows.length) : '—'}
-              </div>
-              <div className="dm-response-card">
-                <div className="turn-speaker">
-                  <strong>{currentResponseEntry?.speaker ?? 'DM'}</strong>
-                  <span>{currentResponseEntry?.streaming ? 'Streaming' : 'Latest Response'}</span>
-                </div>
-                <div className="response-copy">
-                  <p>{latestDmText}</p>
-                </div>
-                <div className={`stream-state ${sendPending || streamingTurn ? 'streaming' : ''}`}>
-                  <span />
-                  {sendPending || streamingTurn ? 'Streaming...' : 'Ready'}
-                </div>
-                <div className="execution-footer">
-                  Tokens: {dmExecutionStats.tokens} <span>|</span> Time: {dmExecutionStats.time}{' '}
-                  <span>|</span> Model: {dmExecutionStats.model} <span>|</span> Temp:{' '}
-                  {dmExecutionStats.temperature}
-                </div>
-              </div>
-            </article>
-          </section>
-          {showJumpToLatest ? (
-            <button
-              type="button"
-              className="jump-latest-button"
-              onClick={scrollTurnFeedToLatest}
-            >
-              <ArrowDown size={14} />
-              Latest
-            </button>
-          ) : null}
-          </>
-        ) : null}
-
-        {mainTab === 'dm' ? (
-          <section className="turn-feed single-panel">
-            <article className="turn-row current">
-              <div className="turn-number">
-                {currentResponseEntry ? turnNumber(currentResponseEntry, 0) : '—'}
-              </div>
-              <div className="dm-response-card expanded">
-                <div className="turn-speaker">
-                  <strong>{currentResponseEntry?.speaker ?? 'DM'}</strong>
-                  <span>Full Response</span>
-                </div>
-                <div className="response-copy">
-                  <p>{latestDmText}</p>
-                </div>
-                <div className={`stream-state ${sendPending || streamingTurn ? 'streaming' : ''}`}>
-                  <span />
-                  {sendPending || streamingTurn ? 'Streaming...' : 'Ready'}
-                </div>
-                <div className="execution-footer">
-                  Tokens: {dmExecutionStats.tokens} <span>|</span> Time: {dmExecutionStats.time}{' '}
-                  <span>|</span> Model: {dmExecutionStats.model} <span>|</span> Temp:{' '}
-                  {dmExecutionStats.temperature}
-                </div>
-              </div>
-            </article>
-          </section>
-        ) : null}
-
-        {mainTab === 'notes' ? (
-          <section className="turn-feed notes-panel">
-            <div className="notes-card">
-              <h2>Session State</h2>
-              <dl>
-                <dt>Current quest</dt>
-                <dd>{questTitle}</dd>
-                <dt>Current location</dt>
-                <dd>{sessionState?.current_location || campaign?.location || 'No location recorded'}</dd>
-                <dt>Updated</dt>
-                <dd>{formatDateTime(sessionState?.updated_at ?? null)}</dd>
-              </dl>
-              <h3>Rolling Summary</h3>
-              <p>{sessionState?.rolling_summary || 'No rolling summary recorded yet.'}</p>
-            </div>
-            <div className="notes-card compact-notes">
-              <h3>Recent Memory</h3>
-              {canonFacts.length ? (
-                canonFacts.slice(0, 5).map(([fact, source]) => (
-                  <div key={`${fact}-${source}`} className="note-line">
-                    <ThinIcon name="dot" size={12} />
-                    <span>{fact}</span>
-                    <small>{source}</small>
-                  </div>
-                ))
-              ) : (
-                <p>No memory snippets recorded yet.</p>
-              )}
-            </div>
-          </section>
-        ) : null}
-
-        <section className="action-composer">
-          <label htmlFor="action-input">
-            Your Action <span>({composerModeLabel(composerMode, selectedDie)})</span>
-          </label>
-          <div className={`tts-status-strip ${effectiveTtsStatus}`} role="status" aria-live="polite">
-            <span>
-              {ttsEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
-              Narration <strong>{ttsStatusLabel}</strong>
-            </span>
-            {canStopTts ? (
-              <button type="button" onClick={stopTtsAudio}>
-                <X size={14} />
-                Stop
-              </button>
-            ) : null}
-          </div>
-          <div className="composer-frame">
-            <textarea
-              id="action-input"
-              value={actionText}
-              onChange={(event) => setActionText(event.target.value)}
-              placeholder={
-                selectedPlayer
-                  ? 'Write your action...'
-                  : 'Choose a player before sending.'
-              }
-              rows={4}
-            />
-            <div className="input-action-row">
-              <div className="mode-buttons">
-                <button
-                  type="button"
-                  aria-label="Dice mode"
-                  className={composerMode === 'roll' ? 'selected' : ''}
-                  onClick={() => startDiceRoll()}
-                  onFocus={preloadDiceRollDialog}
-                  onMouseEnter={preloadDiceRollDialog}
-                  disabled={sendPending}
-                >
-                  <ThinIcon name="dice" size={18} />
-                </button>
-                <button
-                  type="button"
-                  aria-label="Action mode"
-                  className={composerMode === 'action' ? 'selected' : ''}
-                  onClick={() => applyComposerMode('action')}
-                >
-                  <ThinIcon name="bolt" size={18} />
-                </button>
-                <button
-                  type="button"
-                  aria-label="OOC mode"
-                  className={composerMode === 'ooc' ? 'selected' : ''}
-                  onClick={() => applyComposerMode('ooc')}
-                >
-                  <ThinIcon name="chevron" size={17} />
-                </button>
-              </div>
-              <button
-                type="button"
-                className="send-button"
-                onClick={() => submitAction()}
-                disabled={sendPending || !actionText.trim()}
-              >
-                <ThinIcon name="send" size={18} />
-                Send
-              </button>
-            </div>
-          </div>
-          <div className="composer-tools">
-            <button
-              type="button"
-              className={composerMode === 'roll' ? 'selected' : ''}
-              onClick={() => startDiceRoll()}
-              onFocus={preloadDiceRollDialog}
-              onMouseEnter={preloadDiceRollDialog}
-              disabled={sendPending}
-            >
-              <ThinIcon name="dice" size={16} /> Roll <ThinIcon name="chevron" size={13} />
-            </button>
-            <select
-              className="dice-select"
-              value={selectedDie}
-              aria-label="Select die"
-              onChange={(event) => updateSelectedDie(event.target.value)}
-            >
-              {DICE_OPTIONS.map((die) => (
-                <option key={die} value={die}>
-                  {die.toUpperCase()}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className={composerMode === 'ability' ? 'selected' : ''}
-              onClick={() => applyComposerMode('ability')}
-            >
-              <ThinIcon name="bolt" size={16} /> Ability
-            </button>
-            <button
-              type="button"
-              className={composerMode === 'item' ? 'selected' : ''}
-              onClick={() => applyComposerMode('item')}
-            >
-              <ThinIcon name="briefcase" size={16} /> Item
-            </button>
-            <button
-              type="button"
-              className={composerMode === 'emote' ? 'selected' : ''}
-              onClick={() => applyComposerMode('emote')}
-            >
-              <ThinIcon name="smile" size={16} /> Emote
-            </button>
-            <button
-              type="button"
-              className={composerMode === 'ooc' ? 'selected' : ''}
-              onClick={() => applyComposerMode('ooc')}
-            >
-              <ThinIcon name="dot" size={16} /> OOC
-            </button>
-          </div>
-        </section>
-      </main>
-
-      <aside className="right-inspector">
-        <div className="inspector-tabs">
-          <button
-            type="button"
-            className={inspectorTab === 'party' ? 'active' : ''}
-            onClick={() => setInspectorTab('party')}
-          >
-            Party
-          </button>
-          <button
-            type="button"
-            className={inspectorTab === 'map' ? 'active' : ''}
-            onClick={() => setInspectorTab('map')}
-          >
-            Map
-          </button>
-          <button
-            type="button"
-            className={inspectorTab === 'canon' ? 'active' : ''}
-            onClick={() => setInspectorTab('canon')}
-          >
-            Canon
-          </button>
-          <button
-            type="button"
-            className={inspectorTab === 'inventory' ? 'active' : ''}
-            onClick={() => setInspectorTab('inventory')}
-          >
-            Inventory
-          </button>
-        </div>
-
-        {(inspectorTab === 'party' || inspectorTab === 'inventory') ? (
-          <section className="character-panel">
-            <div className="character-card">
-              <div className="portrait">
-                <img
-                  src={avatarDataUri(displayCharacter.name, 'character')}
-                  alt=""
-                  aria-hidden="true"
-                />
-              </div>
-              <div className="character-main">
-                <div>
-                  <h2>{displayCharacter.name}</h2>
-                  <p>{displayCharacter.ancestryClass}</p>
-                </div>
-                <div className="level-stack">
-                  <span>Level</span>
-                  <strong>{displayCharacter.level}</strong>
-                </div>
-                <div className="xp-track">
-                  <span style={{ width: `${xpProgress.percent}%` }} />
-                </div>
-                <div className="xp-label">
-                  <span>{displayCharacter.detailId}</span>
-                  <small>{xpProgress.label}</small>
-                </div>
-              </div>
-            </div>
-            {!players.length ? (
-              <div className="empty-inline-action">
-                <span>No players in this campaign yet.</span>
-                <button
-                  type="button"
-                  onClick={() => void createDefaultPlayer()}
-                  disabled={!selectedCampaignId || createPlayerPending}
-                >
-                  {createPlayerPending ? 'Creating...' : 'Create player'}
-                </button>
-              </div>
-            ) : null}
-
-            <div className="vital-grid">
-              <div>
-                <span>HP</span>
-                <strong className="hp">{displayStatValue(statBlock.hp)}</strong>
-              </div>
-              <div>
-                <span>AC</span>
-                <strong>{displayStatValue(statBlock.ac)}</strong>
-              </div>
-              <div>
-                <span>INIT</span>
-                <strong>{displayStatValue(statBlock.init)}</strong>
-              </div>
-              <div>
-                <span>SPEED</span>
-                <strong>{displayStatValue(statBlock.speed)}</strong>
-              </div>
-            </div>
-
-            <div className="ability-grid">
-              {statBlock.abilities.map(([label, score, mod]) => (
-                <div key={label}>
-                  <span>{label}</span>
-                  <strong>{displayStatValue(score)}</strong>
-                  <small>{displayStatValue(mod)}</small>
-                </div>
-              ))}
-            </div>
-
-            <div className="inspiration-row">
-              <span>Inspiration</span>
-              <button
-                type="button"
-                className={`inspiration-toggle ${statBlock.inspiration ? 'filled' : ''}`}
-                aria-label="Inspiration"
-              />
-              <span>Proficiency</span>
-              <strong>{displayStatValue(statBlock.proficiency)}</strong>
-            </div>
-          </section>
-        ) : null}
-
-        {(inspectorTab === 'party' || inspectorTab === 'inventory') ? (
-          <section className="inspector-box">
-            <div className="box-title">
-              <h3>Inventory ({inventoryRows.length})</h3>
-              <span>{inventoryWeightLabel}</span>
-            </div>
-            <div className="inventory-table">
-              {inventoryRows.length ? (
-                inventoryRows.slice(0, inspectorTab === 'inventory' ? 8 : 4).map((item, index) => (
-                  <div key={`${item.item}-${index}`}>
-                    <span className={`item-icon ${item.icon}`}>
-                      <ThinIcon name={item.icon === 'shield' ? 'archive' : item.icon === 'potion' ? 'dot' : item.icon === 'armor' ? 'briefcase' : 'spark'} size={15} />
-                    </span>
-                    <strong>{item.item}</strong>
-                    <span>{item.count}</span>
-                    <span>{item.weight}</span>
-                  </div>
-                ))
-              ) : (
-                <div className="empty-row">No inventory recorded.</div>
-              )}
-            </div>
-            <button type="button" className="view-link" onClick={() => setInspectorTab('inventory')}>
-              View All Inventory <ExternalLink size={12} />
-            </button>
-          </section>
-        ) : null}
-
-        {(inspectorTab === 'party' || inspectorTab === 'canon') ? (
-          <section className="inspector-box">
-            <div className="box-title">
-              <h3>Canon Facts ({memorySnippets.length})</h3>
-              <span>{inspectorTab === 'canon' ? 'All' : 'Recent'} <ChevronDown size={14} /></span>
-            </div>
-            <div className="canon-list">
-              {visibleCanonFacts.length ? (
-                visibleCanonFacts.map(([fact, source]) => (
-                  <div key={`${fact}-${source}`}>
-                    <ThinIcon name="dot" size={12} />
-                    <span>{fact}</span>
-                    <small>{source}</small>
-                  </div>
-                ))
-              ) : (
-                <div className="empty-row">No memory snippets recorded.</div>
-              )}
-            </div>
-            <button
-              type="button"
-              className="view-link"
-              onClick={() => {
-                setInspectorTab('canon')
-                setMainTab('notes')
-              }}
-            >
-              View All Canon <ExternalLink size={12} />
-            </button>
-          </section>
-        ) : null}
-
-        {(inspectorTab === 'party' || inspectorTab === 'map') ? (
-          <section className="inspector-box">
-            <div className="box-title">
-              <h3>Current Map / Segment</h3>
-              <button
-                type="button"
-                onClick={() => {
-                  setInspectorTab('map')
-                }}
-              >
-                Change
-              </button>
-            </div>
-            <div className="map-segment">
-              <div className="mini-map">
-                <span />
-              </div>
-              <div className="map-meta-column">
-                <h4>{mapPanelTitle}</h4>
-                <p>{mapDescription}</p>
-                <dl>
-                  <dt>Explored</dt>
-                  <dd>{mapMeta.explored}</dd>
-                  <dt>Threat</dt>
-                  <dd className={`threat-${mapMeta.threatTone}`}>{mapMeta.threat}</dd>
-                  <dt>Weather</dt>
-                  <dd>{mapMeta.weather}</dd>
-                </dl>
-                <small>{truncateText(questTitle, 30)} / {selectedSegment?.title ? truncateText(selectedSegment.title, 30) : 'None'}</small>
-              </div>
-            </div>
-            {!maps.length ? (
-              <div className="empty-inline-action">
-                <span>No campaign map has been recorded.</span>
-                <button
-                  type="button"
-                  onClick={() => void createDefaultMap()}
-                  disabled={!selectedCampaignId || !campaign || createMapPending}
-                >
-                  {createMapPending ? 'Creating...' : 'Create map'}
-                </button>
-              </div>
-            ) : null}
-          </section>
-        ) : null}
-
-      </aside>
+      <InspectorPanel
+        inspectorTab={inspectorTab}
+        setInspectorTab={setInspectorTab}
+        setMainTab={setMainTab}
+        displayCharacter={displayCharacter}
+        characterAvatarSrc={avatarDataUri(displayCharacter.name, 'character')}
+        xpProgress={xpProgress}
+        playersCount={players.length}
+        activePlayers={activePlayers}
+        selectedPlayerId={selectedPlayerId}
+        loadPlayer={openCharacterJoinDialog}
+        createDefaultPlayer={promptCreatePlayer}
+        editSelectedPlayer={openPlayerEditDialog}
+        deleteSelectedPlayer={openPlayerDeleteDialog}
+        selectedCampaignId={selectedCampaignId}
+        createPlayerPending={createPlayerPending}
+        statBlock={statBlock}
+        inventoryRows={inventoryRows}
+        inventoryWeightLabel={inventoryWeightLabel}
+        memorySnippetCount={memorySnippets.length}
+        visibleCanonFacts={visibleCanonFacts}
+        mapPanelTitle={mapPanelTitle}
+        mapDescription={mapDescription}
+        mapMeta={mapMeta}
+        questTitle={questTitle}
+        selectedSegment={selectedSegment}
+        maps={maps}
+        createDefaultMap={createDefaultMap}
+        campaign={campaign}
+        createMapPending={createMapPending}
+        mapManagementForm={mapManagementForm}
+        setMapManagementForm={setMapManagementForm}
+        mapSavePending={mapSavePending}
+        saveMapManagement={saveMapManagement}
+        segments={segments}
+        segmentSavePending={segmentSavePending}
+        activateSegment={activateSegment}
+        segmentDeletePendingId={segmentDeletePendingId}
+        deleteSegment={deleteSegment}
+        segmentManagementForm={segmentManagementForm}
+        setSegmentManagementForm={setSegmentManagementForm}
+        createSegment={createSegment}
+      />
 
       {diceRoll ? (
         <div
@@ -3686,7 +2508,7 @@ function App() {
           role="presentation"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && diceRoll.status === 'rolling') {
-              setDiceRoll(null)
+              closeDiceRoll()
             }
           }}
         >
@@ -3703,11 +2525,12 @@ function App() {
             <DiceRollDialog
               die={diceRoll.die}
               result={diceRoll.result}
+              targetLabel={diceRoll.targetLabel}
               rollKey={diceRoll.rollKey}
               status={diceRoll.status}
               onCancel={() => {
                 if (diceRoll.status === 'rolling') {
-                  setDiceRoll(null)
+                  closeDiceRoll()
                 }
               }}
               onComplete={completeDiceRoll}
@@ -3727,6 +2550,7 @@ function App() {
           }}
         >
           <section
+            ref={modalDialogRef}
             className="campaign-dialog runtime-dialog"
             role="dialog"
             aria-modal="true"
@@ -3734,35 +2558,40 @@ function App() {
           >
             <header>
               <div>
-                <span>Runtime</span>
-                <h2 id="runtime-settings-title">Backend Settings</h2>
+                <span>{runtimeSettingsEyebrow}</span>
+                <h2 id="runtime-settings-title">{runtimeSettingsTitle}</h2>
               </div>
               <button
                 type="button"
-                aria-label="Close backend settings"
+                aria-label={runtimeSettingsCloseLabel}
                 onClick={closeRuntimeSettingsDialog}
               >
                 <X size={18} />
               </button>
             </header>
             <form onSubmit={submitRuntimeSettings}>
-              <label>
-                Backend URL
-                <input
-                  autoFocus
-                  value={runtimeSettingsForm.baseUrl}
-                  onChange={(event) =>
-                    setRuntimeSettingsForm((current) => ({
-                      ...current,
-                      baseUrl: event.target.value,
-                    }))
-                  }
-                  placeholder="http://127.0.0.1:5050"
-                />
-              </label>
+              {runtimeSettingsIsAuthPrompt ? null : (
+                <label>
+                  Backend URL
+                  <input
+                    autoFocus={!runtimeSettingsIsAuthPrompt}
+                    data-autofocus={!runtimeSettingsIsAuthPrompt ? true : undefined}
+                    value={runtimeSettingsForm.baseUrl}
+                    onChange={(event) =>
+                      setRuntimeSettingsForm((current) => ({
+                        ...current,
+                        baseUrl: event.target.value,
+                      }))
+                    }
+                    placeholder="Leave blank for same origin"
+                  />
+                </label>
+              )}
               <label>
                 Auth Token
                 <input
+                  autoFocus={runtimeSettingsIsAuthPrompt}
+                  data-autofocus={runtimeSettingsIsAuthPrompt ? true : undefined}
                   value={runtimeSettingsForm.authToken}
                   onChange={(event) =>
                     setRuntimeSettingsForm((current) => ({
@@ -3775,29 +2604,1162 @@ function App() {
                   autoComplete="off"
                 />
               </label>
-              <p>
-                These settings are saved locally in this browser and used for API,
-                Socket.IO, and TTS requests.
-              </p>
+              <p>{runtimeSettingsHelpText}</p>
               {runtimeSettingsError ? (
                 <div className="dialog-error">{runtimeSettingsError}</div>
+              ) : null}
+              <footer>
+                {runtimeSettingsIsAuthPrompt ? null : (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() =>
+                      setRuntimeSettingsForm({ baseUrl: DEFAULT_BASE_URL, authToken: '' })
+                    }
+                  >
+                    Reset
+                  </button>
+                )}
+                <button type="button" className="secondary" onClick={closeRuntimeSettingsDialog}>
+                  Cancel
+                </button>
+                <button type="submit">
+                  {runtimeSettingsIsAuthPrompt ? 'Connect' : 'Save Settings'}
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {shareSessionUrl ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeShareSessionDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog share-session-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="share-session-title"
+          >
+            <header>
+              <div>
+                <span>Table Link</span>
+                <h2 id="share-session-title">Share Session</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close share session"
+                onClick={closeShareSessionDialog}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <label>
+              Session Link
+              <input
+                data-autofocus
+                readOnly
+                aria-label="Session share link"
+                value={shareSessionUrl}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+            </label>
+            <p>
+              Send this to someone who can open this frontend and reach this backend.
+              They can choose or create their own character after it opens.
+            </p>
+            <footer>
+              <button type="button" className="secondary" onClick={closeShareSessionDialog}>
+                Close
+              </button>
+              <button type="button" onClick={copyShareSessionUrl}>
+                Copy Link
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {profileSettingsOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeProfileSettingsDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog profile-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="profile-settings-title"
+          >
+            <header>
+              <div>
+                <span>Profile</span>
+                <h2 id="profile-settings-title">Profile Settings</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close profile settings"
+                onClick={closeProfileSettingsDialog}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="profile-dialog-body">
+              <dl className="profile-summary-grid">
+                <div>
+                  <dt>Player</dt>
+                  <dd>{selectedPlayer?.name ?? 'Local profile'}</dd>
+                </div>
+                <div>
+                  <dt>Character</dt>
+                  <dd>{displayCharacter.name}</dd>
+                </div>
+                <div>
+                  <dt>Campaign</dt>
+                  <dd>{campaign?.title ?? 'No campaign selected'}</dd>
+                </div>
+                <div>
+                  <dt>Session</dt>
+                  <dd>{activeSessionName}</dd>
+                </div>
+                <div>
+                  <dt>Backend</dt>
+                  <dd>{backendDisplayUrl}</dd>
+                </div>
+                <div>
+                  <dt>Narration</dt>
+                  <dd>{ttsStatusLabel}{ttsLatencyLabel ? ` / ${ttsLatencyLabel}` : ''}</dd>
+                </div>
+              </dl>
+              <div className="profile-action-list">
+                <button type="button" onClick={openPlayerEditDialog} disabled={!selectedPlayer}>
+                  Edit character
+                </button>
+                <button type="button" onClick={openCharacterJoinDialog} disabled={!selectedCampaignId}>
+                  Switch character
+                </button>
+                <button type="button" onClick={() => void refreshCurrentWorkspace()}>
+                  Refresh workspace
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSocketReconnectKey((current) => current + 1)
+                    closeProfileSettingsDialog()
+                  }}
+                >
+                  Reconnect realtime
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfileSettingsOpen(false)
+                    openRuntimeSettingsDialog()
+                  }}
+                >
+                  Backend settings
+                </button>
+                {authToken ? (
+                  <button type="button" onClick={clearAuthToken}>
+                    Clear auth token
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {characterJoinDialogOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeCharacterJoinDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog character-join-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="character-join-title"
+          >
+            <header>
+              <div>
+                <span>Character</span>
+                <h2 id="character-join-title">Join Campaign</h2>
+              </div>
+              <button type="button" aria-label="Close character chooser" onClick={closeCharacterJoinDialog}>
+                <X size={18} />
+              </button>
+            </header>
+            <div className="character-join-body">
+              <p>
+                {campaign?.title
+                  ? `Choose who you are playing in ${campaign.title}.`
+                  : 'Choose who you are playing.'}
+              </p>
+              {players.length ? (
+                <div className="character-choice-list" aria-label="Existing characters">
+                  {players.map((player) => {
+                    const characterName = player.character_name || player.name || `Player ${player.player_id}`
+                    const playerName = player.name || 'Unknown player'
+                    const characterClass = player.char_class || player.class_ || 'Adventurer'
+                    return (
+                      <button
+                        key={player.player_id}
+                        type="button"
+                        className="character-choice-card"
+                        aria-label={`Join as ${characterName}`}
+                        onClick={() => joinAsExistingPlayer(player)}
+                      >
+                        <span>
+                          <strong>{characterName}</strong>
+                          <small>
+                            {playerName} / Level {player.level} {characterClass}
+                          </small>
+                        </span>
+                        <em>Join</em>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="dialog-warning">
+                  <strong>No characters yet.</strong>
+                  <span>Create the first character for this campaign.</span>
+                </div>
+              )}
+              <footer>
+                <button type="button" className="secondary" onClick={closeCharacterJoinDialog}>
+                  Cancel
+                </button>
+                <button type="button" onClick={createCharacterFromJoinDialog}>
+                  Create Character
+                </button>
+              </footer>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {campaignArchiveDialog ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeCampaignArchiveDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog archive-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="campaign-archive-title"
+          >
+            <header>
+              <div>
+                <span>Archive</span>
+                <h2 id="campaign-archive-title">Campaign Archive</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close campaign archive"
+                onClick={closeCampaignArchiveDialog}
+                disabled={campaignArchiveDialog.pendingId !== null}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="dialog-body">
+              <div className="dialog-warning">
+                <strong>{campaign?.title ?? 'No campaign selected'}</strong>
+                <span>Archived campaigns stay saved here, hidden from the active campaign rail.</span>
+              </div>
+              <div className="world-manager-list" aria-label="Archived campaigns">
+                {campaignArchiveDialog.loading ? (
+                  <div className="rail-skeleton-list" aria-label="Loading campaign archive">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                ) : campaignArchiveDialog.items.length ? (
+                  campaignArchiveDialog.items.map((item) => {
+                    const worldLabel = worldNameById.get(item.world_id) ?? `World ${item.world_id}`
+                    const pending = campaignArchiveDialog.pendingId === item.campaign_id
+                    return (
+                      <div key={item.campaign_id} className="world-manager-row">
+                        <span>
+                          <strong>{item.title}</strong>
+                          <small>
+                            {worldLabel} / Updated {formatShortAge(item.updated_at ?? item.created_at)}
+                          </small>
+                        </span>
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => void restoreCampaignFromArchive(item.campaign_id)}
+                            disabled={campaignArchiveDialog.pendingId !== null}
+                          >
+                            {pending ? 'Restoring...' : 'Restore'}
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })
+                ) : (
+                  <div className="dialog-warning">
+                    <strong>No archived campaigns.</strong>
+                    <span>Archive an active campaign and it will appear here.</span>
+                  </div>
+                )}
+              </div>
+              {campaignArchiveDialog.error ? (
+                <div className="dialog-error">{campaignArchiveDialog.error}</div>
               ) : null}
               <footer>
                 <button
                   type="button"
                   className="secondary"
-                  onClick={() =>
-                    setRuntimeSettingsForm({ baseUrl: DEFAULT_BASE_URL, authToken: '' })
-                  }
+                  onClick={closeCampaignArchiveDialog}
+                  disabled={campaignArchiveDialog.pendingId !== null}
                 >
-                  Reset
+                  Close
                 </button>
-                <button type="button" className="secondary" onClick={closeRuntimeSettingsDialog}>
+                <button
+                  type="button"
+                  onClick={() => void archiveSelectedCampaignFromManager()}
+                  disabled={!campaign || campaignArchiveDialog.pendingId !== null}
+                >
+                  {campaignArchiveDialog.pendingId === campaign?.campaign_id
+                    ? 'Archiving...'
+                    : 'Archive Selected Campaign'}
+                </button>
+              </footer>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {sessionArchiveDialog ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeSessionArchiveDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog archive-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="session-archive-title"
+          >
+            <header>
+              <div>
+                <span>Archive</span>
+                <h2 id="session-archive-title">Session Archive</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close session archive"
+                onClick={closeSessionArchiveDialog}
+                disabled={sessionArchiveDialog.pendingId !== null}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="dialog-body">
+              <div className="dialog-warning">
+                <strong>{campaign?.title ?? 'No campaign selected'}</strong>
+                <span>Archived sessions stay saved here, hidden from the active session rail.</span>
+              </div>
+              <div className="world-manager-list" aria-label="Archived sessions">
+                {sessionArchiveDialog.loading ? (
+                  <div className="rail-skeleton-list" aria-label="Loading session archive">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                ) : sessionArchiveDialog.items.length ? (
+                  sessionArchiveDialog.items.map((item) => {
+                    const title = sessionDisplayName(item, campaign?.world_id ?? selectedCampaignId)
+                    const pending = sessionArchiveDialog.pendingId === item.session_id
+                    return (
+                      <div key={item.session_id} className="world-manager-row">
+                        <span>
+                          <strong>{title}</strong>
+                          <small>
+                            {pluralize(item.turn_count ?? 0, 'turn')} / Updated{' '}
+                            {formatShortAge(item.updated_at ?? item.created_at)}
+                          </small>
+                        </span>
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => void restoreSessionFromArchive(item.session_id)}
+                            disabled={sessionArchiveDialog.pendingId !== null}
+                          >
+                            {pending ? 'Restoring...' : 'Restore'}
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })
+                ) : (
+                  <div className="dialog-warning">
+                    <strong>No archived sessions.</strong>
+                    <span>Archive a session in this campaign and it will appear here.</span>
+                  </div>
+                )}
+              </div>
+              {sessionArchiveDialog.error ? (
+                <div className="dialog-error">{sessionArchiveDialog.error}</div>
+              ) : null}
+              <footer>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={closeSessionArchiveDialog}
+                  disabled={sessionArchiveDialog.pendingId !== null}
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void archiveSelectedSessionFromManager()}
+                  disabled={!activeSession || sessionArchiveDialog.pendingId !== null}
+                >
+                  {sessionArchiveDialog.pendingId === activeSession?.session_id
+                    ? 'Archiving...'
+                    : 'Archive Selected Session'}
+                </button>
+              </footer>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {campaignChooserOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeCampaignChooserDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog campaign-chooser-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="campaign-chooser-title"
+          >
+            <header>
+              <div>
+                <span>Campaign</span>
+                <h2 id="campaign-chooser-title">Choose Campaign</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close campaign chooser"
+                onClick={closeCampaignChooserDialog}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="character-join-body">
+              <p>Choose the campaign before selecting or creating a character.</p>
+              {campaigns.length ? (
+                <div className="character-choice-list" aria-label="Available campaigns">
+                  {campaigns.map((item) => {
+                    const worldLabel = worldNameById.get(item.world_id) ?? `World ${item.world_id}`
+                    return (
+                      <button
+                        key={item.campaign_id}
+                        type="button"
+                        className="character-choice-card"
+                        aria-label={`Choose ${item.title}`}
+                        onClick={() => chooseCampaign(item.campaign_id)}
+                      >
+                        <span>
+                          <strong>{item.title}</strong>
+                          <small>
+                            {item.is_archived ? 'Archived' : 'Active'} / {worldLabel}
+                          </small>
+                        </span>
+                        <em>Select</em>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="dialog-warning">
+                  <strong>No campaigns yet.</strong>
+                  <span>Create a campaign before choosing a character.</span>
+                </div>
+              )}
+              <footer>
+                <button type="button" className="secondary" onClick={closeCampaignChooserDialog}>
                   Cancel
                 </button>
-                <button type="submit">Save Settings</button>
+                <button type="button" data-autofocus onClick={createCampaignFromChooser}>
+                  Create Campaign
+                </button>
+              </footer>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {playerEditDialog ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !playerEditDialog.pending) {
+              closePlayerEditDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog player-edit-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="player-edit-title"
+          >
+	            <header>
+	              <div>
+	                <span>Character</span>
+	                <h2 id="player-edit-title">
+	                  {playerEditDialog.mode === 'create' ? 'Create Character' : 'Edit Character'}
+	                </h2>
+	              </div>
+	              <button
+	                type="button"
+	                aria-label={playerEditDialog.mode === 'create' ? 'Close character creator' : 'Close character editor'}
+	                onClick={closePlayerEditDialog}
+	                disabled={playerEditDialog.pending}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <form onSubmit={(event) => void submitPlayerEditDialog(event)}>
+              <label>
+                Player Name
+                <input
+                  autoFocus
+                  data-autofocus
+                  value={playerEditDialog.name}
+                  onChange={(event) =>
+                    setPlayerEditDialog((current) =>
+                      current ? { ...current, name: event.target.value } : current,
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Character Name
+                <input
+                  value={playerEditDialog.characterName}
+                  onChange={(event) =>
+                    setPlayerEditDialog((current) =>
+                      current ? { ...current, characterName: event.target.value } : current,
+                    )
+                  }
+                />
+              </label>
+              <div className="dialog-grid two">
+                <label>
+                  Race
+                  <input
+                    value={playerEditDialog.race}
+                    onChange={(event) =>
+                      setPlayerEditDialog((current) =>
+                        current ? { ...current, race: event.target.value } : current,
+                      )
+                    }
+                  />
+                </label>
+                <label>
+                  Class
+                  <input
+                    value={playerEditDialog.charClass}
+                    onChange={(event) =>
+                      setPlayerEditDialog((current) =>
+                        current ? { ...current, charClass: event.target.value } : current,
+                      )
+                    }
+                  />
+                </label>
+              </div>
+              <label>
+                Level
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={playerEditDialog.level}
+                  onChange={(event) =>
+                    setPlayerEditDialog((current) =>
+                      current ? { ...current, level: event.target.value } : current,
+                    )
+                  }
+                />
+              </label>
+              {playerEditDialog.error ? (
+                <div className="dialog-error">{playerEditDialog.error}</div>
+              ) : null}
+              <footer>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={closePlayerEditDialog}
+                  disabled={playerEditDialog.pending}
+                >
+                  Cancel
+	                </button>
+	                <button type="submit" disabled={playerEditDialog.pending}>
+	                  {playerEditDialog.pending
+	                    ? playerEditDialog.mode === 'create'
+	                      ? 'Creating...'
+	                      : 'Saving...'
+	                    : playerEditDialog.mode === 'create'
+	                      ? 'Create Character'
+	                      : 'Save Character'}
+	                </button>
+	              </footer>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {playerDeleteDialog ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !playerDeleteDialog.pending) {
+              closePlayerDeleteDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog player-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="player-delete-title"
+          >
+            <header>
+              <div>
+                <span>Character</span>
+                <h2 id="player-delete-title">Delete Character</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close character delete"
+                onClick={closePlayerDeleteDialog}
+                disabled={playerDeleteDialog.pending}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="dialog-body">
+              <div className="dialog-warning">
+                <strong>{playerDeleteDialog.player.character_name || playerDeleteDialog.player.name}</strong>
+                <span>
+                  This permanently removes the character from this workspace. Past
+                  turn history stays readable, but it will no longer point at this
+                  character record.
+                </span>
+              </div>
+              {playerDeleteDialog.error ? (
+                <div className="dialog-error">{playerDeleteDialog.error}</div>
+              ) : null}
+              <footer>
+                <button
+                  type="button"
+                  className="secondary"
+                  data-autofocus
+                  onClick={closePlayerDeleteDialog}
+                  disabled={playerDeleteDialog.pending}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => void submitPlayerDeleteDialog()}
+                  disabled={playerDeleteDialog.pending}
+                >
+                  {playerDeleteDialog.pending ? 'Deleting...' : 'Delete Character'}
+                </button>
+              </footer>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {campaignActionDialog ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeCampaignActionDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog campaign-action-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="campaign-action-title"
+          >
+            <header>
+              <div>
+                <span>Campaign</span>
+                <h2 id="campaign-action-title">
+                  {campaignActionDialog.mode === 'rename'
+                    ? 'Rename Campaign'
+                    : campaignActionDialog.mode === 'archive'
+                      ? 'Archive Campaign'
+                      : campaignActionDialog.mode === 'restore'
+                        ? 'Restore Campaign'
+                        : 'Delete Campaign'}
+                </h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close campaign action"
+                onClick={closeCampaignActionDialog}
+                disabled={campaignActionDialog.pending}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <form onSubmit={(event) => void submitCampaignActionDialog(event)}>
+              {campaignActionDialog.mode === 'rename' ? (
+                <>
+                  <label>
+                    Campaign Name
+                    <input
+                      autoFocus
+                      data-autofocus
+                      value={campaignActionDialog.title}
+                      onChange={(event) =>
+                        setCampaignActionDialog((current) =>
+                          current
+                            ? { ...current, title: event.target.value, error: '' }
+                            : current,
+                        )
+                      }
+                      disabled={campaignActionDialog.pending}
+                    />
+                  </label>
+                  <label>
+                    Description
+                    <textarea
+                      value={campaignActionDialog.description}
+                      onChange={(event) =>
+                        setCampaignActionDialog((current) =>
+                          current
+                            ? { ...current, description: event.target.value, error: '' }
+                            : current,
+                        )
+                      }
+                      disabled={campaignActionDialog.pending}
+                    />
+                  </label>
+                </>
+              ) : (
+                <div className="dialog-warning">
+                  <strong>{campaignActionDialog.title}</strong>
+                  <span>
+                    {campaignActionDialog.mode === 'archive'
+                      ? 'Archiving hides this campaign and its sessions from the normal workspace list without destroying saved history.'
+                      : campaignActionDialog.mode === 'restore'
+                        ? 'Restoring makes this campaign and sessions archived with it available for normal play again.'
+                        : 'This permanently deletes the campaign, its sessions, maps, and campaign notes from this workspace. Characters stay in the workspace but are detached from it.'}
+                  </span>
+                </div>
+              )}
+              {campaignActionDialog.error ? (
+                <div className="dialog-error">{campaignActionDialog.error}</div>
+              ) : null}
+              <footer>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={closeCampaignActionDialog}
+                  disabled={campaignActionDialog.pending}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className={
+                    campaignActionDialog.mode === 'archive' || campaignActionDialog.mode === 'delete'
+                      ? 'danger'
+                      : undefined
+                  }
+                  disabled={campaignActionDialog.pending}
+                >
+                  {campaignActionDialog.pending
+                    ? campaignActionDialog.mode === 'rename'
+                      ? 'Saving...'
+                      : campaignActionDialog.mode === 'archive'
+                        ? 'Archiving...'
+                        : campaignActionDialog.mode === 'restore'
+                          ? 'Restoring...'
+                          : 'Deleting...'
+                    : campaignActionDialog.mode === 'rename'
+                      ? 'Save Campaign'
+                      : campaignActionDialog.mode === 'archive'
+                        ? 'Archive Campaign'
+                        : campaignActionDialog.mode === 'restore'
+                          ? 'Restore Campaign'
+                          : 'Delete Campaign'}
+                </button>
               </footer>
             </form>
+          </section>
+        </div>
+      ) : null}
+
+      {sessionActionDialog ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeSessionActionDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog session-action-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="session-action-title"
+          >
+            <header>
+              <div>
+                <span>Session</span>
+                <h2 id="session-action-title">
+                  {sessionActionDialog.mode === 'rename' ? 'Rename Session' : 'Delete Session'}
+                </h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close session action"
+                onClick={closeSessionActionDialog}
+                disabled={sessionActionDialog.pending}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <form onSubmit={(event) => void submitSessionActionDialog(event)}>
+              {sessionActionDialog.mode === 'rename' ? (
+                <label>
+                  Session Name
+                  <input
+                    autoFocus
+                    data-autofocus
+                    value={sessionActionDialog.name}
+                    onChange={(event) =>
+                      setSessionActionDialog((current) =>
+                        current
+                          ? { ...current, name: event.target.value, error: '' }
+                          : current,
+                      )
+                    }
+                    disabled={sessionActionDialog.pending}
+                  />
+                </label>
+              ) : (
+                <div className="dialog-warning">
+                  <strong>{sessionActionDialog.name}</strong>
+                  <span>
+                    This permanently deletes this session and its saved turn history. Use
+                    the archive button if you only want to hide it.
+                  </span>
+                </div>
+              )}
+              {sessionActionDialog.error ? (
+                <div className="dialog-error">{sessionActionDialog.error}</div>
+              ) : null}
+              <footer>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={closeSessionActionDialog}
+                  disabled={sessionActionDialog.pending}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className={sessionActionDialog.mode === 'delete' ? 'danger' : undefined}
+                  disabled={sessionActionDialog.pending}
+                >
+                  {sessionActionDialog.pending
+                    ? sessionActionDialog.mode === 'rename'
+                      ? 'Renaming...'
+                      : 'Deleting...'
+                    : sessionActionDialog.mode === 'rename'
+                      ? 'Rename Session'
+                      : 'Delete Session'}
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {worldManagerOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeWorldManagerDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog world-manager-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="world-manager-title"
+          >
+            <header>
+              <div>
+                <span>Worlds</span>
+                <h2 id="world-manager-title">Manage Worlds</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close world manager"
+                onClick={closeWorldManagerDialog}
+                disabled={worldForm.pending || worldDeleteDialog !== null}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="world-manager-list" aria-label="World list">
+              {worldSelectOptions.length ? (
+                worldSelectOptions.map((world) => {
+                  const isEditing = worldForm.mode === 'edit' && worldForm.worldId === world.world_id
+                  return (
+                    <div
+                      key={world.world_id}
+                      className={`world-manager-row ${isEditing ? 'active' : ''}`}
+                    >
+                      <span>
+                        <strong>{world.name}</strong>
+                        <small>{world.description || 'No description yet'}</small>
+                      </span>
+                      <div>
+                        <button
+                          type="button"
+                          onClick={() => editWorld(world)}
+                          disabled={worldForm.pending || worldDeleteDialog !== null}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="danger"
+                          onClick={() => openWorldDeleteDialog(world)}
+                          disabled={worldForm.pending || worldDeleteDialog !== null}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })
+              ) : (
+                <div className="dialog-warning">
+                  <strong>No worlds yet.</strong>
+                  <span>Create a world below, then attach campaigns to it.</span>
+                </div>
+              )}
+            </div>
+            <form className="world-manager-form" onSubmit={(event) => void submitWorldForm(event)}>
+              <div className="world-manager-form-heading">
+                <strong>{worldForm.mode === 'edit' ? 'Edit World' : 'Create World'}</strong>
+                {worldForm.mode === 'edit' ? (
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={resetWorldForm}
+                    disabled={worldForm.pending}
+                  >
+                    New World
+                  </button>
+                ) : null}
+              </div>
+              <label>
+                World Name
+                <input
+                  data-autofocus
+                  value={worldForm.name}
+                  onChange={(event) =>
+                    setWorldForm((current) => ({
+                      ...current,
+                      name: event.target.value,
+                      error: '',
+                    }))
+                  }
+                  placeholder="Crystal Reach"
+                  disabled={worldForm.pending}
+                />
+              </label>
+              <label>
+                Description
+                <textarea
+                  value={worldForm.description}
+                  onChange={(event) =>
+                    setWorldForm((current) => ({
+                      ...current,
+                      description: event.target.value,
+                      error: '',
+                    }))
+                  }
+                  rows={3}
+                  placeholder="Realm premise, tone, or key conflicts..."
+                  disabled={worldForm.pending}
+                />
+              </label>
+              {worldForm.error ? <div className="dialog-error">{worldForm.error}</div> : null}
+              <footer>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={closeWorldManagerDialog}
+                  disabled={worldForm.pending || worldDeleteDialog !== null}
+                >
+                  Close
+                </button>
+                <button type="submit" disabled={worldForm.pending}>
+                  {worldForm.pending
+                    ? worldForm.mode === 'edit'
+                      ? 'Saving...'
+                      : 'Creating...'
+                    : worldForm.mode === 'edit'
+                      ? 'Save World'
+                      : 'Create World'}
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {worldDeleteDialog ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeWorldDeleteDialog()
+            }
+          }}
+        >
+          <section
+            ref={modalDialogRef}
+            className="campaign-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="world-delete-title"
+          >
+            <header>
+              <div>
+                <span>World</span>
+                <h2 id="world-delete-title">Delete World</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close delete world"
+                onClick={closeWorldDeleteDialog}
+                disabled={worldDeleteDialog.pending}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="dialog-body">
+              <div className="dialog-warning">
+                <strong>{worldDeleteDialog.world.name}</strong>
+                <span>
+                  This world can be deleted directly when nothing is using it.
+                  If campaigns are linked, force delete removes those linked campaigns first.
+                </span>
+              </div>
+              {worldDeleteDialog.error ? (
+                <div className="dialog-error">{worldDeleteDialog.error}</div>
+              ) : null}
+              <footer>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={closeWorldDeleteDialog}
+                  disabled={worldDeleteDialog.pending}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  data-autofocus
+                  onClick={() => void submitWorldDeleteDialog()}
+                  disabled={worldDeleteDialog.pending}
+                >
+                  {worldDeleteDialog.pending ? 'Deleting...' : 'Delete World'}
+                </button>
+                {worldDeleteDialog.canForce ? (
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => void submitWorldDeleteDialog(true)}
+                    disabled={worldDeleteDialog.pending}
+                  >
+                    {worldDeleteDialog.pending ? 'Deleting...' : 'Delete World and Campaigns'}
+                  </button>
+                ) : null}
+              </footer>
+            </div>
           </section>
         </div>
       ) : null}
@@ -3813,6 +3775,7 @@ function App() {
           }}
         >
           <section
+            ref={modalDialogRef}
             className="campaign-dialog"
             role="dialog"
             aria-modal="true"
@@ -3836,6 +3799,7 @@ function App() {
                 Campaign Name
                 <input
                   autoFocus
+                  data-autofocus
                   value={createCampaignForm.title}
                   onChange={(event) =>
                     setCreateCampaignForm((current) => ({
@@ -3864,26 +3828,43 @@ function App() {
               </label>
               <label>
                 World
+                <select
+                  value={createCampaignForm.worldName.trim() ? '' : createCampaignForm.worldId}
+                  onChange={(event) =>
+                    setCreateCampaignForm((current) => ({
+                      ...current,
+                      worldId: event.target.value,
+                      worldName: '',
+                    }))
+                  }
+                  disabled={createCampaignPending}
+                >
+                  <option value="">Create a new world</option>
+                  {worldSelectOptions.map((world) => (
+                    <option key={world.world_id} value={world.world_id}>
+                      {world.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                New World Name
                 <input
                   value={createCampaignForm.worldName}
                   onChange={(event) =>
                     setCreateCampaignForm((current) => ({
                       ...current,
+                      worldId: '',
                       worldName: event.target.value,
                     }))
                   }
-                  placeholder={
-                    campaigns.length
-                      ? `Leave blank to use world ${campaign?.world_id ?? campaigns[0]?.world_id}`
-                      : 'New world name'
-                  }
+                  placeholder="Crystal Reach"
                   disabled={createCampaignPending}
                 />
               </label>
               <p>
-                {campaigns.length
-                  ? `Blank world uses the selected campaign world (${campaign?.world_id ?? campaigns[0]?.world_id}).`
-                  : 'A new world will be created for this campaign.'}
+                Select an existing world, or enter a new world name to create one for this
+                campaign.
               </p>
               {createCampaignError ? (
                 <div className="dialog-error">{createCampaignError}</div>

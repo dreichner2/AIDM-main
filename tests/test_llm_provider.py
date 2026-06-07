@@ -4,14 +4,27 @@ import pytest
 
 from aidm_server.contracts import ProviderRequest
 from aidm_server.llm import (
+    DeepSeekChatProvider,
     GeminiProvider,
     NvidiaChatProvider,
     ProviderNotConfiguredError,
     ProviderResponse,
     _chunk_text_for_stream,
+    estimate_text_tokens,
     get_provider,
     query_dm_function_stream,
 )
+from aidm_server.provider_registry import provider_capabilities, provider_default_model
+
+
+def test_provider_registry_defines_defaults_and_capabilities():
+    assert provider_default_model('deepseek') == 'deepseek-v4-pro'
+    assert provider_default_model('nvidia') == 'moonshotai/kimi-k2.5'
+    deepseek_capabilities = provider_capabilities('deepseek')
+    nvidia_capabilities = provider_capabilities('nvidia')
+    assert deepseek_capabilities['openai_compatible'] is True
+    assert deepseek_capabilities['thinking_control'] is True
+    assert nvidia_capabilities['thinking_control'] is True
 
 
 def test_get_provider_reads_fallback_models_from_env(monkeypatch):
@@ -105,10 +118,10 @@ def test_extract_text_preserves_stream_whitespace():
 
 
 def test_gemini_provider_skips_primary_when_rate_limited_cooldown_active(monkeypatch):
-    import aidm_server.llm as llm_module
+    import aidm_server.llm_providers as provider_module
 
-    monkeypatch.setattr(llm_module, 'GEMINI_RATE_LIMIT_THRESHOLD', 1)
-    monkeypatch.setattr(llm_module, 'GEMINI_RATE_LIMIT_COOLDOWN_SECONDS', 120)
+    monkeypatch.setattr(provider_module, 'LLM_RATE_LIMIT_THRESHOLD', 1)
+    monkeypatch.setattr(provider_module, 'LLM_RATE_LIMIT_COOLDOWN_SECONDS', 120)
     GeminiProvider._rate_limit_state.clear()
 
     provider = GeminiProvider(
@@ -150,6 +163,32 @@ def test_get_provider_supports_nvidia(monkeypatch):
     assert provider.model_name == 'moonshotai/kimi-k2.5'
 
 
+def test_get_provider_does_not_reuse_nvidia_key_for_official_deepseek(monkeypatch):
+    monkeypatch.setenv('AIDM_LLM_PROVIDER', 'deepseek')
+    monkeypatch.setenv('AIDM_LLM_MODEL', 'deepseek-v4-pro')
+    monkeypatch.setenv('AIDM_NVIDIA_API_KEY', 'nvapi-test')
+    monkeypatch.delenv('AIDM_DEEPSEEK_API_KEY', raising=False)
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+
+    provider = get_provider()
+
+    assert isinstance(provider, DeepSeekChatProvider)
+    assert provider.api_key is None
+
+
+def test_get_provider_uses_nvidia_key_for_deepseek_model_via_nvidia(monkeypatch):
+    monkeypatch.setenv('AIDM_LLM_PROVIDER', 'nvidia')
+    monkeypatch.setenv('AIDM_LLM_MODEL', 'deepseek-v4-pro')
+    monkeypatch.setenv('AIDM_NVIDIA_API_KEY', 'nvapi-test')
+    monkeypatch.setenv('AIDM_NVIDIA_INVOKE_URL', 'https://integrate.api.nvidia.com/v1')
+
+    provider = get_provider()
+
+    assert isinstance(provider, NvidiaChatProvider)
+    assert provider.model_name == 'deepseek-v4-pro'
+    assert provider.api_key == 'nvapi-test'
+
+
 def test_get_provider_rejects_unknown_provider(monkeypatch):
     monkeypatch.setenv('AIDM_LLM_PROVIDER', 'typo-provider')
 
@@ -158,7 +197,7 @@ def test_get_provider_rejects_unknown_provider(monkeypatch):
 
 
 def test_nvidia_provider_generate_parses_openai_shape(monkeypatch):
-    import aidm_server.llm as llm_module
+    import aidm_server.llm_providers as provider_module
 
     class _FakeResponse:
         status_code = 200
@@ -170,15 +209,17 @@ def test_nvidia_provider_generate_parses_openai_shape(monkeypatch):
         def close(self):
             return None
 
-    def fake_post(url, headers, json, timeout, stream):
+    def fake_post(client_name, url, headers, json, timeout, stream):
+        assert client_name == 'llm'
         assert stream is False
         assert url == 'https://integrate.api.nvidia.com/v1/chat/completions'
         assert json['model'] == 'moonshotai/kimi-k2.5'
         assert json['thinking'] == {'type': 'enabled'}
         assert 'chat_template_kwargs' not in json
+        assert timeout == (10.0, 60.0)
         return _FakeResponse()
 
-    monkeypatch.setattr(llm_module.requests, 'post', fake_post)
+    monkeypatch.setattr(provider_module, 'http_post', fake_post)
 
     provider = NvidiaChatProvider(
         model_name='moonshotai/kimi-k2.5',
@@ -202,7 +243,7 @@ def test_nvidia_provider_normalizes_base_v1_endpoint():
 
 
 def test_nvidia_provider_stream_parses_sse_chunks(monkeypatch):
-    import aidm_server.llm as llm_module
+    import aidm_server.llm_providers as provider_module
 
     class _FakeStreamResponse:
         status_code = 200
@@ -216,12 +257,14 @@ def test_nvidia_provider_stream_parses_sse_chunks(monkeypatch):
         def close(self):
             return None
 
-    def fake_post(url, headers, json, timeout, stream):
+    def fake_post(client_name, url, headers, json, timeout, stream):
+        assert client_name == 'llm'
         assert stream is True
         assert json['thinking'] == {'type': 'enabled'}
+        assert timeout == (10.0, 60.0)
         return _FakeStreamResponse()
 
-    monkeypatch.setattr(llm_module.requests, 'post', fake_post)
+    monkeypatch.setattr(provider_module, 'http_post', fake_post)
 
     provider = NvidiaChatProvider(
         model_name='moonshotai/kimi-k2.5',
@@ -233,7 +276,7 @@ def test_nvidia_provider_stream_parses_sse_chunks(monkeypatch):
 
 
 def test_nvidia_provider_instant_mode_sets_disabled_thinking(monkeypatch):
-    import aidm_server.llm as llm_module
+    import aidm_server.llm_providers as provider_module
 
     class _FakeResponse:
         status_code = 200
@@ -245,11 +288,12 @@ def test_nvidia_provider_instant_mode_sets_disabled_thinking(monkeypatch):
         def close(self):
             return None
 
-    def fake_post(url, headers, json, timeout, stream):
+    def fake_post(client_name, url, headers, json, timeout, stream):
+        assert client_name == 'llm'
         assert json['thinking'] == {'type': 'disabled'}
         return _FakeResponse()
 
-    monkeypatch.setattr(llm_module.requests, 'post', fake_post)
+    monkeypatch.setattr(provider_module, 'http_post', fake_post)
 
     provider = NvidiaChatProvider(
         model_name='moonshotai/kimi-k2.5',
@@ -259,6 +303,167 @@ def test_nvidia_provider_instant_mode_sets_disabled_thinking(monkeypatch):
     )
     response = provider.generate(ProviderRequest(prompt='hello'))
     assert response.text == 'Instant mode response'
+
+
+def test_nvidia_provider_skips_primary_when_rate_limited_cooldown_active(monkeypatch):
+    import aidm_server.llm_providers as provider_module
+
+    monkeypatch.setattr(provider_module, 'LLM_RATE_LIMIT_THRESHOLD', 1)
+    monkeypatch.setattr(provider_module, 'LLM_RATE_LIMIT_COOLDOWN_SECONDS', 120)
+    NvidiaChatProvider._rate_limit_state.clear()
+    attempts: list[str] = []
+    closed_rate_limit_responses = []
+
+    class _RateLimitedResponse:
+        status_code = 429
+        text = 'too many requests'
+
+        def close(self):
+            closed_rate_limit_responses.append(True)
+
+    class _OkResponse:
+        status_code = 200
+        text = ''
+
+        def json(self):
+            return {'choices': [{'message': {'content': 'Fallback model response'}}]}
+
+        def close(self):
+            return None
+
+    def fake_post(client_name, url, headers, json, timeout, stream):
+        del client_name, url, headers, timeout
+        assert stream is False
+        attempts.append(json['model'])
+        if json['model'] == 'moonshotai/kimi-k2.5':
+            return _RateLimitedResponse()
+        return _OkResponse()
+
+    monkeypatch.setattr(provider_module, 'http_post', fake_post)
+
+    provider = NvidiaChatProvider(
+        model_name='moonshotai/kimi-k2.5',
+        api_key='nvapi-test',
+        invoke_url='https://integrate.api.nvidia.com/v1',
+        fallback_models=['meta/llama-3.1-70b-instruct'],
+    )
+
+    first = provider.generate(ProviderRequest(prompt='hello one'))
+    second = provider.generate(ProviderRequest(prompt='hello two'))
+
+    assert first.model == 'meta/llama-3.1-70b-instruct'
+    assert second.model == 'meta/llama-3.1-70b-instruct'
+    assert attempts == [
+        'moonshotai/kimi-k2.5',
+        'meta/llama-3.1-70b-instruct',
+        'meta/llama-3.1-70b-instruct',
+    ]
+    assert closed_rate_limit_responses == [True]
+
+
+def test_nvidia_provider_stream_skips_primary_when_rate_limited_cooldown_active(monkeypatch):
+    import aidm_server.llm_providers as provider_module
+
+    monkeypatch.setattr(provider_module, 'LLM_RATE_LIMIT_THRESHOLD', 1)
+    monkeypatch.setattr(provider_module, 'LLM_RATE_LIMIT_COOLDOWN_SECONDS', 120)
+    NvidiaChatProvider._rate_limit_state.clear()
+    attempts: list[str] = []
+
+    class _RateLimitedResponse:
+        status_code = 429
+        text = 'too many requests'
+
+        def close(self):
+            return None
+
+    class _OkStreamResponse:
+        status_code = 200
+        text = ''
+
+        def iter_lines(self, decode_unicode=True):
+            del decode_unicode
+            yield 'data: {"choices":[{"delta":{"content":"fallback chunk"}}]}'
+            yield 'data: [DONE]'
+
+        def close(self):
+            return None
+
+    def fake_post(client_name, url, headers, json, timeout, stream):
+        del client_name, url, headers, timeout
+        assert stream is True
+        attempts.append(json['model'])
+        if json['model'] == 'moonshotai/kimi-k2.5':
+            return _RateLimitedResponse()
+        return _OkStreamResponse()
+
+    monkeypatch.setattr(provider_module, 'http_post', fake_post)
+
+    provider = NvidiaChatProvider(
+        model_name='moonshotai/kimi-k2.5',
+        api_key='nvapi-test',
+        invoke_url='https://integrate.api.nvidia.com/v1',
+        fallback_models=['meta/llama-3.1-70b-instruct'],
+    )
+
+    first = list(provider.stream(ProviderRequest(prompt='hello one')))
+    second = list(provider.stream(ProviderRequest(prompt='hello two')))
+
+    assert first == ['fallback chunk']
+    assert second == ['fallback chunk']
+    assert attempts == [
+        'moonshotai/kimi-k2.5',
+        'meta/llama-3.1-70b-instruct',
+        'meta/llama-3.1-70b-instruct',
+    ]
+
+
+def test_deepseek_provider_uses_openai_compatible_cooldown(monkeypatch):
+    import aidm_server.llm_providers as provider_module
+
+    monkeypatch.setattr(provider_module, 'LLM_RATE_LIMIT_THRESHOLD', 1)
+    monkeypatch.setattr(provider_module, 'LLM_RATE_LIMIT_COOLDOWN_SECONDS', 120)
+    NvidiaChatProvider._rate_limit_state.clear()
+    attempts: list[str] = []
+
+    class _RateLimitedResponse:
+        status_code = 429
+        text = 'too many requests'
+
+        def close(self):
+            return None
+
+    class _OkResponse:
+        status_code = 200
+        text = ''
+
+        def json(self):
+            return {'choices': [{'message': {'content': 'DeepSeek fallback response'}}]}
+
+        def close(self):
+            return None
+
+    def fake_post(client_name, url, headers, json, timeout, stream):
+        del client_name, url, headers, timeout, stream
+        attempts.append(json['model'])
+        if json['model'] == 'deepseek-v4-pro':
+            return _RateLimitedResponse()
+        return _OkResponse()
+
+    monkeypatch.setattr(provider_module, 'http_post', fake_post)
+
+    provider = DeepSeekChatProvider(
+        model_name='deepseek-v4-pro',
+        api_key='deepseek-test',
+        fallback_models=['deepseek-v4-flash'],
+    )
+
+    first = provider.generate(ProviderRequest(prompt='hello one'))
+    second = provider.generate(ProviderRequest(prompt='hello two'))
+
+    assert first.provider == 'deepseek'
+    assert first.model == 'deepseek-v4-flash'
+    assert second.model == 'deepseek-v4-flash'
+    assert attempts == ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4-flash']
 
 
 def test_query_dm_function_stream_uses_generate_chunking_for_nvidia(monkeypatch):
@@ -286,6 +491,42 @@ def test_query_dm_function_stream_uses_generate_chunking_for_nvidia(monkeypatch)
 
     assert ''.join(chunk if chunk.endswith(' ') else f'{chunk} ' for chunk in chunks).strip().startswith('First sentence.')
     assert len(chunks) >= 1
+
+
+def test_get_provider_uses_phase_timeout_env(monkeypatch):
+    monkeypatch.setenv('AIDM_LLM_PROVIDER', 'nvidia')
+    monkeypatch.setenv('AIDM_LLM_MODEL', 'moonshotai/kimi-k2.5')
+    monkeypatch.setenv('AIDM_NVIDIA_API_KEY', 'nvapi-test')
+    monkeypatch.setenv('AIDM_NVIDIA_CONNECT_TIMEOUT_SECONDS', '2.5')
+    monkeypatch.setenv('AIDM_NVIDIA_READ_TIMEOUT_SECONDS', '45')
+
+    provider = get_provider()
+
+    assert isinstance(provider, NvidiaChatProvider)
+    assert provider.connect_timeout_seconds == 2.5
+    assert provider.read_timeout_seconds == 45.0
+
+
+def test_query_dm_function_stream_records_prompt_context_estimates(app, monkeypatch):
+    class _FakeProvider:
+        def stream(self, request):
+            del request
+            yield 'The gate opens.'
+
+    monkeypatch.setattr('aidm_server.llm.get_provider', lambda: _FakeProvider())
+
+    with app.app_context():
+        chunks = list(query_dm_function_stream('open the gate', '{"campaign":"Smoke","facts":["embers"]}'))
+        metrics = app.extensions['aidm_telemetry'].snapshot()
+
+    assert chunks == ['The gate opens.']
+    assert metrics['counters']['llm.prompt.estimated_tokens|operation=dm_stream'] > 0
+    assert metrics['counters']['llm.context.estimated_tokens|operation=dm_stream'] == estimate_text_tokens(
+        '{"campaign":"Smoke","facts":["embers"]}'
+    )
+    assert metrics['counters']['llm.request.estimated_tokens|operation=dm_stream'] > metrics['counters'][
+        'llm.context.estimated_tokens|operation=dm_stream'
+    ]
 
 
 def test_chunk_text_for_stream_preserves_boundary_whitespace():

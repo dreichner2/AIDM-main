@@ -22,6 +22,8 @@ def missing_fields(payload: dict | None, required_fields: list[str]) -> list[str
 
 
 def coerce_int(value, default=None):
+    if isinstance(value, bool):
+        return default
     if value is None:
         return default
     try:
@@ -44,3 +46,42 @@ def coerce_bool(value, default=None):
         if normalized in {'false', '0', 'no', 'n', 'off'}:
             return False
     return None
+
+
+def optional_text(value, *, max_length: int, field: str, default: str | None = ''):
+    if value is None:
+        return default, None
+    if not isinstance(value, str):
+        return None, f'{field} must be a string.'
+    text = value.strip()
+    if len(text) > max_length:
+        return None, f'{field} must be {max_length} characters or fewer.'
+    return text, None
+
+
+def required_text(value, *, max_length: int, field: str):
+    text, error = optional_text(value, max_length=max_length, field=field, default='')
+    if error:
+        return None, error
+    if not text:
+        return None, f'{field} is required.'
+    return text, None
+
+
+def positive_int(value, *, field: str, required: bool = False, default: int | None = None):
+    if value in (None, ''):
+        if required:
+            return None, f'{field} is required.'
+        return default, None
+    coerced = coerce_int(value)
+    if coerced is None or coerced < 1:
+        return None, f'{field} must be a positive integer.'
+    return coerced, None
+
+
+def json_object(value, *, field: str, default: dict | None = None):
+    if value is None:
+        return ({} if default is None else default), None
+    if not isinstance(value, dict):
+        return None, f'{field} must be a JSON object.'
+    return value, None

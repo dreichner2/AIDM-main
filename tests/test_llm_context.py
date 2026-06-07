@@ -5,6 +5,7 @@ import json
 from aidm_server.database import db
 from aidm_server.llm import build_dm_context
 from aidm_server.models import Campaign, Player, PlayerAction, Session, SessionState, World, safe_json_dumps
+from tests.helpers import seed_world_campaign_player_session
 
 
 def test_build_dm_context_collects_recent_actions_for_multiple_players(app):
@@ -98,3 +99,73 @@ def test_build_dm_context_truncates_large_session_payloads(app):
     assert len(payload['session_state']['memory_snippets']) == 8
     assert len(payload['session_state']['memory_snippets'][0]['player_input']) <= 180
     assert len(payload['session_state']['memory_snippets'][0]['dm_output']) <= 260
+
+
+def test_build_dm_context_shape_snapshot(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        payload = json.loads(
+            build_dm_context(
+                ids['world_id'],
+                ids['campaign_id'],
+                ids['session_id'],
+                query_text='search the old ruins',
+            )
+        )
+
+    payload['generated_at'] = '<generated-at>'
+    payload['world']['world_id'] = '<world-id>'
+    payload['campaign']['campaign_id'] = '<campaign-id>'
+    payload['active_players'][0]['player_id'] = '<player-id>'
+
+    assert payload == {
+        'context_version': 'v2',
+        'generated_at': '<generated-at>',
+        'world': {
+            'world_id': '<world-id>',
+            'name': 'Test World',
+            'description': 'A realm for tests',
+        },
+        'campaign': {
+            'campaign_id': '<campaign-id>',
+            'title': 'Test Campaign',
+            'description': 'Campaign for tests',
+            'current_quest': 'Find the relic',
+            'location': 'Old Ruins',
+        },
+        'session_state': {
+            'rolling_summary': '',
+            'current_location': 'Old Ruins',
+            'current_quest': 'Find the relic',
+            'active_segments': [],
+            'memory_snippets': [],
+        },
+        'active_players': [
+            {
+                'player_id': '<player-id>',
+                'character_name': 'Seraphina',
+                'race': 'Elf',
+                'class': 'Ranger',
+                'level': 3,
+                'inventory': [],
+                'recent_actions': [],
+            }
+        ],
+        'triggered_segments': [],
+        'authored_segments': [],
+        'story_threads': [],
+        'emergent_memory': {
+            'entities': [],
+            'facts': [],
+            'threads': [],
+            'projection': {
+                'current_location': None,
+                'current_quest': None,
+                'rolling_summary': '',
+            },
+        },
+        'recent_turns': [],
+        'recent_log': [],
+        'pending_checks': [],
+    }

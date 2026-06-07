@@ -28,6 +28,8 @@ def app_runtime(tmp_path, monkeypatch):
     import aidm_server.main as main_module
     main_module = importlib.reload(main_module)
 
+    import aidm_server.turn_engine as turn_engine_module
+    turn_engine_module = importlib.reload(turn_engine_module)
     import aidm_server.blueprints.socketio_events as socketio_events_module
     socketio_events_module = importlib.reload(socketio_events_module)
 
@@ -45,6 +47,7 @@ def app_runtime(tmp_path, monkeypatch):
         'modules': {
             'main': main_module,
             'socketio_events': socketio_events_module,
+            'turn_engine': turn_engine_module,
         },
     }
 

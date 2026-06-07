@@ -1,0 +1,392 @@
+#!/usr/bin/env node
+
+const { spawn } = require('node:child_process')
+const fs = require('node:fs')
+const http = require('node:http')
+const net = require('node:net')
+const os = require('node:os')
+const path = require('node:path')
+const { chromium, expect } = require('@playwright/test')
+
+const REPO_ROOT = path.resolve(__dirname, '..', '..')
+const FRONTEND_ROOT = path.resolve(__dirname, '..')
+const PYTHON = process.env.PYTHON || path.join(REPO_ROOT, '.venv', 'bin', 'python')
+const SMOKE_TIMEOUT_MS = Number(process.env.AIDM_BROWSER_SMOKE_TIMEOUT_MS || 90_000)
+
+const children = new Set()
+let smokeTempDir = null
+
+function log(message) {
+  process.stdout.write(`[browser-smoke] ${message}\n`)
+}
+
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address ? address.port : null
+      server.close(() => {
+        if (port) resolve(port)
+        else reject(new Error('Could not allocate a local port.'))
+      })
+    })
+  })
+}
+
+function spawnManaged(command, args, options) {
+  const child = spawn(command, args, {
+    ...options,
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  children.add(child)
+  child.stdout.on('data', (chunk) => process.stdout.write(chunk))
+  child.stderr.on('data', (chunk) => process.stderr.write(chunk))
+  child.once('exit', () => children.delete(child))
+  return child
+}
+
+function stopManaged(child) {
+  if (!child || child.killed) return
+  try {
+    if (process.platform === 'win32') {
+      child.kill('SIGTERM')
+    } else {
+      process.kill(-child.pid, 'SIGTERM')
+    }
+  } catch {
+    child.kill('SIGTERM')
+  }
+}
+
+function cleanupTempDir() {
+  if (!smokeTempDir) return
+  fs.rmSync(smokeTempDir, { recursive: true, force: true })
+  smokeTempDir = null
+}
+
+async function shutdown() {
+  for (const child of [...children]) {
+    stopManaged(child)
+  }
+  cleanupTempDir()
+}
+
+process.once('exit', () => {
+  for (const child of [...children]) {
+    stopManaged(child)
+  }
+  cleanupTempDir()
+})
+process.once('SIGINT', async () => {
+  await shutdown()
+  process.exit(130)
+})
+process.once('SIGTERM', async () => {
+  await shutdown()
+  process.exit(143)
+})
+
+async function waitForHttp(url, label) {
+  const startedAt = Date.now()
+  let lastError = ''
+  while (Date.now() - startedAt < SMOKE_TIMEOUT_MS) {
+    try {
+      const response = await fetch(url)
+      if (response.ok) return response
+      lastError = `${response.status} ${response.statusText}`
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`Timed out waiting for ${label}: ${lastError}`)
+}
+
+async function waitForSessionLog(baseUrl, sessionId, predicate) {
+  const startedAt = Date.now()
+  let lastPayload = null
+  while (Date.now() - startedAt < 30_000) {
+    const response = await fetch(`${baseUrl}/api/sessions/${sessionId}/log?limit=200`)
+    if (response.ok) {
+      const payload = await response.json()
+      lastPayload = payload
+      const match = predicate(payload.entries || [])
+      if (match) return match
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`Timed out waiting for session log update: ${JSON.stringify(lastPayload)}`)
+}
+
+async function waitForRouteIds(page) {
+  const startedAt = Date.now()
+  let lastUrl = ''
+  let lastPlayerId = ''
+  while (Date.now() - startedAt < 20_000) {
+    lastUrl = page.url()
+    const url = new URL(lastUrl)
+    const campaignId = Number(url.searchParams.get('campaign'))
+    const sessionId = Number(url.searchParams.get('session'))
+    lastPlayerId = await page.evaluate(() => localStorage.getItem('aidm:selectedPlayerId') || '')
+    const playerId = Number(url.searchParams.get('player') || lastPlayerId)
+    if (campaignId > 0 && sessionId > 0 && playerId > 0) {
+      return { campaignId, sessionId, playerId }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new Error(`Timed out waiting for selected route IDs: ${lastUrl} player=${lastPlayerId || 'none'}`)
+}
+
+async function runBrowserFlow(frontendUrl, backendUrl) {
+  const browser = await chromium.launch()
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  const consoleErrors = []
+
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text())
+  })
+  page.on('pageerror', (error) => {
+    consoleErrors.push(error.message)
+  })
+
+  await page.goto(frontendUrl, { waitUntil: 'domcontentloaded' })
+  await page.locator('.prototype-shell').waitFor({ state: 'visible', timeout: 20_000 })
+
+  await expect(page).toHaveTitle(/AI-DM/)
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'Add campaign' }).click()
+  const createCampaignDialog = page.getByRole('dialog', { name: 'Create New Campaign' })
+  await expect(createCampaignDialog).toBeVisible()
+  await createCampaignDialog.getByLabel('Campaign Name').fill('Browser Smoke Campaign')
+  await createCampaignDialog.getByLabel('Description').fill('Created through the browser smoke UI.')
+  await createCampaignDialog.getByLabel('New World Name').fill('Browser Smoke World')
+  await createCampaignDialog.getByRole('button', { name: 'Create Campaign', exact: true }).click()
+  await expect(createCampaignDialog).toBeHidden({ timeout: 15_000 })
+  await expect(page.locator('.session-header').getByText('Browser Smoke Campaign')).toBeVisible()
+
+  const joinCampaignDialog = page.locator('.character-join-dialog')
+  const joinCampaignDialogVisible = await joinCampaignDialog
+    .waitFor({ state: 'visible', timeout: 10_000 })
+    .then(() => true)
+    .catch(() => false)
+  if (joinCampaignDialogVisible) {
+    await joinCampaignDialog.getByRole('button', { name: 'Create Character' }).click()
+  }
+
+  const createCharacterDialog = page.locator('.player-edit-dialog')
+  const createCharacterDialogVisible = await createCharacterDialog
+    .waitFor({ state: 'visible', timeout: 10_000 })
+    .then(() => true)
+    .catch(() => false)
+  if (createCharacterDialogVisible) {
+    await createCharacterDialog.getByLabel('Player Name').fill('Browser Smoke Player')
+    await createCharacterDialog.getByLabel('Character Name').fill('Browser Smoke Hero')
+    await createCharacterDialog.getByLabel('Race').fill('Human')
+    await createCharacterDialog.getByLabel('Class').fill('Wizard')
+    await createCharacterDialog.getByRole('button', { name: 'Create Character' }).click()
+    await expect(createCharacterDialog).toBeHidden({ timeout: 15_000 })
+    await expect(page.locator('.right-inspector').getByRole('heading', { name: 'Browser Smoke Hero' })).toBeVisible({ timeout: 15_000 })
+  } else {
+    await page.getByRole('button', { name: 'Create player' }).click()
+    await expect(page.locator('.right-inspector').getByText('New Adventurer')).toBeVisible({ timeout: 15_000 })
+  }
+
+  await page.locator('.empty-action-card').getByRole('button', { name: 'Start session' }).click()
+  await expect(page.getByRole('heading', { name: /Session \d+/i })).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('.session-list .session-card.active')).toContainText('Session')
+  await expect(page.getByLabel(/Your Action/i)).toBeVisible()
+  await expect(page.locator('.composer-tools').getByRole('button', { name: /Roll/i })).toBeVisible()
+  const selectedIds = await waitForRouteIds(page)
+
+  await page.locator('.composer-tools').getByRole('button', { name: /Roll/i }).click()
+  const diceDialog = page.getByRole('dialog', { name: /Rolling dice|Landed|Sending roll/i })
+  await expect(diceDialog).toBeVisible({ timeout: 15_000 })
+  await expect(diceDialog).toContainText('D20')
+  await diceDialog.getByRole('button', { name: 'Close dice roller' }).click()
+  await expect(diceDialog).toBeHidden()
+  await page.getByRole('button', { name: 'Action mode' }).click()
+
+  const inspectorTabs = page.getByRole('tablist', { name: 'Inspector panels' })
+  await inspectorTabs.getByRole('tab', { name: 'Map' }).click()
+  await page.getByLabel('Map title').fill('Browser Smoke Map')
+  await page.getByLabel('Map description').fill('Smoke route and gatehouse notes.')
+  await page.getByRole('button', { name: 'Create map details' }).click()
+  await expect(page.locator('.map-segment').getByText('Browser Smoke Map')).toBeVisible({ timeout: 15_000 })
+  await page.getByLabel('Segment title').fill('Smoke Gate')
+  await page.getByLabel('Segment description').fill('The gatehouse is the active approach.')
+  await page.getByLabel('Trigger condition').fill('When the party crosses the smoke line.')
+  await page.getByLabel('Tags').fill('gate, smoke')
+  await page.getByRole('button', { name: 'Add segment' }).click()
+  await expect(page.locator('.segment-list').getByText('Smoke Gate')).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('.map-meta-column').getByText(/Smoke Gate/)).toBeVisible()
+
+  const ttsOnButton = page.getByRole('button', { name: 'Turn TTS on' })
+  if (await ttsOnButton.isVisible()) {
+    await ttsOnButton.click()
+    await expect(page.locator('.rail-error-history li p')).toContainText('Deepgram TTS is not configured')
+  }
+
+  const actionInput = page.getByLabel(/Your Action/i)
+  await actionInput.fill('I inspect the smoke-lit archway.')
+  await expect(actionInput).toHaveValue('I inspect the smoke-lit archway.')
+  const sendButton = page.locator('.send-button')
+  await expect(sendButton).toBeEnabled()
+  await sendButton.click()
+  const dmEntry = await waitForSessionLog(backendUrl, selectedIds.sessionId, (entries) =>
+    entries.find(
+      (entry) =>
+        entry.entry_type === 'dm' &&
+        typeof entry.message === 'string' &&
+        entry.metadata?.action_intent?.text === 'I inspect the smoke-lit archway.',
+    ),
+  )
+  await page.getByRole('tab', { name: 'DM Response' }).click()
+  const renderedDmText = dmEntry.message.replace(/^DM:\s*/i, '')
+  await expect(page.locator('.dm-response-card.expanded .response-copy')).toContainText(
+    renderedDmText.slice(0, 48),
+    { timeout: 15_000 },
+  )
+
+  await page.getByRole('button', { name: 'Session menu' }).click()
+  await page.getByRole('menuitem', { name: 'Delete session' }).click()
+  await expect(page.getByRole('dialog', { name: 'Delete Session' })).toBeVisible()
+  await page.getByRole('button', { name: 'Delete Session' }).click()
+  await expect(page.getByRole('heading', { name: /No session selected/i })).toBeVisible({ timeout: 15_000 })
+
+  const importPath = path.join(smokeTempDir, 'browser-smoke-session-import.json')
+  fs.writeFileSync(
+    importPath,
+    JSON.stringify(
+      {
+        exportedAt: new Date().toISOString(),
+        selectedIds: {
+          campaignId: selectedIds.campaignId,
+          sessionId: selectedIds.sessionId,
+          playerId: selectedIds.playerId,
+        },
+        selectedSession: {
+          display_name: 'Imported Smoke Session',
+          state_snapshot: {},
+        },
+        sessionState: {
+          current_location: 'Imported Smoke Hall',
+          current_quest: 'Verify import flow',
+          rolling_summary: 'The browser smoke restored this session from JSON.',
+          active_segments: [],
+          memory_snippets: [],
+        },
+        logEntries: [
+          {
+            message: 'Imported smoke log entry',
+            entry_type: 'dm',
+            metadata: { source: 'browser-smoke' },
+            timestamp: new Date().toISOString(),
+          },
+        ],
+        turnEvents: [],
+      },
+      null,
+      2,
+    ),
+  )
+  await page.getByLabel('Import session file').setInputFiles(importPath)
+  await expect(page.getByRole('heading', { name: /Imported Smoke Session/i })).toBeVisible({
+    timeout: 15_000,
+  })
+  const importedIds = await waitForRouteIds(page)
+  await waitForSessionLog(backendUrl, importedIds.sessionId, (entries) =>
+    entries.find(
+      (entry) =>
+        entry.entry_type === 'dm' &&
+        typeof entry.message === 'string' &&
+        entry.message.includes('Imported smoke log entry'),
+    ),
+  )
+  await expect(page.locator('.turn-feed')).toContainText('Imported smoke log entry', {
+    timeout: 15_000,
+  })
+
+  await page.getByRole('button', { name: 'Session menu' }).click()
+  await page.getByRole('menuitem', { name: 'Delete session' }).click()
+  await expect(page.getByRole('dialog', { name: 'Delete Session' })).toBeVisible()
+  await page.getByRole('button', { name: 'Delete Session' }).click()
+  await expect(page.getByRole('heading', { name: /No session selected/i })).toBeVisible({ timeout: 15_000 })
+
+  await browser.close()
+  if (consoleErrors.length) {
+    throw new Error(`Browser console errors: ${consoleErrors.join(' | ')}`)
+  }
+}
+
+async function main() {
+  if (!fs.existsSync(PYTHON)) {
+    throw new Error(`Missing Python executable: ${PYTHON}`)
+  }
+
+  const backendPort = await getFreePort()
+  const frontendPort = await getFreePort()
+  const backendUrl = `http://127.0.0.1:${backendPort}`
+  const frontendUrl = `http://127.0.0.1:${frontendPort}`
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aidm-browser-smoke-'))
+  smokeTempDir = tempDir
+  const dbPath = path.join(tempDir, 'browser-smoke.sqlite')
+
+  log(`starting isolated backend on ${backendUrl}`)
+  const backend = spawnManaged(
+    PYTHON,
+    ['-m', 'aidm_server.deploy_bootstrap', '--host', '127.0.0.1', '--port', String(backendPort)],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        PYTHONPATH: REPO_ROOT,
+        FLASK_APP: 'aidm_server.main:create_app',
+        AIDM_ENV: 'test',
+        AIDM_DATABASE_URI: `sqlite:///${dbPath}`,
+        AIDM_AUTO_CREATE_SCHEMA: 'true',
+        AIDM_LLM_PROVIDER: 'fallback',
+        AIDM_LLM_MODEL: 'deterministic-v1',
+        AIDM_LLM_FALLBACK_MODELS: '',
+        AIDM_AUTH_REQUIRED: 'false',
+        AIDM_TELEMETRY_ENABLED: 'false',
+        AIDM_SOCKETIO_ASYNC_MODE: 'threading',
+        AIDM_CORS_ALLOWLIST: '*',
+        AIDM_SOCKET_CORS_ALLOWLIST: '*',
+      },
+    },
+  )
+  await waitForHttp(`${backendUrl}/api/health`, 'backend health')
+
+  log(`starting frontend on ${frontendUrl}`)
+  const frontend = spawnManaged(
+    'npm',
+    ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(frontendPort), '--strictPort'],
+    {
+      cwd: FRONTEND_ROOT,
+      env: {
+        ...process.env,
+        VITE_AIDM_API_BASE_URL: backendUrl,
+      },
+    },
+  )
+  await waitForHttp(frontendUrl, 'frontend dev server')
+
+  log('running browser flow')
+  await runBrowserFlow(frontendUrl, backendUrl)
+
+  stopManaged(frontend)
+  stopManaged(backend)
+  cleanupTempDir()
+  log('passed: create campaign -> create player -> start session -> manage map/segments -> toggle TTS unavailable state -> send action -> receive DM response -> delete session -> import session -> delete imported session')
+}
+
+main()
+  .catch(async (error) => {
+    await shutdown()
+    console.error(`[browser-smoke][error] ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  })

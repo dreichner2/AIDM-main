@@ -1,32 +1,60 @@
 from __future__ import annotations
 
-import json
 import logging
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy import and_, or_
 
 from aidm_server.database import db
 from aidm_server.errors import error_response
-from aidm_server.models import Campaign, Map, World, safe_json_loads
-from aidm_server.validation import missing_fields, parse_json_body
+from aidm_server.models import Campaign, Map, World, safe_json_dumps
+from aidm_server.pagination import jsonify_page, limited_page
+from aidm_server.response_dtos import map_payload
+from aidm_server.validation import coerce_int, json_object, optional_text, parse_json_body, positive_int, required_text
+from aidm_server.workspace_access import (
+    current_workspace_id,
+    get_campaign as workspace_campaign,
+    get_campaign_map,
+    get_world as workspace_world,
+)
 
 
 logger = logging.getLogger(__name__)
 maps_bp = Blueprint('maps', __name__)
+MAP_TITLE_MAX_LENGTH = 120
+MAP_TEXT_MAX_LENGTH = 2000
 
 
 @maps_bp.route('', methods=['POST'])
 def create_map():
     payload = parse_json_body(request)
-    required = missing_fields(payload, ['title'])
-    if required:
-        return error_response('validation_error', 'Missing required fields.', 400, {'missing_fields': required})
+    if payload is None:
+        return error_response('validation_error', 'Expected JSON request body.', 400)
 
-    world_id = payload.get('world_id')
-    campaign_id = payload.get('campaign_id')
+    title, title_error = required_text(payload.get('title'), max_length=MAP_TITLE_MAX_LENGTH, field='title')
+    if title_error:
+        return error_response('validation_error', title_error, 400)
+    description, description_error = optional_text(
+        payload.get('description', ''),
+        max_length=MAP_TEXT_MAX_LENGTH,
+        field='description',
+    )
+    if description_error:
+        return error_response('validation_error', description_error, 400)
+    world_id, world_id_error = positive_int(payload.get('world_id'), field='world_id')
+    if world_id_error:
+        return error_response('validation_error', world_id_error, 400)
+    campaign_id, campaign_id_error = positive_int(payload.get('campaign_id'), field='campaign_id')
+    if campaign_id_error:
+        return error_response('validation_error', campaign_id_error, 400)
+    map_data, map_data_error = json_object(payload.get('map_data'), field='map_data', default={})
+    if map_data_error:
+        return error_response('validation_error', map_data_error, 400)
+    if world_id is None and campaign_id is None:
+        return error_response('validation_error', 'Map requires either world_id or campaign_id.', 400)
 
-    world = db.session.get(World, world_id) if world_id is not None else None
-    campaign = db.session.get(Campaign, campaign_id) if campaign_id is not None else None
+    world = workspace_world(world_id) if world_id is not None else None
+    campaign = workspace_campaign(campaign_id) if campaign_id is not None else None
 
     if world_id is not None and not world:
         return error_response('world_not_found', 'World not found.', 404)
@@ -38,14 +66,16 @@ def create_map():
             'Campaign does not belong to the provided world.',
             400,
         )
+    if campaign and world_id is None:
+        world_id = campaign.world_id
 
     try:
         new_map = Map(
             world_id=world_id,
             campaign_id=campaign_id,
-            title=payload['title'],
-            description=payload.get('description', ''),
-            map_data=json.dumps(payload.get('map_data', {})),
+            title=title,
+            description=description,
+            map_data=safe_json_dumps(map_data, {}),
         )
         db.session.add(new_map)
         db.session.commit()
@@ -60,53 +90,44 @@ def create_map():
 def list_maps():
     world_id = request.args.get('world_id', type=int)
     campaign_id = request.args.get('campaign_id', type=int)
+    before_id = coerce_int(request.args.get('before_id'))
+    limit = coerce_int(request.args.get('limit'))
 
-    query = Map.query
+    query = Map.query.outerjoin(Campaign, Map.campaign_id == Campaign.campaign_id).outerjoin(
+        World,
+        Map.world_id == World.world_id,
+    )
+    workspace_id = current_workspace_id()
+    query = query.filter(
+        or_(
+            Campaign.workspace_id == workspace_id,
+            and_(Map.campaign_id.is_(None), World.workspace_id == workspace_id),
+        )
+    )
     if world_id is not None:
-        world = db.session.get(World, world_id)
+        world = workspace_world(world_id)
         if not world:
             return error_response('world_not_found', 'World not found.', 404)
-        query = query.filter_by(world_id=world_id)
+        query = query.filter(Map.world_id == world_id)
     if campaign_id is not None:
-        campaign = db.session.get(Campaign, campaign_id)
+        campaign = workspace_campaign(campaign_id)
         if not campaign:
             return error_response('campaign_not_found', 'Campaign not found.', 404)
-        query = query.filter_by(campaign_id=campaign_id)
-
-    maps = query.order_by(Map.created_at.desc()).all()
-    return jsonify(
-        [
-            {
-                'map_id': m.map_id,
-                'world_id': m.world_id,
-                'campaign_id': m.campaign_id,
-                'title': m.title,
-                'description': m.description,
-                'map_data': safe_json_loads(m.map_data, {}),
-                'created_at': m.created_at.isoformat() if m.created_at else None,
-            }
-            for m in maps
-        ]
-    )
+        query = query.filter(Map.campaign_id == campaign_id)
+    if before_id is not None:
+        query = query.filter(Map.map_id < before_id)
+    query = query.order_by(Map.created_at.desc(), Map.map_id.desc())
+    maps = limited_page(query, limit=limit)
+    return jsonify_page(maps, payload_for=map_payload, cursor_for=lambda map_obj: map_obj.map_id)
 
 
 @maps_bp.route('/<int:map_id>', methods=['GET'])
 def get_map(map_id):
-    map_obj = db.session.get(Map, map_id)
+    map_obj = get_campaign_map(map_id)
     if not map_obj:
         return error_response('map_not_found', 'Map not found.', 404)
 
-    return jsonify(
-        {
-            'map_id': map_obj.map_id,
-            'world_id': map_obj.world_id,
-            'campaign_id': map_obj.campaign_id,
-            'title': map_obj.title,
-            'description': map_obj.description,
-            'map_data': safe_json_loads(map_obj.map_data, {}),
-            'created_at': map_obj.created_at.isoformat() if map_obj.created_at else None,
-        }
-    )
+    return jsonify(map_payload(map_obj))
 
 
 @maps_bp.route('/<int:map_id>', methods=['PUT', 'PATCH'])
@@ -115,15 +136,30 @@ def update_map(map_id):
     if payload is None:
         return error_response('validation_error', 'Expected JSON request body.', 400)
 
-    map_obj = db.session.get(Map, map_id)
+    map_obj = get_campaign_map(map_id)
     if not map_obj:
         return error_response('map_not_found', 'Map not found.', 404)
 
     try:
-        map_obj.title = payload.get('title', map_obj.title)
-        map_obj.description = payload.get('description', map_obj.description)
+        if 'title' in payload:
+            title, title_error = required_text(payload.get('title'), max_length=MAP_TITLE_MAX_LENGTH, field='title')
+            if title_error:
+                return error_response('validation_error', title_error, 400)
+            map_obj.title = title
+        if 'description' in payload:
+            description, description_error = optional_text(
+                payload.get('description'),
+                max_length=MAP_TEXT_MAX_LENGTH,
+                field='description',
+            )
+            if description_error:
+                return error_response('validation_error', description_error, 400)
+            map_obj.description = description
         if 'map_data' in payload:
-            map_obj.map_data = json.dumps(payload['map_data'])
+            map_data, map_data_error = json_object(payload['map_data'], field='map_data', default={})
+            if map_data_error:
+                return error_response('validation_error', map_data_error, 400)
+            map_obj.map_data = safe_json_dumps(map_data, {})
         db.session.commit()
         return jsonify({'message': 'Map updated successfully'}), 200
     except Exception as exc:

@@ -802,3 +802,593 @@ const [baseUrl] = useState(() =>
 	•	Affected area/files: `aidm_frontend/package.json`, `aidm_frontend/src/App.tsx`, `docs/release_checklist.md`
 	•	Suggested first step: Add Vitest for helper/state functions, then a Playwright smoke test for one fallback turn.
 	•	Related finding title: No Frontend Test Script Exists For The Complex React Surface
+
+---
+
+## Review Addendum - 2026-06-06
+
+This addendum was appended after a fresh six-pass review of the current repository state. It intentionally avoids repeating earlier findings that have already been fixed or narrowed by the current implementation.
+
+### Pass 1 - Architecture & System Design
+
+[Priority: Critical] Response Completion Is Not The Same As Durable Turn Completion
+
+* File/Module: `aidm_server/turn_engine.py`, `aidm_frontend/src/useSessionSocket.ts`, `aidm_frontend/src/App.tsx`
+* Category: Architecture / Bug
+* Current Implementation: `TurnEngine.process(...)` holds the per-session coordinator only while narration runs. `_narrate_turn(...)` emits `dm_response_end`, then `_process_serialized(...)` starts `_background_post_turn(...)`; the background path later saves the DM response, enqueues/applies canon work, and emits `session_log_update`. The React hook clears `sendPending` immediately on `dm_response_end`, and `submitAction(...)` does not require a saved/canon-applied turn status before sending the next message.
+* Issue & Why It Matters: A user can submit the next action after seeing the streamed response but before the previous DM response has been persisted into `dm_turns`, `turn_events`, `session_log_entries`, or session projection state. The next context build can miss the immediately previous turn, and a background persistence failure after the user continues is hard to reconcile.
+* Recommended Fix: Make turn lifecycle state explicit and server-owned. At minimum, keep the per-session coordinator locked until the DM response event and `DmTurn.dm_output` are durable, then emit a distinct `saved` state. Decide separately whether canon may lag. The client should keep the composer disabled or show a guarded "saving" state until the server confirms the durable stage.
+* Difficulty: Hard
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm whether gameplay may intentionally continue before canon projection finishes; even if canon may lag, the DM response itself should be durable before accepting the next turn.
+
+[Priority: High] Workspace Read Models Are Built From Unbounded Hydration Instead Of Query-Bounded Projections
+
+* File/Module: `aidm_server/services/workspace.py`, `aidm_server/response_dtos.py`, `aidm_server/blueprints/campaigns.py`
+* Category: Architecture / Performance
+* Current Implementation: `campaign_workspace_payload(...)` loads all sessions, players, maps, and segments for a campaign, then each `campaign_payload(...)` and `session_payload(...)` performs additional summary queries. `list_campaigns()` also renders every campaign through `campaign_payload(...)`.
+* Issue & Why It Matters: DTO helpers are doing read-model orchestration and aggregate query work. As campaign/session counts grow, the API boundary becomes difficult to reason about because a "simple payload" can issue many hidden queries and hydrate large collections.
+* Recommended Fix: Introduce explicit read-model query functions for root campaign cards and campaign workspace. Use grouped aggregate queries for counts/latest activity, keyset pagination for long lists, and lightweight DTO builders that only format already-selected data.
+* Difficulty: Moderate
+* Requires Further Investigation: No
+
+[Priority: Medium] Maps Can Be Created Without Any Owning World Or Campaign
+
+* File/Module: `aidm_server/models.py`, `aidm_server/blueprints/maps.py`
+* Category: Architecture / Data Safety
+* Current Implementation: `Map.world_id` and `Map.campaign_id` are both nullable. `create_map()` validates provided IDs, but does not require at least one owner before inserting:
+```py
+world_id, world_id_error = positive_int(payload.get('world_id'), field='world_id')
+campaign_id, campaign_id_error = positive_int(payload.get('campaign_id'), field='campaign_id')
+...
+new_map = Map(world_id=world_id, campaign_id=campaign_id, ...)
+```
+* Issue & Why It Matters: A valid API request can create an orphan map that will not appear in campaign- or world-filtered workflows. That creates invisible data and makes cleanup/import/export semantics ambiguous.
+* Recommended Fix: Enforce ownership at the API and database layer. Require `campaign_id` or `world_id`, and if both are present keep the existing campaign/world consistency check. Add a check constraint where supported or a migration-level invariant test.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+[Priority: Medium] Runtime Provider Switching Is Process-Local Even When It Persists A File
+
+* File/Module: `aidm_server/blueprints/runtime_config.py`, `aidm_server/llm_providers.py`, `scripts/run_local_backend.sh`
+* Category: Architecture / Configuration
+* Current Implementation: `/api/llm/config` mutates `os.environ`, `current_app.config`, and optionally `.env.local`. Provider instances are recreated from process-local config in `get_provider()`.
+* Issue & Why It Matters: The API implies the active runtime has changed globally, but in a multi-process server only the process handling the request sees the in-memory config change. Persisting `.env.local` affects future starts, not already-running workers. This is acceptable for a single local dev process, but fragile if the UI is reused against a long-running or multi-worker backend.
+* Recommended Fix: Keep this endpoint explicitly local-only in docs/UI copy, and move active provider settings into a single runtime settings store if live switching is expected beyond one process. Include a worker-broadcast or restart-required response when multiple workers are supported.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm whether hosted/beta deployments will ever expose `/api/llm/config`; if not, document it as a local-only tool and keep it disabled outside local/test.
+
+### Pass 2 - Bugs, Robustness & Error Handling
+
+[Priority: High] Restoring A Campaign Does Not Restore Sessions Archived By Campaign Archive
+
+* File/Module: `aidm_server/blueprints/campaigns.py`, `aidm_server/services/session_lifecycle.py`
+* Category: Bug
+* Current Implementation: `archive_campaign()` sets the campaign to `archived` and bulk-updates all child sessions to `archived` with `deleted_at`. `restore_campaign()` only sets the campaign back to `active`; it does not update any child sessions.
+* Issue & Why It Matters: A restored campaign can appear empty because all of its sessions remain archived. Since there is no archive-source marker, the backend cannot distinguish sessions archived by the campaign action from sessions the user had already archived intentionally.
+* Recommended Fix: Add archive provenance before changing behavior, such as `archived_by_campaign_id` or archived metadata, then restore only sessions archived by that campaign-level operation. If product semantics should restore all child sessions, make that explicit and add regression tests.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm desired restore semantics for sessions that were already archived before the campaign was archived.
+
+[Priority: High] Session Start Idempotency Is Scan-Based And Not Atomic
+
+* File/Module: `aidm_server/blueprints/sessions.py`, `aidm_server/models.py`, `migrations/versions/`
+* Category: Bug / Robustness
+* Current Implementation: `_find_idempotent_session(...)` loads every session for a campaign, parses `state_snapshot`, and compares `snapshot["client_session_id"]`. The key is stored inside JSON text rather than a uniquely indexed column.
+* Issue & Why It Matters: Two concurrent retries with the same `client_session_id` can both miss each other and create duplicate sessions. The lookup also slows down as a campaign accumulates sessions because it cannot use an index.
+* Recommended Fix: Add a nullable `client_session_id` column to `sessions` and a unique constraint/index on `(campaign_id, client_session_id)` for non-null keys. On conflict, return the existing session. Keep reading the JSON key during a migration window if needed.
+* Difficulty: Moderate
+* Requires Further Investigation: No
+
+[Priority: Medium] Client Treats Failed Or Partial DM Streams As Successful Timeline Entries
+
+* File/Module: `aidm_server/turn_engine.py`, `aidm_frontend/src/useSessionSocket.ts`
+* Category: Bug / Robustness
+* Current Implementation: The server includes `ok=stream_error is None` in `dm_response_end_payload(...)`. The client registers `socket.on('dm_response_end', () => { ... })`, ignores the payload, clears `sendPending`, creates a normal synthetic DM entry, and may queue TTS for the partial text.
+* Issue & Why It Matters: If generation fails after some chunks, the UI can present a partial response as a completed turn. The later `turn_status` or persistence failure becomes secondary to a user-visible success state.
+* Recommended Fix: Accept and inspect the `dm_response_end` payload. For `ok: false`, mark the optimistic entry as failed/partial, suppress TTS, keep the composer guarded until a saved or failed status arrives, and show a retry/refresh path.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+[Priority: Medium] Ending A Session Drops Existing State Snapshot Metadata
+
+* File/Module: `aidm_server/blueprints/sessions.py`, `aidm_server/services/session_import.py`
+* Category: Bug / Data Safety
+* Current Implementation: `end_game_session()` replaces `session_obj.state_snapshot` with only `{"recap": ..., "ended_at": ...}`. Imported sessions and idempotently-started sessions can have existing snapshot metadata such as import provenance or `client_session_id`.
+* Issue & Why It Matters: Ending a session silently discards metadata that may be needed for auditing, troubleshooting imports, or preserving source-export context. It also makes the state snapshot contract harder to trust because unrelated lifecycle actions erase keys.
+* Recommended Fix: Merge recap fields into the existing metadata-cleaned snapshot instead of replacing it. Preserve import/source/idempotency metadata unless there is a specific reason to remove it.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+### Pass 3 - Security, Data Safety & Configuration
+
+[Priority: High] DeepSeek Provider Can Reuse An NVIDIA API Key Against The Official DeepSeek Endpoint
+
+* File/Module: `aidm_server/blueprints/runtime_config.py`, `aidm_server/llm_providers.py`, `aidm_server/provider_registry.py`, `scripts/run_local_backend.sh`
+* Category: Security / Configuration
+* Current Implementation: `provider_configured('deepseek')` returns true when `AIDM_NVIDIA_API_KEY` is present. `_apply_llm_runtime(...)`, `get_provider()`, and `scripts/run_local_backend.sh` also fall back from `AIDM_NVIDIA_API_KEY` to `AIDM_DEEPSEEK_API_KEY` for the `deepseek` provider, even though the provider catalog separates official `deepseek` from `deepseek-v4-pro` via `nvidia`.
+* Issue & Why It Matters: Selecting the official DeepSeek provider can send an NVIDIA bearer token to `https://api.deepseek.com/chat/completions`, or mark DeepSeek as configured when only NVIDIA credentials exist. This is a credential-boundary bug and makes provider diagnostics misleading.
+* Recommended Fix: Remove `AIDM_NVIDIA_API_KEY` fallback from the official DeepSeek provider path. If DeepSeek via NVIDIA is desired, require provider `nvidia` with model `deepseek-v4-pro`. Add tests covering `provider_configured`, `/api/llm/config`, and `get_provider()` credential selection.
+* Difficulty: Easy
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Check whether existing local `.env.local` setups rely on this fallback and provide a migration note for those users.
+
+[Priority: High] API Rate Limiting And Metrics Use Raw Request Paths As Bucket Keys
+
+* File/Module: `aidm_server/main.py`, `aidm_server/rate_limiter.py`, `aidm_server/telemetry.py`
+* Category: Security / Performance
+* Current Implementation: `before_request` records metrics with `tags={'path': request.path, ...}` and builds the limiter key as `f'{client_ip}:{request.path}'`.
+* Issue & Why It Matters: Paths containing IDs create separate metric series and separate rate-limit buckets for every session/campaign/log URL. A client can spread requests across many resource IDs to bypass an intended per-client or per-route limit, and telemetry cardinality grows with user data.
+* Recommended Fix: Use normalized route templates from `request.url_rule.rule` or endpoint names for rate-limit buckets and metric tags. Keep raw paths only in structured event payloads where needed for debugging.
+* Difficulty: Moderate
+* Requires Further Investigation: No
+
+[Priority: Medium] Admin Authorization Is Cached In A Flask Session After One Bearer Success
+
+* File/Module: `aidm_server/blueprints/admin.py`, `aidm_server/auth.py`
+* Category: Security
+* Current Implementation: `_admin_request_authorized()` returns true whenever `session['aidm_admin_authorized']` is set. A single valid bearer request sets that cookie-backed flag, and subsequent admin requests do not re-check the current bearer token list.
+* Issue & Why It Matters: Token rotation or token removal does not immediately revoke existing admin browser sessions. For a local tool this may be fine, but for any exposed beta/admin deployment it weakens revocation semantics.
+* Recommended Fix: Either require a valid bearer token on every admin request, or store a short-lived session with an issued-at timestamp and invalidate it when token configuration changes. Add an explicit logout/clear-admin-session route if session caching is kept.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm whether Flask-Admin is ever enabled in auth-required hosted environments; if it is strictly local, document the local-only revocation tradeoff.
+
+[Priority: Medium] Session Import Bounds Top-Level Events But Not Nested Session-State Lists
+
+* File/Module: `aidm_server/services/session_import.py`, `aidm_server/response_dtos.py`, `aidm_server/llm_context.py`
+* Category: Security / Data Safety
+* Current Implementation: Session import caps `turnEvents`, `logEntries`, and individual text fields, but persists `active_segments` and `memory_snippets` by dumping `_list(...)` directly into `SessionState`.
+* Issue & Why It Matters: A crafted import can pack large or deeply nested arrays into session state within the request-size limit. Those arrays are later returned by state endpoints and partially considered during context building, creating avoidable memory, payload, and UI costs.
+* Recommended Fix: Add explicit maximum item counts, per-item shape validation, and per-string length limits for imported `active_segments` and `memory_snippets`. Reject or truncate with an import warning count in the response.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+### Pass 4 - Performance & Efficiency
+
+[Priority: High] Campaign And Session DTOs Perform Multiple Aggregate Queries Per Item
+
+* File/Module: `aidm_server/response_dtos.py`, `aidm_server/blueprints/campaigns.py`, `aidm_server/services/workspace.py`
+* Category: Performance
+* Current Implementation: `campaign_session_summary(...)` runs separate queries for session count, latest session, latest log, latest state, latest turn created, and latest turn completed. `session_payload(...)` also queries session state, latest log, latest turn timestamps, and turn count per session.
+* Issue & Why It Matters: Rendering root campaigns or a campaign workspace scales as many queries per visible campaign/session. On a campaign with many sessions, refreshes can become slow and database-heavy even before any LLM work starts.
+* Recommended Fix: Replace per-item summary queries with grouped aggregate queries keyed by campaign/session ID. For workspace lists, preload session state and aggregate turn/log counts in one or a small fixed number of queries.
+* Difficulty: Moderate
+* Requires Further Investigation: No
+
+[Priority: Medium] SQLAlchemy Uses `NullPool` For Every Database Backend
+
+* File/Module: `aidm_server/database.py`
+* Category: Performance / Scalability
+* Current Implementation: `init_db()` always sets `SQLALCHEMY_ENGINE_OPTIONS` to `{'poolclass': NullPool, 'connect_args': {'check_same_thread': False, 'timeout': 30}}`.
+* Issue & Why It Matters: `NullPool` can be reasonable for local SQLite, but for PostgreSQL/MySQL-style deployments it opens and closes a database connection for each use and bypasses normal pooling. SQLite-only `connect_args` are also being applied globally.
+* Recommended Fix: Apply `NullPool`, `check_same_thread`, and SQLite timeout options only when the resolved database URI is SQLite. Use SQLAlchemy defaults or configurable `pool_size`/`max_overflow` for non-SQLite backends.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+[Priority: Medium] Full List And Workspace Endpoints Lack Pagination Or Field Selection
+
+* File/Module: `aidm_server/blueprints/worlds.py`, `aidm_server/blueprints/maps.py`, `aidm_server/blueprints/segments.py`, `aidm_server/blueprints/players.py`, `aidm_server/services/workspace.py`
+* Category: Performance / Scalability
+* Current Implementation: `list_worlds()`, `list_maps()`, `list_segments()`, `get_players()`, `list_campaign_session_payloads()`, and `campaign_workspace_payload()` all materialize full result sets with `.all()`.
+* Issue & Why It Matters: These endpoints are fine for small local campaigns, but they become progressively slower and larger as the app accumulates worlds, maps, authored segments, players, and session history. The frontend has no way to ask for only the first page or omit heavy sections.
+* Recommended Fix: Add consistent `limit` and cursor parameters to list endpoints, and let `/workspace` accept section/limit options such as `?sessions_limit=50&include=players,maps,segments`. Keep current defaults for compatibility but return `has_more` metadata.
+* Difficulty: Moderate
+* Requires Further Investigation: No
+
+[Priority: Medium] Database Rate Limiter Runs Global Garbage Collection On Every Hit
+
+* File/Module: `aidm_server/rate_limiter.py`, `aidm_server/models.py`
+* Category: Performance / Robustness
+* Current Implementation: `DatabaseRateLimitStore.hit(...)` opens a transaction, deletes every `rate_limit_events` row older than the current window, counts the current bucket, then inserts the new event.
+* Issue & Why It Matters: Under load, every API request can trigger a global delete scan before counting its own bucket. Concurrent count-then-insert operations can also allow brief over-admission on databases with normal concurrent transactions.
+* Recommended Fix: Move cleanup to periodic/batched maintenance, or delete only occasionally per process. For stronger limits, use atomic bucket counters with expiry windows or database-specific upsert/locking semantics.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm whether the database-backed limiter is expected to protect multi-worker deployments; if yes, add concurrency tests against the target database.
+
+[Priority: Low] Segment Activation Sends One PATCH Per Segment From The Client
+
+* File/Module: `aidm_frontend/src/App.tsx`, `aidm_server/blueprints/segments.py`
+* Category: Performance / API Design
+* Current Implementation: `activateSegment(...)` loops through all loaded segments, PATCHing the selected segment on and every currently triggered segment off one request at a time.
+* Issue & Why It Matters: Activating a single segment can fan out into many sequential network requests. This is slow and leaves partial state if the loop fails mid-way.
+* Recommended Fix: Add a bulk endpoint such as `POST /api/segments/activate` with `{campaign_id, segment_id, exclusive: true}` and perform the state change in one transaction.
+* Difficulty: Moderate
+* Requires Further Investigation: No
+
+### Pass 5 - Maintainability, Readability & Cleanup
+
+[Priority: Medium] TypeScript API Contracts Check Keys But Not Runtime Nullability
+
+* File/Module: `aidm_server/api_type_contract.py`, `aidm_server/response_dtos.py`, `tests/test_api_type_contract.py`, `aidm_frontend/src/apiContract.generated.ts`
+* Category: Maintainability / Testing
+* Current Implementation: Contracts declare fields such as `World.description`, `Campaign.description`, `Player.race`, `Player.class_`, `MapItem.description`, and `CampaignSegment.description/trigger_condition/tags` as `string`. The ORM columns and DTOs can return `None`, and the contract test only compares object keys.
+* Issue & Why It Matters: The generated frontend types can be "current" while still lying about nullable values. Future strict frontend code may call string methods on `null` and pass typecheck.
+* Recommended Fix: Update the contract to use `string | null` where DTOs can return null. Extend `test_api_type_contract.py` to assert representative value types/nullability, or generate the contract from a schema that encodes nullability.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+[Priority: Medium] Request Validation Helpers Are Duplicated Across Blueprints
+
+* File/Module: `aidm_server/validation.py`, `aidm_server/blueprints/campaigns.py`, `aidm_server/blueprints/players.py`
+* Category: Maintainability
+* Current Implementation: `validation.py` provides `optional_text(...)` and `required_text(...)`, but campaigns and players define local versions with slightly different defaults and behavior.
+* Issue & Why It Matters: Validation rules drift by endpoint. A future change to max-length handling, whitespace trimming, null behavior, or error wording can be fixed in one place while similar endpoints remain inconsistent.
+* Recommended Fix: Move endpoint-specific defaults into calls to the shared validation helpers, or add named wrappers in `validation.py` for common text-field patterns. Delete the local duplicates after endpoint regression tests pass.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+[Priority: Medium] `App.tsx` Still Owns Too Many Async Workflows
+
+* File/Module: `aidm_frontend/src/App.tsx`, `aidm_frontend/src/useWorkspaceStore.ts`, `aidm_frontend/src/useSessionSocket.ts`, `aidm_frontend/src/useTtsNarration.ts`
+* Category: Maintainability
+* Current Implementation: `App.tsx` is over 3,000 lines and still owns root refresh, workspace refresh, session load, import/export, runtime switching, campaign/session/player dialogs, map/segment writes, socket submission, and selection side effects.
+* Issue & Why It Matters: The component is no longer a single blob, but it is still the integration point for many unrelated async state machines. Small changes to one workflow can unintentionally affect selection, optimistic turns, TTS, or workspace cache state.
+* Recommended Fix: Extract domain hooks for `useWorkspaceQueries`, `useCampaignActions`, `useSessionActions`, and `useRuntimeSettings`, each with unit tests around request ordering and stale-response handling. Keep `App.tsx` focused on composition and layout state.
+* Difficulty: Moderate
+* Requires Further Investigation: No
+
+[Priority: Low] Emergent Memory Wrapper Mutates Constants In Another Module At Call Time
+
+* File/Module: `aidm_server/emergent_memory.py`, `aidm_server/canon_retrieval.py`
+* Category: Maintainability
+* Current Implementation: `emergent_memory.build_emergent_context(...)` assigns `EMERGENT_*_CANDIDATE_LIMIT` values into the imported `canon_retrieval` module before delegating to `canon_retrieval.build_emergent_context(...)`.
+* Issue & Why It Matters: Runtime mutation of module-level constants makes tests and concurrent calls harder to reason about. A caller changing limits affects global retrieval behavior, not just one call.
+* Recommended Fix: Pass candidate limits as explicit parameters into `canon_retrieval.build_emergent_context(...)`, or move the constants to a shared immutable configuration object.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+### Pass 6 - Testing, Documentation & Developer Experience
+
+[Priority: High] CI Does Not Run The Existing Secret Scan Or Production Dependency Audit
+
+* File/Module: `.github/workflows/ci.yml`, `scripts/scan_secrets.py`, `tests/test_secret_scan.py`, `aidm_frontend/package.json`, `docs/release_checklist.md`
+* Category: Security / Developer Experience
+* Current Implementation: CI runs backend pytest and frontend test/build/bundle/browser-smoke. The Makefile has `make secrets`, tests cover `scripts/scan_secrets.py`, and the release checklist asks for `npm audit --omit=dev`, but neither check is enforced in GitHub Actions.
+* Issue & Why It Matters: Secret scanning and dependency audit are manual release chores. A leaked key pattern or production npm advisory can land in a PR even though local scripts already exist to catch them.
+* Recommended Fix: Add CI steps for `python scripts/scan_secrets.py` and `cd aidm_frontend && npm audit --omit=dev` with an explicit audit policy. Consider `pip-audit` once Python dependency policy is defined.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+[Priority: Medium] README Migration Chain Is Stale
+
+* File/Module: `README.md`, `migrations/versions/`
+* Category: Documentation / Developer Experience
+* Current Implementation: The README migration chain lists `0001` through `0005_turn_event_spine`. The repository now has migrations through `0009_canon_jobs`, including metadata/status indexes, rate-limit events, session delete semantics, and canon jobs.
+* Issue & Why It Matters: Developers using the README as a schema map will miss four migrations and newer tables. That is especially risky for production bootstrap, backup/restore checks, and debugging canon job behavior.
+* Recommended Fix: Update the README chain through `0009`, or replace the static list with a generated/current reference to `migrations/versions/` plus a short table of major schema additions.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+[Priority: Medium] Projection Repair CLI Creates Missing Schema Instead Of Enforcing Migrations
+
+* File/Module: `scripts/reproject_session.py`, `aidm_server/database.py`, `aidm_server/reprojection.py`
+* Category: Developer Experience / Data Safety
+* Current Implementation: `scripts/reproject_session.py` loads runtime env, creates the app, and calls `ensure_schema(app)` before repairing projections.
+* Issue & Why It Matters: A repair tool should operate on the intended migrated database. Calling `db.create_all()` can hide a missing migration state or create partial tables in the wrong environment, which conflicts with the stricter migration-first bootstrap path.
+* Recommended Fix: Remove unconditional `ensure_schema(app)` from the repair CLI. Require migrations to be applied first, or add an explicit `--create-schema-for-local-dev` flag that is rejected when `AIDM_ENV=production`.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+[Priority: Medium] High-Risk Concurrency Paths Lack Regression Coverage
+
+* File/Module: `tests/test_canon_jobs.py`, `tests/test_sessions_endpoints.py`, `tests/test_rate_limiter.py`, `aidm_server/canon_jobs.py`, `aidm_server/blueprints/sessions.py`, `aidm_server/rate_limiter.py`
+* Category: Testing
+* Current Implementation: Tests cover normal canon job success/failure/retry, normal session idempotent replay, and rate limiter behavior. They do not simulate two workers claiming the same canon job, two simultaneous `/api/sessions/start` requests with the same idempotency key, or concurrent database-backed limiter hits.
+* Issue & Why It Matters: The riskiest failures here are race/order failures that unit tests with a single Flask app context will not expose. These paths affect duplicate sessions, duplicate canon application, and rate-limit enforcement under load.
+* Recommended Fix: Add concurrency-focused tests using independent SQLAlchemy sessions or multiprocessing/threading against a temporary file SQLite database, and run a subset against the intended production database if one is supported.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm which database backends and worker models are supported before choosing the exact locking/upsert assertions.
+
+[Priority: Low] Visual Smoke Exists But Is Not Part Of Automated CI
+
+* File/Module: `.github/workflows/ci.yml`, `aidm_frontend/scripts/visual-smoke.cjs`, `aidm_frontend/package.json`, `README.md`
+* Category: Testing / Developer Experience
+* Current Implementation: `npm run smoke:visual` exists and README documents it, but CI only runs the browser smoke script.
+* Issue & Why It Matters: Layout regressions, horizontal overflow, and screenshot-only UI breakage can pass CI even though the project already has a visual smoke tool designed to catch them.
+* Recommended Fix: Add a separate optional CI job for `npm run smoke:visual`, uploading screenshots on failure. If runtime is a concern, run it on pull requests that touch frontend files or nightly.
+* Difficulty: Easy
+* Requires Further Investigation: No
+
+### Highest-Impact Recommendations
+
+1. * Recommendation: Make turn durability a server-enforced lifecycle state before accepting the next action.
+   * Why it matters: Prevents continuity bugs where the next prompt misses the previous DM response or canon state.
+   * Affected area/files: `aidm_server/turn_engine.py`, `aidm_frontend/src/useSessionSocket.ts`, `aidm_frontend/src/App.tsx`
+   * Suggested first step: Keep the turn coordinator locked until `DmTurn.dm_output` and the DM response event are committed, then emit a `saved` status the client must observe before re-enabling input.
+   * Related finding title: Response Completion Is Not The Same As Durable Turn Completion
+
+2. * Recommendation: Fix provider credential boundaries.
+   * Why it matters: Avoids sending an NVIDIA credential to the official DeepSeek endpoint and makes runtime diagnostics trustworthy.
+   * Affected area/files: `aidm_server/blueprints/runtime_config.py`, `aidm_server/llm_providers.py`, `scripts/run_local_backend.sh`
+   * Suggested first step: Remove `AIDM_NVIDIA_API_KEY` fallback from the `deepseek` provider path and add credential-selection tests.
+   * Related finding title: DeepSeek Provider Can Reuse An NVIDIA API Key Against The Official DeepSeek Endpoint
+
+3. * Recommendation: Replace JSON-scanned session idempotency with a database-enforced key.
+   * Why it matters: Prevents duplicate sessions under retry/concurrency and speeds session start checks.
+   * Affected area/files: `aidm_server/blueprints/sessions.py`, `aidm_server/models.py`, `migrations/versions/`
+   * Suggested first step: Add `sessions.client_session_id` plus a unique `(campaign_id, client_session_id)` index for non-null values.
+   * Related finding title: Session Start Idempotency Is Scan-Based And Not Atomic
+
+4. * Recommendation: Normalize API rate-limit and telemetry tags to route templates.
+   * Why it matters: Prevents ID-spray rate-limit bypass and unbounded metric cardinality.
+   * Affected area/files: `aidm_server/main.py`, `aidm_server/rate_limiter.py`, `aidm_server/telemetry.py`
+   * Suggested first step: Replace `request.path` in limiter keys and metric tags with `request.url_rule.rule` or endpoint names.
+   * Related finding title: API Rate Limiting And Metrics Use Raw Request Paths As Bucket Keys
+
+5. * Recommendation: Build bounded read models for campaign/session summaries.
+   * Why it matters: Keeps common refresh paths fast as campaign history grows.
+   * Affected area/files: `aidm_server/response_dtos.py`, `aidm_server/services/workspace.py`, `aidm_server/blueprints/campaigns.py`
+   * Suggested first step: Create grouped aggregate queries for root campaign cards and workspace session summaries.
+   * Related finding title: Campaign And Session DTOs Perform Multiple Aggregate Queries Per Item
+
+6. * Recommendation: Align generated API contracts with real runtime nullability.
+   * Why it matters: Prevents frontend type confidence from masking null crashes.
+   * Affected area/files: `aidm_server/api_type_contract.py`, `aidm_server/response_dtos.py`, `tests/test_api_type_contract.py`, `aidm_frontend/src/apiContract.generated.ts`
+   * Suggested first step: Update nullable string fields and expand contract tests beyond key equality.
+   * Related finding title: TypeScript API Contracts Check Keys But Not Runtime Nullability
+
+7. * Recommendation: Add archive provenance for campaign-level session archival.
+   * Why it matters: Makes campaign restore predictable without resurrecting sessions the user deliberately archived earlier.
+   * Affected area/files: `aidm_server/blueprints/campaigns.py`, `aidm_server/services/session_lifecycle.py`, `migrations/versions/`
+   * Suggested first step: Store whether a session was archived by a campaign-level operation, then restore only those children.
+   * Related finding title: Restoring A Campaign Does Not Restore Sessions Archived By Campaign Archive
+
+8. * Recommendation: Move existing security and visual checks into CI.
+   * Why it matters: Turns documented/manual release checks into enforceable regressions.
+   * Affected area/files: `.github/workflows/ci.yml`, `scripts/scan_secrets.py`, `aidm_frontend/scripts/visual-smoke.cjs`, `aidm_frontend/package.json`
+   * Suggested first step: Add CI steps for secret scan and `npm audit --omit=dev`, then add a conditional or nightly visual smoke job.
+   * Related finding title: CI Does Not Run The Existing Secret Scan Or Production Dependency Audit
+
+---
+
+## Implementation Verification Addendum - 2026-06-06
+
+This addendum was appended after checking the existing suggestion set against the current repository. Duplicate and overlapping suggestions were grouped by implementation area during verification.
+
+Verification performed:
+- `.venv/bin/python -m pytest -q` passed: 244 tests.
+- `cd aidm_frontend && npm test` passed: typecheck, lint, and 33 Vitest tests.
+- `cd aidm_frontend && npm run build` passed.
+- `cd aidm_frontend && npm run bundle:budget` passed.
+- `cd aidm_frontend && npm audit --omit=dev` reported 0 vulnerabilities.
+
+Implemented or verified in this pass:
+- Campaign creation now loads `/api/worlds` and provides an existing-world selector plus a separate new-world field.
+- Campaign workspace summary counts now report full collection counts even when workspace lists are limited.
+- README/API docs now include `GET /api/worlds`, campaign archive/restore/delete/update routes, session archive/restore, current DeepSeek provider modules, and DeepSeek/TTS table-of-contents entries.
+- Frontend README now uses `npm ci`, includes `npm test` and `npm audit --omit=dev`, documents runtime Backend Settings, and notes session-scoped auth-token storage.
+- The frontend launch service now installs from the lockfile with `npm ci`.
+
+### Remaining Implementation Gaps
+
+[Priority: Medium] `App.tsx` Still Owns Several Async Product Workflows
+
+* File/Module: `aidm_frontend/src/App.tsx`, `aidm_frontend/src/useWorkspaceQueries.ts`, `aidm_frontend/src/useWorkspaceStore.ts`, `aidm_frontend/src/useSessionSocket.ts`, `aidm_frontend/src/useTtsNarration.ts`
+* Category: Maintainability
+* Current Implementation: The app has been split into presentational components, selector modules, socket/TTS/runtime/workspace hooks, and shared CSS files. `App.tsx` is still about 3,000 lines and owns several async workflows: player creation/editing, map and segment writes, session import/export, campaign create/rename/archive, session rename/delete, runtime switching, fullscreen fallback, and composer/dice submission orchestration.
+* Issue & Why It Matters: The largest single-component risk has been reduced, but `App.tsx` remains the integration hub for multiple unrelated async state machines. Future changes can still accidentally couple persistence, selection, socket, TTS, and dialog state.
+* Recommended Fix: Continue extraction into focused action hooks, starting with `useCampaignActions`, `useSessionActions`, and `useWorldMapSegmentActions`. Keep the current test coverage as a regression harness while moving one workflow family at a time.
+* Difficulty: Moderate
+* Requires Further Investigation: No
+* If yes, explain what must be checked or confirmed: N/A
+
+[Priority: Medium] Multi-Worker Turn Serialization Remains A Deployment Constraint
+
+* File/Module: `aidm_server/turn_coordinator.py`, `aidm_server/turn_engine.py`, `docs/beta_runbook.md`, `README.md`
+* Category: Architecture / Scalability
+* Current Implementation: The per-session coordinator now keeps turn processing locked through durable DM-response persistence and prunes idle locks. Docs clearly state that the coordinator is single-process and that multi-worker deployments need a durable queue or database/advisory-lock strategy.
+* Issue & Why It Matters: Local and single-process beta play are protected, but multiple Socket.IO workers can still process turns without shared serialization. This is a remaining scalability boundary, not a missing local-play fix.
+* Recommended Fix: Before multi-worker deployment, move turn execution into a durable per-session queue or add database/advisory locks around the turn lifecycle. Add concurrency tests against the selected production database.
+* Difficulty: Hard
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm the intended hosted worker model and database backend before choosing queue, advisory-lock, or job-runner semantics.
+
+[Priority: Low] Managed External Observability Stack Is Still Not Bundled
+
+* File/Module: `aidm_server/telemetry.py`, `README.md`, `docs/release_checklist.md`, `.github/workflows/ci.yml`
+* Category: Developer Experience / Operations
+* Current Implementation: The app has local `/api/metrics`, optional outbound telemetry delivery, release checklist entries, and tests for external telemetry failure handling. It does not bundle or provision a managed metrics/logging dashboard such as Prometheus/Grafana or a hosted observability provider.
+* Issue & Why It Matters: Code-level telemetry hooks are present, but production-style beta operations still require selecting and configuring the external observability destination. Without that operational step, metrics remain local or best-effort outbound events.
+* Recommended Fix: Pick the beta observability backend, document required environment variables, and add a smoke check that verifies a real event reaches that backend in staging.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm the desired observability provider and whether provisioning belongs in this repository or external deployment infrastructure.
+
+### Highest-Impact Recommendations
+
+1. * Recommendation: Finish extracting async action hooks from `App.tsx`.
+   * Why it matters: This is the biggest remaining maintainability risk after the current frontend split.
+   * Affected area/files: `aidm_frontend/src/App.tsx`
+   * Suggested first step: Extract campaign create/rename/archive into `useCampaignActions` with the existing App tests as guardrails.
+   * Related finding title: `App.tsx` Still Owns Several Async Product Workflows
+
+2. * Recommendation: Decide the production turn-serialization strategy before running multiple workers.
+   * Why it matters: Single-process turn ordering is now clear and tested, but distributed ordering still needs a real coordination primitive.
+   * Affected area/files: `aidm_server/turn_coordinator.py`, `aidm_server/turn_engine.py`
+   * Suggested first step: Choose durable queue vs database/advisory lock for the target deployment.
+   * Related finding title: Multi-Worker Turn Serialization Remains A Deployment Constraint
+
+3. * Recommendation: Wire the optional telemetry client to a concrete beta observability backend.
+   * Why it matters: Local metrics and outbound hooks are useful, but beta operations need a destination dashboard and alerting path.
+   * Affected area/files: `aidm_server/telemetry.py`, `README.md`, `docs/release_checklist.md`
+   * Suggested first step: Select the provider and add a staging telemetry smoke check.
+   * Related finding title: Managed External Observability Stack Is Still Not Bundled
+
+---
+
+## Implementation Verification Addendum 2 - 2026-06-06
+
+This addendum was appended after implementing the remaining concrete gaps from the prior addendum. The earlier findings are preserved above for history.
+
+Verification performed:
+- `.venv/bin/python -m pytest tests/test_turn_coordinator.py tests/test_deploy_bootstrap.py tests/test_telemetry.py tests/test_socketio_flow.py -q` passed: 49 tests.
+- `cd aidm_frontend && npm test` passed: typecheck, lint, and 33 Vitest tests.
+- `ruby -e 'require "yaml"; ...'` parsed the bundled observability YAML files.
+- `.venv/bin/python -m json.tool observability/grafana/dashboards/aidm-overview.json` parsed the Grafana dashboard JSON.
+- `docker compose -f observability/docker-compose.yml config` could not be run because Docker is not installed in this local environment.
+
+Implemented in this pass:
+- Extracted the requested frontend action-hook families from `App.tsx`:
+  - `aidm_frontend/src/useCampaignActions.ts` owns campaign create/rename/archive and new/existing world selection behavior.
+  - `aidm_frontend/src/useSessionActions.ts` owns session start, import/export, share-link, rename, and delete workflows.
+  - `aidm_frontend/src/useWorldMapSegmentActions.ts` owns default player creation, map create/update, segment create/activate/delete, and their pending states.
+- Reduced `aidm_frontend/src/App.tsx` from roughly 3,000 lines at the prior addendum to 2,517 lines while keeping existing App regression tests passing.
+- Added `GET /api/metrics/prometheus` and Prometheus text exposition rendering for telemetry counters, timing aggregates, and beta summary gauges.
+- Added a local observability bundle under `observability/` with Prometheus scrape config, Grafana provisioning, and an `AIDM Beta Overview` dashboard.
+- Added an opt-in database-backed per-session turn coordinator for multi-worker deployments:
+  - `AIDM_TURN_COORDINATOR_STORE=database`
+  - `AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS`
+  - `AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS`
+  - migration `0011_session_turn_locks`
+- Added coordinator tests proving database locks serialize across coordinator instances, reclaim expired locks, and are selected by configuration.
+- Added bootstrap validation for invalid turn coordinator store, lock TTL, and polling interval values.
+- Updated README, beta runbook, and release checklist for the Prometheus/Grafana bundle and database turn coordinator.
+
+### Remaining Follow-Up Items
+
+[Priority: Low] App Runtime And Composer Orchestration Still Live In `App.tsx`
+
+* File/Module: `aidm_frontend/src/App.tsx`
+* Category: Maintainability
+* Current Implementation: Campaign, session, world/map/segment, workspace, socket, TTS, and runtime-settings workflows now have dedicated hooks. `App.tsx` still owns player edit dialog submission, runtime provider/model switching, fullscreen fallback, and composer/dice orchestration.
+* Issue & Why It Matters: The highest-risk action workflow clusters have been extracted, but `App.tsx` remains the top-level integration component. Further extraction would make it easier to modify character profile editing and dice/composer behavior independently.
+* Recommended Fix: In a future cleanup pass, extract `usePlayerProfileActions` and `useComposerActions` once their desired boundaries are clear.
+* Difficulty: Moderate
+* Requires Further Investigation: No
+* If yes, explain what must be checked or confirmed: N/A
+
+[Priority: Low] Production Observability Still Needs Hosted Alert Routing
+
+* File/Module: `observability/`, `aidm_server/telemetry.py`, deployment configuration
+* Category: Developer Experience / Operations
+* Current Implementation: The repository now bundles a local Prometheus/Grafana stack and exposes Prometheus scrape metrics. Optional outbound telemetry delivery remains provider-agnostic.
+* Issue & Why It Matters: Local dashboards cover beta smoke testing, but production alert routing and ownership still depend on the chosen hosting environment or managed observability provider.
+* Recommended Fix: During deployment setup, choose the hosted observability destination, configure alerts, and add a staging smoke check that proves dashboard ingestion and alert routing.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm the production hosting platform and alerting owner.
+
+[Priority: Low] Multi-Worker Socket Deployment Still Needs Deployment-Level Affinity Or Queueing
+
+* File/Module: `aidm_server/turn_coordinator.py`, Socket.IO deployment configuration
+* Category: Architecture / Scalability
+* Current Implementation: The repository now includes an opt-in database-backed per-session turn lock that coordinates turn execution across backend workers. Socket.IO connection state is still module-local.
+* Issue & Why It Matters: Shared turn locks protect turn ordering, but a multi-worker Socket.IO deployment still needs sticky sessions or a shared message queue so events reach the connected clients reliably.
+* Recommended Fix: Pair `AIDM_TURN_COORDINATOR_STORE=database` with the selected Socket.IO deployment strategy, then run a staging two-worker smoke test.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm the production Socket.IO worker model and whether sticky sessions or a shared message queue will be used.
+
+### Highest-Impact Recommendations
+
+1. * Recommendation: Run a two-worker staging smoke test with `AIDM_TURN_COORDINATOR_STORE=database`.
+   * Why it matters: Code-level shared turn locks are implemented, but deployment-level socket routing must also be validated.
+   * Affected area/files: `aidm_server/turn_coordinator.py`, deployment configuration
+   * Suggested first step: Apply migration `0011_session_turn_locks`, enable the database coordinator, and send concurrent turns to the same session from two workers.
+   * Related finding title: Multi-Worker Socket Deployment Still Needs Deployment-Level Affinity Or Queueing
+
+2. * Recommendation: Start the local observability bundle during beta rehearsal.
+   * Why it matters: The new Prometheus/Grafana stack should be exercised against real beta traffic before relying on it for triage.
+   * Affected area/files: `observability/`, `aidm_server/blueprints/system.py`, `aidm_server/telemetry.py`
+   * Suggested first step: Run the backend on port `5050`, then run `cd observability && docker compose up` on a machine with Docker installed.
+   * Related finding title: Production Observability Still Needs Hosted Alert Routing
+
+3. * Recommendation: Keep future frontend cleanup focused on remaining orchestration hooks.
+   * Why it matters: The largest persistence workflows have been extracted; remaining cleanup should avoid broad rewrites.
+   * Affected area/files: `aidm_frontend/src/App.tsx`
+   * Suggested first step: Extract player profile editing or composer/dice orchestration as a separate, tested hook.
+   * Related finding title: App Runtime And Composer Orchestration Still Live In `App.tsx`
+
+### Final Verification Note
+
+Additional verification after the addendum:
+- `.venv/bin/python -m pytest -q` passed: 251 tests.
+- `cd aidm_frontend && npm test` passed: typecheck, lint, and 33 Vitest tests.
+- `cd aidm_frontend && npm run build` passed.
+- `cd aidm_frontend && npm run bundle:budget` passed.
+- `cd aidm_frontend && npm audit --omit=dev` reported 0 vulnerabilities.
+- `docker compose -f observability/docker-compose.yml config` remains unverified locally because Docker is not installed in this environment.
+
+---
+
+## Implementation Verification Addendum 3 - 2026-06-06
+
+This addendum was appended after checking the remaining concrete follow-up items from Addendum 2. Earlier findings are preserved above for history.
+
+Verification performed:
+- `cd aidm_frontend && npm run typecheck` passed.
+- `cd aidm_frontend && npm run lint` passed.
+- `cd aidm_frontend && npm run test:unit` passed: 5 test files and 34 Vitest tests.
+- `cd aidm_frontend && npm test` passed: typecheck, lint, and 34 Vitest tests.
+- `cd aidm_frontend && npm run build` passed.
+- `cd aidm_frontend && npm run bundle:budget` passed.
+- `cd aidm_frontend && npm audit --omit=dev` reported 0 vulnerabilities.
+- `.venv/bin/python -m pytest -q` passed: 251 tests.
+
+Implemented in this pass:
+- Addressed the concrete code follow-up titled `App Runtime And Composer Orchestration Still Live In App.tsx`.
+- Added `aidm_frontend/src/usePlayerProfileActions.ts` for player edit dialog state, validation, API update, cache update, and persistence errors.
+- Added `aidm_frontend/src/useComposerActions.ts` for composer text state, mode switching, ability/item targeting, pending roll targeting, dice roll lifecycle, optimistic player turn creation, and Socket.IO send payloads.
+- Preserved the existing dice-roll behavior where the roll result stays hidden until the dice landing animation completes.
+- Reduced `aidm_frontend/src/App.tsx` from 2,517 lines at Addendum 2 to 2,317 lines while keeping the frontend and backend verification suites passing.
+
+Implementation coverage status:
+- All concrete local code, test, documentation, and configuration items reviewed in this pass now have local verification.
+- The remaining unproven items are deployment-specific and cannot be fully confirmed from this local checkout without the target hosting environment.
+
+### Remaining Follow-Up Items
+
+[Priority: Low] Hosted Observability Alert Routing Still Requires Deployment Configuration
+
+* File/Module: `observability/`, `aidm_server/telemetry.py`, deployment configuration
+* Category: Developer Experience / Operations
+* Current Implementation: The repository exposes Prometheus-format metrics, bundles a local Prometheus/Grafana stack, and keeps provider-agnostic outbound telemetry hooks.
+* Issue & Why It Matters: Local metrics and dashboards are implemented, but production alert routing still depends on the eventual hosting platform or managed observability provider.
+* Recommended Fix: Configure the hosted metrics/logging destination, define alert ownership, and add a staging smoke check that proves a real backend event reaches the dashboard and alert route.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm the production hosting platform, observability provider, alert ownership, and whether provisioning belongs in this repository or external infrastructure.
+
+[Priority: Low] Multi-Worker Socket Routing Still Requires Staging Verification
+
+* File/Module: `aidm_server/turn_coordinator.py`, Socket.IO deployment configuration
+* Category: Architecture / Scalability
+* Current Implementation: The repository includes an opt-in database-backed per-session turn lock for shared turn execution coordination across backend workers. Socket.IO connection state remains process-local unless the deployment adds affinity or shared message routing.
+* Issue & Why It Matters: Shared turn locks protect turn ordering, but connected clients in a multi-worker deployment still need sticky sessions or a Socket.IO message queue so emitted events reach the right clients reliably.
+* Recommended Fix: Pair `AIDM_TURN_COORDINATOR_STORE=database` with the selected Socket.IO deployment strategy, then run a two-worker staging smoke test that sends concurrent turns and verifies both turn persistence and client event delivery.
+* Difficulty: Moderate
+* Requires Further Investigation: Yes
+* If yes, explain what must be checked or confirmed: Confirm the production Socket.IO worker model, database backend, and whether sticky sessions or a shared message queue will be used.
+
+### Highest-Impact Recommendations
+
+1. * Recommendation: Run a two-worker staging smoke test with `AIDM_TURN_COORDINATOR_STORE=database`.
+   * Why it matters: Local shared-lock tests pass, but production socket routing must be proven with the actual worker model.
+   * Affected area/files: `aidm_server/turn_coordinator.py`, Socket.IO deployment configuration
+   * Suggested first step: Apply migration `0011_session_turn_locks`, enable the database coordinator, start two backend workers, and send concurrent turns to the same session.
+   * Related finding title: Multi-Worker Socket Routing Still Requires Staging Verification
+
+2. * Recommendation: Configure hosted alert routing for beta operations.
+   * Why it matters: The local observability bundle works as repository infrastructure, but beta triage needs a live alert destination and owner.
+   * Affected area/files: `observability/`, `aidm_server/telemetry.py`, deployment configuration
+   * Suggested first step: Choose the hosted observability provider and add a staging smoke check for dashboard ingestion and alert delivery.
+   * Related finding title: Hosted Observability Alert Routing Still Requires Deployment Configuration
+
+3. * Recommendation: Keep future frontend cleanup incremental and hook-focused.
+   * Why it matters: The main App orchestration is substantially smaller now, and broad rewrites would add more risk than value.
+   * Affected area/files: `aidm_frontend/src/App.tsx`, `aidm_frontend/src/useComposerActions.ts`, `aidm_frontend/src/usePlayerProfileActions.ts`
+   * Suggested first step: Only extract another hook when a clearly bounded workflow remains duplicated or difficult to test.
+   * Related finding title: App Runtime And Composer Orchestration Still Live In `App.tsx`
+
+### Rendered Smoke Verification Note
+
+Additional verification after Addendum 3:
+- `cd aidm_frontend && npm run smoke:browser` passed after updating the smoke selector for the renamed `New World Name` field. The flow covered create campaign, create player, start session, manage map/segments, unavailable TTS state, send action, receive DM response, delete session, import session, and delete imported session.
+- `cd aidm_frontend && npm run smoke:visual` passed after narrowing the character assertion to the unique right-inspector heading. The run wrote screenshots under `tmp/verification_artifacts/visual-smoke/2026-06-06T22-02-15-821Z/`.
+- `cd aidm_frontend && npm run lint` passed after the smoke-script selector updates.
+- Line count correction: the final status check showed `aidm_frontend/src/App.tsx` at 2,322 lines.

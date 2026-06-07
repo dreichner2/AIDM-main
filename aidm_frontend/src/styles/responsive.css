@@ -1,0 +1,479 @@
+@media (max-width: 1400px) {
+  .prototype-shell {
+    grid-template-columns: 248px minmax(560px, 1fr) 388px;
+  }
+
+  .ops-bar {
+    grid-template-columns: 156px 56px minmax(200px, 1fr) minmax(148px, 0.44fr) minmax(210px, 0.58fr) minmax(116px, 0.34fr) minmax(82px, 0.26fr) 236px;
+  }
+
+  .ops-segment.mini-stat:nth-of-type(7),
+  .ops-segment.mini-stat:nth-of-type(8) {
+    display: none;
+  }
+
+  .turn-card {
+    grid-template-columns: 150px minmax(0, 1fr) 72px 38px;
+  }
+
+  .dm-response-card {
+    grid-template-columns: 150px minmax(0, 1fr) 104px;
+  }
+}
+
+@media (min-height: 901px) and (min-width: 981px) {
+  .turn-feed:not(.single-panel) .dm-response-card {
+    height: auto;
+    min-height: 360px;
+  }
+
+  .turn-feed:not(.single-panel) .dm-response-card .response-copy p {
+    display: block;
+    overflow: visible;
+    -webkit-line-clamp: unset;
+  }
+}
+
+@media (max-height: 900px) and (min-width: 981px) {
+  .rail-section {
+    padding-top: 12px;
+  }
+
+  .campaign-list,
+  .session-list {
+    gap: 6px;
+  }
+
+  .campaign-card {
+    min-height: 55px;
+    padding: 7px 8px;
+  }
+
+  .session-section {
+    padding-top: 16px;
+  }
+
+  .session-card {
+    min-height: 45px;
+    padding-top: 8px;
+    padding-bottom: 7px;
+  }
+
+  .rail-nav {
+    gap: 3px;
+    margin-top: 16px;
+  }
+
+  .nav-item {
+    min-height: 33px;
+  }
+
+  .rail-footer {
+    gap: 5px;
+    padding-top: 12px;
+    padding-bottom: 14px;
+  }
+
+  .right-inspector {
+    padding: 7px 8px 8px;
+  }
+
+  .inspector-tabs {
+    height: 34px;
+  }
+
+  .character-panel,
+  .inspector-box {
+    margin-top: 6px;
+  }
+
+  .character-panel,
+  .inspector-box {
+    padding: 7px;
+  }
+
+  .session-board {
+    grid-template-rows: 60px 38px minmax(0, 1fr) 240px;
+  }
+
+  .session-header h1 {
+    font-size: 0.98rem;
+  }
+
+  .content-tabs button {
+    height: 38px;
+  }
+
+  .turn-feed {
+    padding-top: 8px;
+    padding-bottom: 10px;
+  }
+
+  .jump-latest-button {
+    bottom: 256px;
+  }
+
+  .turn-card {
+    min-height: 49px;
+    margin-bottom: 6px;
+  }
+
+  .turn-card p {
+    font-size: 0.95rem;
+    line-height: 1.24;
+  }
+
+  .turn-feed:not(.single-panel) .dm-response-card {
+    height: auto;
+    min-height: 210px;
+  }
+
+  .turn-feed:not(.single-panel) .dm-response-card .response-copy p {
+    display: block;
+    overflow: visible;
+    -webkit-line-clamp: unset;
+  }
+
+  .dm-response-card {
+    grid-template-columns: 142px minmax(0, 1fr) 92px;
+  }
+
+  .response-copy {
+    padding-top: 15px;
+  }
+
+  .response-copy p {
+    font-size: 0.98rem;
+    line-height: 1.38;
+  }
+
+  .action-composer {
+    padding-top: 8px;
+    padding-bottom: 26px;
+  }
+
+  .composer-frame textarea {
+    min-height: 70px;
+    padding-top: 11px;
+    padding-bottom: 11px;
+  }
+
+  .composer-tools button {
+    min-height: 30px;
+  }
+
+  .composer-tools {
+    margin-top: 10px;
+    margin-bottom: 0;
+    padding-bottom: 2px;
+  }
+
+  .character-card {
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 9px;
+  }
+
+  .portrait {
+    width: 46px;
+    height: 46px;
+  }
+
+  .character-main {
+    grid-template-columns: minmax(0, 1fr) 88px;
+  }
+
+  .character-main h2 {
+    font-size: 0.92rem;
+  }
+
+  .character-main p,
+  .level-stack span,
+  .level-stack small {
+    font-size: 0.72rem;
+  }
+
+  .vital-grid {
+    gap: 6px;
+    margin-top: 7px;
+  }
+
+  .vital-grid div {
+    min-height: 34px;
+  }
+
+  .vital-grid span,
+  .ability-grid span {
+    font-size: 0.66rem;
+  }
+
+  .vital-grid strong,
+  .ability-grid strong {
+    font-size: 0.9rem;
+  }
+
+  .ability-grid {
+    margin-top: 7px;
+  }
+
+  .ability-grid small {
+    font-size: 0.7rem;
+  }
+
+  .ability-grid {
+    padding: 3px 0;
+  }
+
+  .inspiration-row {
+    min-height: 26px;
+    margin-top: 7px;
+    font-size: 0.78rem;
+  }
+
+  .box-title {
+    margin-bottom: 5px;
+  }
+
+  .box-title h3,
+  .map-segment h4 {
+    font-size: 0.82rem;
+  }
+
+  .box-title span,
+  .box-title button,
+  .map-segment p,
+  .map-segment dt,
+  .inventory-table span {
+    font-size: 0.7rem;
+  }
+
+  .inventory-table div {
+    min-height: 23px;
+  }
+
+  .inventory-table .empty-row,
+  .canon-list .empty-row {
+    min-height: 24px;
+  }
+
+  .canon-list div {
+    min-height: 22px;
+  }
+
+  .canon-list span {
+    font-size: 0.72rem;
+  }
+
+  .mini-map {
+    height: 66px;
+  }
+
+  .map-segment {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 9px;
+  }
+
+  .map-segment p {
+    margin-bottom: 5px;
+  }
+
+  .map-segment dl {
+    gap: 3px 8px;
+  }
+
+  .map-segment dd {
+    font-size: 0.72rem;
+  }
+}
+
+@media (max-width: 980px) {
+  .prototype-shell {
+    height: auto;
+    min-height: 100svh;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto;
+    overflow: visible;
+  }
+
+  .ops-bar,
+  .campaign-rail,
+  .session-board,
+  .right-inspector {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .ops-bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-auto-rows: auto;
+    gap: 8px;
+    min-height: 0;
+    padding: 8px 12px;
+  }
+
+  .ops-brand {
+    min-height: 40px;
+    padding: 0;
+    border-right: 0;
+  }
+
+  .ops-bar > .top-icon {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .ops-segment {
+    grid-column: 1 / -1;
+    min-height: 42px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.018);
+  }
+
+  .ops-segment.mini-stat {
+    display: none;
+  }
+
+  .backend-segment {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .runtime-select {
+    max-width: none;
+    font-size: 0.8rem;
+  }
+
+  .ops-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    padding: 0;
+    border-right: 0;
+  }
+
+  .action-composer {
+    padding-bottom: 28px;
+  }
+
+  .campaign-rail,
+  .right-inspector {
+    max-height: none;
+    overflow: visible;
+    border-right: 0;
+  }
+
+  .session-board {
+    grid-template-rows: auto auto auto auto;
+    border-top: 1px solid var(--line);
+    border-right: 0;
+  }
+
+  .session-header {
+    align-items: start;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .session-actions {
+    flex-wrap: wrap;
+  }
+
+  .turn-feed {
+    padding-left: 14px;
+    overflow: visible;
+  }
+
+  .jump-latest-button {
+    position: fixed;
+    bottom: 18px;
+  }
+
+  .turn-row {
+    grid-template-columns: 40px minmax(0, 1fr);
+  }
+
+  .turn-card,
+  .dm-response-card {
+    grid-template-columns: 1fr;
+  }
+
+  .turn-card {
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .turn-expand {
+    min-height: 36px;
+    border-top: 1px solid var(--line-strong);
+    border-left: 0;
+  }
+
+  .turn-card time {
+    justify-self: start;
+  }
+
+  .dm-response-card {
+    min-height: 240px;
+    height: auto;
+  }
+
+  .turn-feed:not(.single-panel) .dm-response-card {
+    height: auto;
+    min-height: 240px;
+  }
+
+  .stream-state {
+    padding: 0 16px 16px;
+  }
+
+  .execution-footer {
+    position: static;
+    flex-wrap: wrap;
+    padding: 0 16px 14px;
+  }
+
+  .composer-frame,
+  .map-segment {
+    grid-template-columns: 1fr;
+  }
+
+  .input-action-row {
+    align-self: auto;
+    justify-content: flex-end;
+    padding: 0 10px 10px;
+  }
+
+  .action-intent-panel {
+    flex-wrap: wrap;
+  }
+
+  .action-intent-panel input[type='text'] {
+    flex-basis: 100%;
+  }
+
+  .dialog-grid.two {
+    grid-template-columns: 1fr;
+  }
+
+  .composer-tools {
+    flex-wrap: wrap;
+  }
+
+  .dice-roll-backdrop {
+    padding: 12px;
+  }
+
+  .dice-stage,
+  .dice-canvas {
+    min-height: 276px;
+  }
+
+  .dice-readout {
+    right: 10px;
+    bottom: 10px;
+    min-width: 118px;
+  }
+}
