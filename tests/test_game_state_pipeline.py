@@ -346,6 +346,7 @@ def test_inventory_transfer_expands_to_atomic_remove_and_add():
     target_items = result['nextState']['playerCharacters'][1]['inventory']['items']
     assert target_items[0]['name'] == 'Rope'
     state_log = build_state_log(turn_id=1, post_validation=validation)
+    assert len(state_log['lines']) == 1
     assert any('Rope' in line['message'] for line in state_log['lines'])
 
 
@@ -397,6 +398,9 @@ def test_currency_transfer_expands_to_atomic_remove_and_add():
     assert [entry['change']['type'] for entry in validation['accepted']] == ['currency.remove', 'currency.add']
     assert result['nextState']['playerCharacters'][0]['inventory']['currency']['gp'] == 2
     assert result['nextState']['playerCharacters'][1]['inventory']['currency']['gp'] == 4
+    state_log = build_state_log(turn_id=1, post_validation=validation)
+    assert len(state_log['lines']) == 1
+    assert '3 gp' in state_log['lines'][0]['message']
 
 
 def test_currency_transfer_insufficient_funds_rejects_without_partial_add():

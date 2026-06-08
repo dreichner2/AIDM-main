@@ -55,9 +55,15 @@ def _line(status: str, change: dict[str, Any], message: str, *, visible: bool | 
 
 def _lines_from_validation(validation: dict[str, Any]) -> list[dict[str, Any]]:
     lines: list[dict[str, Any]] = []
+    visible_transfer_ids: set[str] = set()
     for entry in validation.get('accepted') or []:
         if isinstance(entry, dict) and isinstance(entry.get('change'), dict):
             change = entry['change']
+            transfer_id = str(change.get('transferId') or '').strip()
+            if transfer_id:
+                if transfer_id in visible_transfer_ids:
+                    continue
+                visible_transfer_ids.add(transfer_id)
             line = _line('applied', change, _change_message(change, status='applied'))
             if line['visibleToPlayer']:
                 lines.append(line)

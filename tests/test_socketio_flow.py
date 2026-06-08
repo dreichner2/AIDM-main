@@ -466,6 +466,17 @@ def test_attack_pipeline_pauses_and_resumes_for_item_clarification(app, socketio
         inventory = safe_json_loads(player.inventory, [])
         greatsword = next(item for item in inventory if item['id'] == 'great')
         assert greatsword['lastUsedAtTurn'] is not None
+        paused_turn = db.session.get(DmTurn, clarification['turnId'])
+        resumed_turn = DmTurn.query.filter(DmTurn.turn_id != clarification['turnId']).order_by(DmTurn.turn_id.desc()).first()
+        assert paused_turn.status == 'clarification_resolved'
+        assert resumed_turn is not None
+        resumed_metadata = safe_json_loads(resumed_turn.metadata_json, {})
+        paused_metadata = safe_json_loads(paused_turn.metadata_json, {})
+        assert resumed_metadata['resolved_clarification_turn_id'] == clarification['turnId']
+        assert resumed_metadata['clarification_resume']['selected_item_ids'] == {'act_001': 'great'}
+        assert paused_metadata['resolved_by_turn_id'] == resumed_turn.turn_id
+        assert paused_metadata['state_pipeline']['clarificationResume']['resolvedByTurnId'] == resumed_turn.turn_id
+        assert paused_metadata['state_pipeline']['clarificationResume']['selectedItemIds'] == {'act_001': 'great'}
 
 
 def test_admin_message_requires_configured_admin_passcode(app, socketio):

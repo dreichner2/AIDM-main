@@ -208,6 +208,21 @@ class TurnEngine:
         return int(DmTurn.query.filter_by(session_id=session_id).count() or 0) + 1
 
     @staticmethod
+    def _clarification_resume_turn_id(command: TurnCommand) -> int | None:
+        override = command.state_pipeline_override if isinstance(command.state_pipeline_override, dict) else {}
+        try:
+            turn_id = int(override.get('resolvedClarificationTurnId') or 0)
+        except (TypeError, ValueError):
+            return None
+        return turn_id if turn_id > 0 else None
+
+    @staticmethod
+    def _clarification_selected_item_ids(command: TurnCommand) -> dict:
+        override = command.state_pipeline_override if isinstance(command.state_pipeline_override, dict) else {}
+        selected = override.get('selectedItemIds')
+        return selected if isinstance(selected, dict) else {}
+
+    @staticmethod
     def _dm_response_requests_group_roll(text: str) -> bool:
         candidate = (text or '').lower()
         group_markers = (
@@ -612,6 +627,7 @@ class TurnEngine:
             rule_hint,
             roll_target_pending_turn_id,
         )
+        resolved_clarification_turn_id = self._clarification_resume_turn_id(command)
         session_turn_number = self._session_turn_number(command.session_id)
         rules_hint_payload = {
             'requires_roll': rule_hint.requires_roll,
@@ -623,8 +639,14 @@ class TurnEngine:
             'outcome_deferred': rule_hint.outcome_deferred,
             'resolved_turn_id': resolved_turn_id,
             'target_pending_turn_id': roll_target_pending_turn_id,
+            'resolved_clarification_turn_id': resolved_clarification_turn_id,
             'turn_number': session_turn_number,
         }
+        if resolved_clarification_turn_id:
+            rules_hint_payload['clarification_resume'] = {
+                'resolved_turn_id': resolved_clarification_turn_id,
+                'selected_item_ids': self._clarification_selected_item_ids(command),
+            }
 
         turn = DmTurn(
             session_id=command.session_id,
@@ -646,6 +668,15 @@ class TurnEngine:
                     'turn_number': session_turn_number,
                     'action_intent': command.action_intent,
                     'client_message_id': command.client_message_id,
+                    'resolved_clarification_turn_id': resolved_clarification_turn_id,
+                    'clarification_resume': (
+                        {
+                            'resolved_turn_id': resolved_clarification_turn_id,
+                            'selected_item_ids': self._clarification_selected_item_ids(command),
+                        }
+                        if resolved_clarification_turn_id
+                        else None
+                    ),
                 },
                 {},
             ),
@@ -882,6 +913,41 @@ class TurnEngine:
         self.socketio.emit('clarification_required', request_payload, room=str(session_id))
         self._emit_turn_status(session_id, turn_id, 'clarification_required', request_payload)
         self.socketio.emit('session_log_update', session_log_update_payload(session_id, turn_id), room=str(session_id))
+
+    def _mark_clarification_resume_completed(self, *, command: TurnCommand, resumed_turn: DmTurn) -> None:
+        paused_turn_id = self._clarification_resume_turn_id(command)
+        if not paused_turn_id or paused_turn_id == resumed_turn.turn_id:
+            return
+        paused_turn = db.session.get(DmTurn, paused_turn_id)
+        if (
+            not paused_turn
+            or paused_turn.session_id != command.session_id
+            or paused_turn.player_id != command.player_id
+            or paused_turn.status != 'awaiting_clarification'
+        ):
+            return
+
+        metadata = safe_json_loads(paused_turn.metadata_json, {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        pipeline = metadata.get('state_pipeline') if isinstance(metadata.get('state_pipeline'), dict) else {}
+        pipeline['clarificationResume'] = {
+            'status': 'resolved',
+            'resolvedByTurnId': resumed_turn.turn_id,
+            'selectedItemIds': self._clarification_selected_item_ids(command),
+            'resolvedAt': utc_now().isoformat(),
+        }
+        metadata['state_pipeline'] = pipeline
+        metadata['resolved_by_turn_id'] = resumed_turn.turn_id
+        paused_turn.metadata_json = safe_json_dumps(metadata, {})
+        paused_turn.status = 'clarification_resolved'
+        paused_turn.outcome_status = 'resolved'
+
+        self._emit_turn_status(
+            command.session_id,
+            paused_turn.turn_id,
+            'clarification_resolved',
+            {'resolved_by_turn_id': resumed_turn.turn_id},
+        )
 
     @staticmethod
     def _record_phase_timing(
@@ -1525,6 +1591,9 @@ class TurnEngine:
                             'state_log': state_log,
                         },
                     )
+
+            if turn_obj and dm_succeeded:
+                self._mark_clarification_resume_completed(command=command, resumed_turn=turn_obj)
 
             if turn_obj and dm_succeeded:
                 canon_job = enqueue_canon_job(
