@@ -87,6 +87,12 @@ class SocketRuntime:
     def release_active_player(self, session_id: int, player_id: int, sid: str) -> bool:
         return self.state.release_active_player(session_id, player_id, sid)
 
+    def player_is_typing(self, session_id: int, player_id: int) -> bool:
+        return self.state.player_is_typing(session_id, player_id)
+
+    def set_player_typing(self, session_id: int, player_id: int, sid: str, is_typing: bool) -> bool:
+        return self.state.set_player_typing(session_id, player_id, sid, is_typing)
+
     def clear_connection_binding(
         self,
         sid: str,
@@ -103,9 +109,14 @@ class SocketRuntime:
         player_id = coerce_int(connection_record.get('player_id'))
         if leave_bound_room and session_id:
             leave_room_fn(str(session_id))
-        if session_id and player_id and self.release_active_player(session_id, player_id, sid):
-            emit_fn('player_left', {'id': player_id}, room=str(session_id))
-            emit_fn('active_players', self.active_player_payloads(session_id), room=str(session_id))
+        if session_id and player_id:
+            was_typing = self.player_is_typing(session_id, player_id)
+            removed_player = self.release_active_player(session_id, player_id, sid)
+            if removed_player:
+                emit_fn('player_left', {'id': player_id}, room=str(session_id))
+                emit_fn('active_players', self.active_player_payloads(session_id), room=str(session_id))
+            elif was_typing != self.player_is_typing(session_id, player_id):
+                emit_fn('active_players', self.active_player_payloads(session_id), room=str(session_id))
         connection_record['session_id'] = None
         connection_record['player_id'] = None
         return connection_record
@@ -119,7 +130,12 @@ class SocketRuntime:
         player_id = coerce_int(connection_info.get('player_id'))
         set_logging_context(session_id=session_id)
 
-        if session_id and player_id and self.release_active_player(session_id, player_id, sid):
-            emit_fn('player_left', {'id': player_id}, room=str(session_id))
-            emit_fn('active_players', self.active_player_payloads(session_id), room=str(session_id))
+        if session_id and player_id:
+            was_typing = self.player_is_typing(session_id, player_id)
+            removed_player = self.release_active_player(session_id, player_id, sid)
+            if removed_player:
+                emit_fn('player_left', {'id': player_id}, room=str(session_id))
+                emit_fn('active_players', self.active_player_payloads(session_id), room=str(session_id))
+            elif was_typing != self.player_is_typing(session_id, player_id):
+                emit_fn('active_players', self.active_player_payloads(session_id), room=str(session_id))
         return connection_info

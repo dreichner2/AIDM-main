@@ -167,6 +167,7 @@ API_TYPE_CONTRACTS: tuple[TypeContract, ...] = (
             field('rolling_summary', 'string'),
             field('active_segments', 'unknown[]'),
             field('memory_snippets', 'unknown[]'),
+            field('state_snapshot', 'JsonRecord | null'),
             field('updated_at', 'string | null'),
         ),
     ),

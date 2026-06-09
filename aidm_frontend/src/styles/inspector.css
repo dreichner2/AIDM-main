@@ -337,6 +337,66 @@
   color: #73d79b;
 }
 
+.scene-state-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.9fr) 58px;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.scene-state-grid div {
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.scene-state-grid span,
+.world-state-list strong,
+.world-state-list small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.scene-state-grid strong,
+.world-state-list span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--heading);
+  font-size: 0.78rem;
+  font-weight: 520;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.world-state-list {
+  display: grid;
+  gap: 8px;
+}
+
+.world-state-list > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+
+.world-state-list .empty-row {
+  color: var(--muted);
+  font-weight: 390;
+}
+
+.world-state-list small {
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .active-player-list {
   display: grid;
   gap: 7px;
@@ -347,9 +407,9 @@
 
 .active-player-list li {
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) auto;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
-  min-height: 38px;
+  min-height: 48px;
   gap: 8px;
   padding: 6px 7px;
   border: 1px solid var(--line);
@@ -362,9 +422,29 @@
   background: rgba(115, 215, 155, 0.07);
 }
 
+.active-player-avatar-wrap {
+  position: relative;
+  width: 34px;
+  height: 34px;
+}
+
+.active-player-avatar {
+  width: 34px;
+  height: 34px;
+  display: block;
+  object-fit: cover;
+  border: 1px solid rgba(233, 239, 232, 0.16);
+  border-radius: 4px;
+  background: #0f1516;
+}
+
 .presence-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
   width: 8px;
   height: 8px;
+  border: 1px solid #0f1516;
   border-radius: 999px;
   background: #73d79b;
   box-shadow: 0 0 10px rgba(115, 215, 155, 0.42);
@@ -399,6 +479,25 @@
   background: rgba(115, 215, 155, 0.08);
   font-size: 0.68rem;
   font-weight: 560;
+}
+
+.presence-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.typing-badge {
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 210, 122, 0.28);
+  border-radius: 999px;
+  color: #ffd27a;
+  background: rgba(255, 210, 122, 0.08);
+  font-size: 0.68rem;
+  font-weight: 560;
+  white-space: nowrap;
 }
 
 .inventory-table {

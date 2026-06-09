@@ -25,6 +25,7 @@ export type ActionComposerProps = {
   adminPasscode: string
   adminToolsUnlocked: boolean
   setActionText: Dispatch<SetStateAction<string>>
+  updateActionText: (nextText: string) => void
   setAdminPasscode: Dispatch<SetStateAction<string>>
   selectedCharacterName: string | null
   composerMode: ComposerMode
@@ -80,6 +81,7 @@ export function ActionComposer({
   adminPasscode,
   adminToolsUnlocked,
   setActionText,
+  updateActionText,
   setAdminPasscode,
   selectedCharacterName,
   composerMode,
@@ -171,7 +173,7 @@ export function ActionComposer({
           id="action-input"
           ref={actionInputRef}
           value={actionText}
-          onChange={(event) => setActionText(event.target.value)}
+          onChange={(event) => updateActionText(event.target.value)}
           placeholder={selectedCharacterName ? 'Write your action...' : 'Choose a player before sending.'}
           rows={4}
         />

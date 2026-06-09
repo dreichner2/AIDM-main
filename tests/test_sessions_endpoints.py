@@ -26,6 +26,16 @@ from tests.helpers import seed_world_campaign_player_session
 
 def test_session_state_and_log_endpoints(client, app):
     ids = seed_world_campaign_player_session(app)
+    scene_snapshot = {
+        'currentScene': {'locationId': 'blackwake_tavern', 'name': 'Blackwake Tavern'},
+        'locations': [{'id': 'blackwake_tavern', 'name': 'Blackwake Tavern'}],
+    }
+
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        assert session is not None
+        session.state_snapshot = json.dumps(scene_snapshot)
+        db.session.commit()
 
     state_response = client.get(f"/api/sessions/{ids['session_id']}/state")
     assert state_response.status_code == 200
@@ -34,6 +44,7 @@ def test_session_state_and_log_endpoints(client, app):
     assert 'rolling_summary' in state_payload
     assert state_payload['current_location'] == 'Old Ruins'
     assert state_payload['current_quest'] == 'Find the relic'
+    assert state_payload['state_snapshot'] == scene_snapshot
 
     with app.app_context():
         assert SessionState.query.filter_by(session_id=ids['session_id']).first() is None

@@ -661,7 +661,7 @@ def test_invalid_state_change_stress_rejects_without_partial_mutation():
             {'id': 'bad_xp_loss_at_zero', 'type': 'xp.remove', 'actorId': 'player_1', 'amount': 5},
             {'id': 'bad_zero_heal', 'type': 'health.heal', 'actorId': 'player_1', 'amount': 0},
             {'id': 'bad_add_missing_quantity', 'type': 'inventory.add', 'actorId': 'player_1', 'item': {'name': 'Lantern'}},
-            {'id': 'bad_unknown_type', 'type': 'quest.add', 'actorId': 'player_1', 'amount': 1},
+            {'id': 'bad_unknown_type', 'type': 'quest.delete', 'actorId': 'player_1', 'amount': 1},
             {'id': 'bad_missing_actor', 'type': 'health.damage', 'actorId': 'player_missing', 'amount': 1},
         ],
     )
@@ -676,6 +676,358 @@ def test_invalid_state_change_stress_rejects_without_partial_mutation():
     assert result['nextState']['playerCharacters'][1]['inventory']['items'] == before_target_items
     assert result['nextState']['playerCharacters'][1]['inventory']['currency'] == before_target_currency
     assert result['nextState']['playerCharacters'][0]['xp']['current'] == 0
+
+
+def test_scene_update_changes_mood_danger_and_type_without_removing_location():
+    state = _state()
+    state['currentScene'] = {
+        'locationId': 'blackwake_tavern',
+        'name': 'Blackwake Tavern',
+        'sceneType': 'social',
+        'dangerLevel': 0,
+        'mood': 'calm',
+        'combatState': 'none',
+    }
+
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'scene_turn_1',
+                'type': 'scene.update',
+                'source': 'post_dm',
+                'reason': 'The tavern mood changes.',
+                'turnId': 21,
+                'sceneType': 'mystery',
+                'dangerLevel': 3,
+                'mood': 'tense',
+            }
+        ],
+    )
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+    scene = result['nextState']['currentScene']
+
+    assert validation['rejected'] == []
+    assert scene['locationId'] == 'blackwake_tavern'
+    assert scene['name'] == 'Blackwake Tavern'
+    assert scene['sceneType'] == 'mystery'
+    assert scene['dangerLevel'] == 3
+    assert scene['mood'] == 'tense'
+    assert scene['updatedAtTurn'] == 21
+
+
+def test_scene_move_location_updates_scene_and_marks_location_visited():
+    state = _state()
+    state['currentScene'] = {'locationId': 'blackwake_tavern', 'name': 'Blackwake Tavern'}
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'move_old_harbor',
+                'type': 'scene.move_location',
+                'source': 'post_dm',
+                'reason': 'The party arrives.',
+                'turnId': 22,
+                'locationId': 'old_harbor',
+                'name': 'Old Harbor',
+                'sceneType': 'exploration',
+                'mood': 'mysterious',
+                'dangerLevel': 2,
+            }
+        ],
+    )
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+    scene = result['nextState']['currentScene']
+    location = result['nextState']['locations'][0]
+
+    assert validation['rejected'] == []
+    assert scene['locationId'] == 'old_harbor'
+    assert scene['name'] == 'Old Harbor'
+    assert location['id'] == 'old_harbor'
+    assert location['status'] == 'visited'
+    assert location['firstDiscoveredTurn'] == 22
+    assert location['lastVisitedTurn'] == 22
+
+
+def test_location_discover_adds_location_and_does_not_duplicate_on_retry():
+    state = _state()
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'discover_old_harbor',
+                'type': 'location.discover',
+                'source': 'post_dm',
+                'reason': 'The old harbor becomes known.',
+                'turnId': 23,
+                'locationId': 'old_harbor',
+                'name': 'Old Harbor',
+                'locationType': 'town',
+                'description': 'A foggy harbor with old stone piers.',
+                'tags': ['coastal'],
+            }
+        ],
+    )
+    first = apply_state_changes(state, validated_changes_for_application(validation))
+    retry = apply_state_changes(first['nextState'], validated_changes_for_application(validation))
+
+    assert validation['rejected'] == []
+    assert len(first['nextState']['locations']) == 1
+    assert first['nextState']['locations'][0]['name'] == 'Old Harbor'
+    assert retry['appliedChanges'] == []
+    assert len(retry['nextState']['locations']) == 1
+
+
+def test_quest_add_creates_quest_with_objective():
+    state = _state()
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'add_missing_sailor',
+                'type': 'quest.add',
+                'source': 'post_dm',
+                'reason': 'Velra gives the party a quest.',
+                'turnId': 24,
+                'questId': 'find_missing_sailor',
+                'title': 'Find the Missing Sailor',
+                'summary': 'Find what happened to the missing sailor.',
+                'stage': 'Investigate the docks',
+                'objectives': [
+                    {
+                        'id': 'talk_to_captain_velra',
+                        'description': 'Talk to Captain Velra about the missing sailor.',
+                        'status': 'open',
+                    }
+                ],
+            }
+        ],
+    )
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+    quest = result['nextState']['quests'][0]
+
+    assert validation['rejected'] == []
+    assert quest['id'] == 'find_missing_sailor'
+    assert quest['status'] == 'active'
+    assert quest['objectives'][0]['id'] == 'talk_to_captain_velra'
+    assert result['nextState']['currentScene']['activeQuestIds'] == ['find_missing_sailor']
+
+
+def test_quest_update_updates_stage_and_objective_without_duplicates():
+    state = _state()
+    state['quests'] = [
+        {
+            'id': 'find_missing_sailor',
+            'title': 'Find the Missing Sailor',
+            'status': 'active',
+            'summary': 'Find what happened to the missing sailor.',
+            'stage': 'Investigate the docks',
+            'objectives': [
+                {
+                    'id': 'talk_to_captain_velra',
+                    'description': 'Talk to Captain Velra about the missing sailor.',
+                    'status': 'open',
+                }
+            ],
+        }
+    ]
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'update_missing_sailor_stage',
+                'type': 'quest.update',
+                'source': 'post_dm',
+                'reason': 'The clue changes the quest stage.',
+                'turnId': 25,
+                'questId': 'find_missing_sailor',
+                'stage': 'Search Old Harbor',
+                'objectives': [
+                    {
+                        'id': 'talk_to_captain_velra',
+                        'description': 'Talk to Captain Velra about the missing sailor.',
+                        'status': 'completed',
+                    }
+                ],
+            }
+        ],
+    )
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+    quest = result['nextState']['quests'][0]
+
+    assert validation['rejected'] == []
+    assert quest['stage'] == 'Search Old Harbor'
+    assert len(quest['objectives']) == 1
+    assert quest['objectives'][0]['status'] == 'completed'
+
+
+def test_quest_complete_marks_completed_and_does_not_recomplete_on_retry():
+    state = _state()
+    state['quests'] = [{'id': 'find_missing_sailor', 'title': 'Find the Missing Sailor', 'status': 'active'}]
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'complete_missing_sailor',
+                'type': 'quest.complete',
+                'source': 'post_dm',
+                'reason': 'The DM clearly confirms completion.',
+                'turnId': 26,
+                'questId': 'find_missing_sailor',
+            }
+        ],
+    )
+    first = apply_state_changes(state, validated_changes_for_application(validation))
+    retry = apply_state_changes(first['nextState'], validated_changes_for_application(validation))
+
+    assert validation['rejected'] == []
+    assert first['nextState']['quests'][0]['status'] == 'completed'
+    assert first['nextState']['quests'][0]['completedAtTurn'] == 26
+    assert retry['appliedChanges'] == []
+    assert retry['nextState']['quests'][0]['completedAtTurn'] == 26
+
+
+def test_npc_discover_adds_npc_and_links_location_and_quest():
+    state = _state()
+    state['locations'] = [{'id': 'old_harbor', 'name': 'Old Harbor', 'npcIds': [], 'questIds': []}]
+    state['quests'] = [{'id': 'find_missing_sailor', 'title': 'Find the Missing Sailor', 'relatedNpcIds': []}]
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'discover_velra',
+                'type': 'npc.discover',
+                'source': 'post_dm',
+                'reason': 'Captain Velra introduces herself.',
+                'turnId': 27,
+                'npcId': 'captain_velra',
+                'name': 'Captain Velra',
+                'role': 'dock captain',
+                'disposition': 'neutral',
+                'locationId': 'old_harbor',
+                'questIds': ['find_missing_sailor'],
+            }
+        ],
+    )
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+
+    assert validation['rejected'] == []
+    assert result['nextState']['knownNpcs'][0]['id'] == 'captain_velra'
+    assert result['nextState']['locations'][0]['npcIds'] == ['captain_velra']
+    assert result['nextState']['quests'][0]['relatedNpcIds'] == ['captain_velra']
+
+
+def test_npc_update_merges_memory_disposition_and_location_without_wiping_description():
+    state = _state()
+    state['locations'] = [{'id': 'old_harbor', 'name': 'Old Harbor', 'npcIds': []}]
+    state['knownNpcs'] = [
+        {
+            'id': 'captain_velra',
+            'name': 'Captain Velra',
+            'description': 'A stern harbor watch captain with a scarred blue coat.',
+            'disposition': 'neutral',
+            'locationId': 'blackwake_tavern',
+            'memory': ['Promised payment for help.'],
+            'relationship': {'score': 0, 'label': 'neutral'},
+        }
+    ]
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'update_velra',
+                'type': 'npc.update',
+                'source': 'post_dm',
+                'reason': 'Velra shares more context.',
+                'turnId': 28,
+                'npcId': 'captain_velra',
+                'disposition': 'friendly',
+                'locationId': 'old_harbor',
+                'memory': ['Promised to help the party find the missing sailor.'],
+            }
+        ],
+    )
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+    npc = result['nextState']['knownNpcs'][0]
+
+    assert validation['rejected'] == []
+    assert npc['description'] == 'A stern harbor watch captain with a scarred blue coat.'
+    assert npc['disposition'] == 'friendly'
+    assert npc['locationId'] == 'old_harbor'
+    assert npc['memory'] == [
+        'Promised payment for help.',
+        'Promised to help the party find the missing sailor.',
+    ]
+
+
+def test_missing_named_npc_update_becomes_discovery():
+    state = _state()
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'update_marta_intro',
+                'type': 'npc.update',
+                'source': 'post_dm',
+                'reason': 'Marta introduces herself after being asked her name.',
+                'turnId': 29,
+                'npcId': 'marta_fenwick',
+                'name': 'Marta Fenwick',
+                'role': 'corner shopkeeper',
+                'disposition': 'friendly',
+                'memory': ['Told Hoggy her name after being asked.'],
+            }
+        ],
+    )
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+    npc = result['nextState']['knownNpcs'][0]
+    state_log = build_state_log(turn_id=29, post_validation=validation)
+
+    assert validation['rejected'] == []
+    assert validation['accepted'][0]['change']['type'] == 'npc.discover'
+    assert npc['id'] == 'marta_fenwick'
+    assert npc['name'] == 'Marta Fenwick'
+    assert npc['firstMetTurn'] == 29
+    assert npc['memory'] == ['Told Hoggy her name after being asked.']
+    assert state_log['lines'][0]['message'] == 'Discovered NPC: Marta Fenwick.'
+
+
+def test_missing_id_only_npc_update_still_rejects():
+    validation = validate_state_changes(
+        state=_state(),
+        changes=[
+            {
+                'id': 'update_old_woman',
+                'type': 'npc.update',
+                'source': 'post_dm',
+                'reason': 'Ambiguous update without a concrete name.',
+                'turnId': 29,
+                'npcId': 'old_woman',
+                'memory': ['She seems nervous.'],
+            }
+        ],
+    )
+
+    assert validation['accepted'] == []
+    assert validation['rejected'][0]['reason'] == 'NPC update target was not found.'
+
+
+def test_unsupported_world_change_type_is_rejected():
+    validation = validate_state_changes(
+        state=_state(),
+        changes=[
+            {
+                'id': 'delete_quest',
+                'type': 'quest.delete',
+                'source': 'post_dm',
+                'reason': 'Unsupported deletion.',
+                'questId': 'find_missing_sailor',
+            }
+        ],
+    )
+
+    assert validation['accepted'] == []
+    assert validation['rejected'][0]['reason'] == "Unsupported state change type 'quest.delete'."
 
 
 def test_post_dm_extract_loot(app):
@@ -919,7 +1271,7 @@ def test_post_dm_helper_unsupported_change_type_does_not_apply_or_fallback(app, 
     class FakeProvider:
         def generate(self, _request):
             return ProviderResponse(
-                text='{"proposedChanges":[{"type":"quest.add","actorId":"player_1","name":"Find the moon"}],"uncertainChanges":[]}',
+                text='{"proposedChanges":[{"type":"quest.delete","actorId":"player_1","name":"Find the moon"}],"uncertainChanges":[]}',
                 provider='fake',
                 model='fake-helper',
             )
@@ -1321,6 +1673,91 @@ def test_post_dm_pipeline_retry_does_not_duplicate_item_hp_currency_or_xp(app):
         assert stats['copper'] == 12
         assert stats['current_hp'] == 13
         assert stats['xp'] == 8
+        assert len(first['postAppliedChanges']) == len(second['postAppliedChanges'])
+
+
+def test_post_dm_pipeline_retry_does_not_duplicate_world_state_records(app, monkeypatch):
+    ids = seed_world_campaign_player_session(app)
+    helper_text = (
+        '{"proposedChanges":['
+        '{"type":"scene.move_location","locationId":"blackwake_tavern","name":"Blackwake Tavern","sceneType":"social","mood":"tense"},'
+        '{"type":"location.discover","locationId":"blackwake_tavern","name":"Blackwake Tavern","locationType":"tavern","description":"A busy tavern full of dockside rumors."},'
+        '{"type":"quest.add","questId":"find_missing_sailor","title":"Find the Missing Sailor","objectives":[{"id":"talk_to_velra","description":"Talk to Captain Velra.","status":"open"}]},'
+        '{"type":"npc.discover","npcId":"captain_velra","name":"Captain Velra","role":"dock captain","locationId":"blackwake_tavern","questIds":["find_missing_sailor"]}'
+        '],"uncertainChanges":[]}'
+    )
+
+    class FakeProvider:
+        def generate(self, _request):
+            return ProviderResponse(text=helper_text, provider='fake', model='fake-world-helper')
+
+    monkeypatch.setattr(post_extractor_module, 'get_helper_provider', lambda: FakeProvider())
+
+    with app.app_context():
+        app.config['AIDM_STATE_PIPELINE_HELPER_IN_TESTS'] = True
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        player = db.session.get(Player, ids['player_id'])
+        session_obj = db.session.get(Session, ids['session_id'])
+        assert campaign is not None
+        assert player is not None
+        assert session_obj is not None
+        actor_id = f'player_{player.player_id}'
+        state = _state()
+        state['playerCharacters'][0]['id'] = actor_id
+        state['playerCharacters'][0]['playerId'] = player.player_id
+        state['currentScene'] = {'locationId': 'old_road', 'name': 'Old Road', 'sceneType': 'travel', 'dangerLevel': 1}
+        state['locations'] = []
+        state['quests'] = []
+        state['knownNpcs'] = []
+        session_obj.state_snapshot = safe_json_dumps(state, {})
+        turn = DmTurn(
+            session_id=session_obj.session_id,
+            campaign_id=campaign.campaign_id,
+            player_id=player.player_id,
+            player_input='I enter the tavern.',
+            dm_output='You arrive at Blackwake Tavern. Captain Velra asks you to find the missing sailor.',
+            status='completed',
+            metadata_json=safe_json_dumps(
+                {
+                    STATE_PIPELINE_METADATA_KEY: {
+                        'version': STATE_PIPELINE_VERSION,
+                        'actorId': actor_id,
+                        'stateBeforeDm': state,
+                        'preDmValidation': {'validatedActions': [], 'immediateChanges': []},
+                        'immediateValidation': {'accepted': [], 'rejected': [], 'modified': []},
+                        'immediateAppliedChanges': [],
+                    }
+                },
+                {},
+            ),
+        )
+        db.session.add(turn)
+        db.session.commit()
+
+        first = post_dm_pipeline(
+            turn=turn,
+            session_obj=session_obj,
+            campaign=campaign,
+            player=player,
+            dm_response_text=turn.dm_output,
+        )
+        db.session.commit()
+        second = post_dm_pipeline(
+            turn=turn,
+            session_obj=session_obj,
+            campaign=campaign,
+            player=player,
+            dm_response_text=turn.dm_output,
+        )
+        db.session.commit()
+
+        snapshot = safe_json_loads(db.session.get(Session, ids['session_id']).state_snapshot, {})
+        assert snapshot['currentScene']['locationId'] == 'blackwake_tavern'
+        assert len([location for location in snapshot['locations'] if location.get('id') == 'blackwake_tavern']) == 1
+        assert len([quest for quest in snapshot['quests'] if quest.get('id') == 'find_missing_sailor']) == 1
+        assert len([npc for npc in snapshot['knownNpcs'] if npc.get('id') == 'captain_velra']) == 1
+        assert snapshot['locations'][0]['npcIds'] == ['captain_velra']
+        assert snapshot['quests'][0]['relatedNpcIds'] == ['captain_velra']
         assert len(first['postAppliedChanges']) == len(second['postAppliedChanges'])
 
 

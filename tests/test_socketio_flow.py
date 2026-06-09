@@ -1907,6 +1907,60 @@ def test_duplicate_player_connections_do_not_emit_player_left_until_last_disconn
     )
 
 
+def test_active_player_roster_includes_character_profile_and_typing_status(app, socketio):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        other_player = Player(
+            campaign_id=ids['campaign_id'],
+            name='Maya',
+            character_name='Borin',
+            race='Dwarf',
+            sex='male',
+            class_='Cleric',
+            level=2,
+        )
+        db.session.add(other_player)
+        db.session.commit()
+        other_player_id = other_player.player_id
+
+    client_one = socketio.test_client(app, flask_test_client=app.test_client())
+    client_two = socketio.test_client(app, flask_test_client=app.test_client())
+    assert client_one.is_connected()
+    assert client_two.is_connected()
+
+    client_one.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    client_one.get_received()
+    client_two.emit('join_session', {'session_id': ids['session_id'], 'player_id': other_player_id})
+    client_one.get_received()
+    client_two.get_received()
+
+    client_one.emit(
+        'typing_status',
+        {'session_id': ids['session_id'], 'player_id': ids['player_id'], 'is_typing': True},
+    )
+    roster = _event_payload(client_two.get_received(), 'active_players')
+    typing_player = next(player for player in roster if player['id'] == ids['player_id'])
+    other_payload = next(player for player in roster if player['id'] == other_player_id)
+
+    assert typing_player['character_name'] == 'Seraphina'
+    assert typing_player['race'] == 'Elf'
+    assert typing_player['class_'] == 'Ranger'
+    assert typing_player['char_class'] == 'Ranger'
+    assert typing_player['profile_image'].endswith('elf_male.png')
+    assert typing_player['is_typing'] is True
+    assert other_payload['race'] == 'Dwarf'
+    assert other_payload['char_class'] == 'Cleric'
+
+    client_one.emit(
+        'typing_status',
+        {'session_id': ids['session_id'], 'player_id': ids['player_id'], 'is_typing': False},
+    )
+    roster = _event_payload(client_two.get_received(), 'active_players')
+    typing_player = next(player for player in roster if player['id'] == ids['player_id'])
+    assert 'is_typing' not in typing_player
+
+
 def test_other_player_is_not_blocked_by_another_players_pending_check(app, socketio, app_runtime, monkeypatch):
     socketio_module = app_runtime['modules']['socketio_events']
 

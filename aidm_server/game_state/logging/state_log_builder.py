@@ -20,6 +20,22 @@ def _amount(change: dict[str, Any], key: str = 'amount') -> int:
     return max(0, int_or_default(change.get('actualAmount', change.get(key)), default=0))
 
 
+def _location_name(change: dict[str, Any]) -> str:
+    return str(change.get('locationName') or change.get('name') or change.get('locationId') or 'Location')
+
+
+def _quest_title(change: dict[str, Any]) -> str:
+    return str(change.get('questTitle') or change.get('title') or change.get('name') or change.get('questId') or 'Quest')
+
+
+def _npc_name(change: dict[str, Any]) -> str:
+    return str(change.get('npcName') or change.get('name') or change.get('npcId') or 'NPC')
+
+
+def _flag_key(change: dict[str, Any]) -> str:
+    return str(change.get('flagKey') or change.get('key') or 'flag')
+
+
 def _transfer_message(change: dict[str, Any], *, quantity: int) -> str:
     from_name = str(change.get('fromActorName') or change.get('from_actor_name') or '').strip()
     to_name = str(change.get('toActorName') or change.get('to_actor_name') or '').strip()
@@ -63,6 +79,47 @@ def _change_message(change: dict[str, Any], *, status: str, reason: str | None =
         return f"Removed {_amount(change)} XP{suffix}"
     if change_type == 'inventory.mark_used':
         return f"Marked {_item_name(change)} as recently used."
+    if change_type == 'scene.update':
+        scene_name = str(change.get('name') or change.get('sceneName') or '').strip()
+        if scene_name:
+            return f"Updated scene: {scene_name}."
+        mood = str(change.get('mood') or '').strip()
+        if mood:
+            return f"Updated scene mood: {mood}."
+        return 'Updated scene.'
+    if change_type == 'scene.move_location':
+        return f"Moved scene to {_location_name(change)}."
+    if change_type == 'location.discover':
+        return f"Discovered location: {_location_name(change)}."
+    if change_type == 'location.update':
+        return f"Updated location: {_location_name(change)}."
+    if change_type == 'location.connect':
+        return f"Connected locations: {_location_name(change)} and {change.get('connectedLocationName') or change.get('connectedLocationId') or 'Location'}."
+    if change_type == 'quest.add':
+        return f"Added quest: {_quest_title(change)}."
+    if change_type == 'quest.update':
+        stage = str(change.get('stage') or '').strip()
+        return f"Updated quest: {_quest_title(change)}{f' - {stage}' if stage else ''}."
+    if change_type == 'quest.objective.add':
+        return f"Added objective for quest: {_quest_title(change)}."
+    if change_type == 'quest.objective.update':
+        return f"Updated objective for quest: {_quest_title(change)}."
+    if change_type == 'quest.complete':
+        return f"Completed quest: {_quest_title(change)}."
+    if change_type == 'quest.fail':
+        return f"Failed quest: {_quest_title(change)}."
+    if change_type == 'npc.discover':
+        return f"Discovered NPC: {_npc_name(change)}."
+    if change_type == 'npc.update':
+        return f"Updated NPC: {_npc_name(change)}."
+    if change_type == 'npc.move':
+        return f"Moved NPC: {_npc_name(change)}."
+    if change_type == 'npc.relationship.update':
+        return f"Updated NPC relationship: {_npc_name(change)}."
+    if change_type == 'flag.set':
+        return f"Set flag: {_flag_key(change)}."
+    if change_type == 'flag.unset':
+        return f"Unset flag: {_flag_key(change)}."
     if reason:
         return reason
     return f"{change_type or 'state'} update applied."

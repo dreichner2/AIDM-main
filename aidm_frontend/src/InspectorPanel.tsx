@@ -6,8 +6,10 @@ import {
   type InventoryRow,
   type MapPanelMeta,
   type StatBlock,
+  type WorldStatePanel,
   type XpProgress,
 } from './gameSelectors'
+import { profileIconSrcForCharacter } from './profileIcons'
 import type { ActivePlayer, Campaign, CampaignSegment, MapItem } from './types'
 import type { MainTab } from './SessionBoard'
 
@@ -57,6 +59,7 @@ type InspectorPanelProps = {
   inventoryGoldLabel: string
   memorySnippetCount: number
   visibleCanonFacts: CanonFact[]
+  worldStatePanel: WorldStatePanel
   mapPanelTitle: string
   mapDescription: string
   mapMeta: MapPanelMeta
@@ -91,6 +94,19 @@ function inventoryIconName(icon: string) {
   return 'spark'
 }
 
+function activePlayerAvatarSrc(player: ActivePlayer) {
+  return (
+    player.profile_image ||
+    profileIconSrcForCharacter({ race: player.race, sex: player.sex }) ||
+    '/profile-icons/human_male.png'
+  )
+}
+
+function activePlayerAncestryClass(player: ActivePlayer) {
+  const className = player.char_class || player.class_
+  return [player.race, className].filter(Boolean).join(' ') || 'Adventurer'
+}
+
 export function InspectorPanel({
   inspectorTab,
   setInspectorTab,
@@ -113,6 +129,7 @@ export function InspectorPanel({
   inventoryGoldLabel,
   memorySnippetCount,
   visibleCanonFacts,
+  worldStatePanel,
   mapPanelTitle,
   mapDescription,
   mapMeta,
@@ -276,14 +293,30 @@ export function InspectorPanel({
             <ul className="active-player-list" aria-label="Active players in this session">
               {activePlayers.map((player) => {
                 const isSelectedPlayer = player.id === selectedPlayerId
+                const ancestryClass = activePlayerAncestryClass(player)
+                const isOtherPlayerTyping = !isSelectedPlayer && player.is_typing
                 return (
                   <li key={player.id} className={isSelectedPlayer ? 'selected' : ''}>
-                    <span className="presence-dot" aria-hidden="true" />
+                    <div className="active-player-avatar-wrap">
+                      <img
+                        className="active-player-avatar"
+                        src={activePlayerAvatarSrc(player)}
+                        alt={`${player.character_name} character icon`}
+                      />
+                      <span className="presence-dot" aria-hidden="true" />
+                    </div>
                     <div>
                       <strong>{player.character_name}</strong>
-                      <small>{player.name}</small>
+                      <small>{player.name} - {ancestryClass}</small>
                     </div>
-                    {isSelectedPlayer ? <span className="presence-badge">You</span> : null}
+                    <div className="presence-badges">
+                      {isOtherPlayerTyping ? (
+                        <span className="typing-badge" aria-label={`${player.character_name} is typing`}>
+                          Typing...
+                        </span>
+                      ) : null}
+                      {isSelectedPlayer ? <span className="presence-badge">You</span> : null}
+                    </div>
                   </li>
                 )
               })}
@@ -357,6 +390,70 @@ export function InspectorPanel({
           >
             View All Canon <ExternalLink size={12} />
           </button>
+        </section>
+      ) : null}
+
+      {inspectorTab === 'party' || inspectorTab === 'map' ? (
+        <section className="inspector-box world-state-box">
+          <div className="box-title">
+            <h3>Scene State</h3>
+            <span>{worldStatePanel.sceneType}</span>
+          </div>
+          <div className="scene-state-grid">
+            <div>
+              <span>Scene</span>
+              <strong>{worldStatePanel.sceneName}</strong>
+            </div>
+            <div>
+              <span>Mood</span>
+              <strong>{worldStatePanel.mood}</strong>
+            </div>
+            <div>
+              <span>Danger</span>
+              <strong>{worldStatePanel.dangerLevel}</strong>
+            </div>
+          </div>
+          <div className="world-state-list">
+            <div>
+              <strong>Active Quests</strong>
+              {worldStatePanel.activeQuests.length ? (
+                worldStatePanel.activeQuests.map((quest) => (
+                  <span key={quest.id || quest.title}>
+                    {quest.title}
+                    <small>{quest.stage}</small>
+                  </span>
+                ))
+              ) : (
+                <span className="empty-row">No active quests.</span>
+              )}
+            </div>
+            <div>
+              <strong>Known NPCs</strong>
+              {worldStatePanel.knownNpcs.length ? (
+                worldStatePanel.knownNpcs.map((npc) => (
+                  <span key={npc.id || npc.name}>
+                    {npc.name}
+                    <small>{npc.role} / {npc.disposition}</small>
+                  </span>
+                ))
+              ) : (
+                <span className="empty-row">No known NPCs.</span>
+              )}
+            </div>
+            <div>
+              <strong>Known Locations</strong>
+              {worldStatePanel.knownLocations.length ? (
+                worldStatePanel.knownLocations.map((location) => (
+                  <span key={location.id || location.name}>
+                    {location.name}
+                    <small>{location.status} / {location.type}</small>
+                  </span>
+                ))
+              ) : (
+                <span className="empty-row">No known locations.</span>
+              )}
+            </div>
+          </div>
         </section>
       ) : null}
 

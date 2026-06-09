@@ -324,6 +324,11 @@ def state_snapshot_for_session(
                 'dangerLevel': int_or_default(scene.get('dangerLevel'), default=0),
                 'mood': scene.get('mood') or None,
                 'combatState': scene.get('combatState') or 'none',
+                'description': scene.get('description') or '',
+                'activeNpcIds': scene.get('activeNpcIds') if isinstance(scene.get('activeNpcIds'), list) else [],
+                'activeQuestIds': scene.get('activeQuestIds') if isinstance(scene.get('activeQuestIds'), list) else [],
+                'musicTag': scene.get('musicTag') or None,
+                'updatedAtTurn': scene.get('updatedAtTurn'),
             },
             'playerCharacters': player_characters,
             'partyNpcs': snapshot.get('partyNpcs') if isinstance(snapshot.get('partyNpcs'), list) else [],
@@ -373,15 +378,70 @@ def compact_state_for_extraction(state: dict[str, Any]) -> dict[str, Any]:
             }
         )
     scene = state.get('currentScene') if isinstance(state.get('currentScene'), dict) else {}
+    quests = [
+        {
+            'id': quest.get('id'),
+            'title': quest.get('title'),
+            'status': quest.get('status'),
+            'stage': quest.get('stage'),
+            'summary': quest.get('summary'),
+            'objectives': [
+                {
+                    'id': objective.get('id'),
+                    'description': objective.get('description'),
+                    'status': objective.get('status'),
+                }
+                for objective in (quest.get('objectives') or [])
+                if isinstance(objective, dict)
+            ],
+        }
+        for quest in (state.get('quests') or [])
+        if isinstance(quest, dict)
+    ]
+    locations = [
+        {
+            'id': location.get('id'),
+            'name': location.get('name'),
+            'type': location.get('type'),
+            'status': location.get('status'),
+            'description': location.get('description'),
+            'connectedLocationIds': location.get('connectedLocationIds') if isinstance(location.get('connectedLocationIds'), list) else [],
+        }
+        for location in (state.get('locations') or [])
+        if isinstance(location, dict)
+    ]
+    npcs = [
+        {
+            'id': npc.get('id'),
+            'name': npc.get('name'),
+            'role': npc.get('role'),
+            'disposition': npc.get('disposition'),
+            'status': npc.get('status'),
+            'locationId': npc.get('locationId'),
+            'questIds': npc.get('questIds') if isinstance(npc.get('questIds'), list) else [],
+        }
+        for npc in [*(state.get('knownNpcs') or []), *(state.get('partyNpcs') or [])]
+        if isinstance(npc, dict)
+    ]
     return {
         'sessionId': state.get('sessionId'),
         'campaignId': state.get('campaignId'),
         'currentScene': {
             'locationId': scene.get('locationId'),
             'name': scene.get('name'),
+            'sceneType': scene.get('sceneType'),
+            'dangerLevel': scene.get('dangerLevel'),
+            'mood': scene.get('mood'),
             'combatState': scene.get('combatState'),
+            'description': scene.get('description'),
+            'activeNpcIds': scene.get('activeNpcIds') if isinstance(scene.get('activeNpcIds'), list) else [],
+            'activeQuestIds': scene.get('activeQuestIds') if isinstance(scene.get('activeQuestIds'), list) else [],
         },
         'playerCharacters': players,
+        'quests': quests,
+        'locations': locations,
+        'npcs': npcs,
+        'flags': state.get('flags') if isinstance(state.get('flags'), dict) else {},
     }
 
 

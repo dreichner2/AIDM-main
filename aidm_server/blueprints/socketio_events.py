@@ -10,6 +10,7 @@ from aidm_server.llm import CONTEXT_VERSION, query_dm_function_stream
 from aidm_server.logging_context import clear_logging_context, set_logging_context
 from aidm_server.database import db
 from aidm_server.models import DmTurn, safe_json_loads
+from aidm_server.profile_icons import profile_icon_src_for_character
 from aidm_server.socket_contracts import socket_error_payload as socket_error, validate_send_message_payload
 from aidm_server.socket_runtime import SocketRuntime
 from aidm_server.socket_state import SocketState
@@ -58,6 +59,14 @@ def _track_active_player(session_id: int, player_data: dict, sid: str) -> bool:
 
 def _release_active_player(session_id: int, player_id: int, sid: str) -> bool:
     return socket_runtime.release_active_player(session_id, player_id, sid)
+
+
+def _player_is_typing(session_id: int, player_id: int) -> bool:
+    return socket_runtime.player_is_typing(session_id, player_id)
+
+
+def _set_player_typing(session_id: int, player_id: int, sid: str, is_typing: bool) -> bool:
+    return socket_runtime.set_player_typing(session_id, player_id, sid, is_typing)
 
 
 def _admin_passcode_is_valid(data: dict | None) -> bool:
@@ -166,6 +175,11 @@ def register_socketio_events(socketio):
                     'id': player.player_id,
                     'character_name': player.character_name,
                     'name': player.name,
+                    'race': player.race,
+                    'sex': player.sex,
+                    'profile_image': profile_icon_src_for_character(player.race, player.sex),
+                    'class_': player.class_,
+                    'char_class': player.class_,
                 }
 
             connection_record = socket_state.ensure_connection(
@@ -246,15 +260,72 @@ def register_socketio_events(socketio):
 
             leave_room(str(session_id))
 
+            was_typing = _player_is_typing(session_id, player_id)
             removed_player = _release_active_player(session_id, player_id, request.sid)
             if removed_player:
                 emit('player_left', {'id': player_id}, room=str(session_id))
+                emit('active_players', _active_player_payloads(session_id), room=str(session_id))
+            elif was_typing != _player_is_typing(session_id, player_id):
                 emit('active_players', _active_player_payloads(session_id), room=str(session_id))
 
             if connection_record is not None:
                 connection_record['session_id'] = None
                 connection_record['player_id'] = None
             telemetry_metric('socket.leave.success_total', 1)
+        finally:
+            clear_logging_context()
+
+    @socketio.on('typing_status')
+    def handle_typing_status(data):
+        _set_socket_context('typing_status', data if isinstance(data, dict) else None)
+        try:
+            if not isinstance(data, dict):
+                emit('error', socket_error('validation_error', 'Expected object payload for typing_status.'))
+                telemetry_event('socket.typing.validation_error', payload={'sid': request.sid}, severity='warning')
+                return
+
+            workspace_id = _socket_workspace_id(data_payload=data)
+            if not workspace_id:
+                emit('error', socket_error('unauthorized', 'Missing or invalid auth token.'))
+                telemetry_event('socket.typing.unauthorized', payload={'sid': request.sid}, severity='warning')
+                return
+
+            session_id = coerce_int(data.get('session_id'))
+            player_id = coerce_int(data.get('player_id'))
+            set_logging_context(session_id=session_id)
+            if not session_id or not player_id:
+                emit('error', socket_error('validation_error', 'session_id and player_id are required'))
+                telemetry_event('socket.typing.validation_error', payload={'sid': request.sid}, severity='warning')
+                return
+
+            connection_record = socket_state.connection(request.sid)
+            bound_session_id = coerce_int(connection_record.get('session_id')) if connection_record else None
+            bound_player_id = coerce_int(connection_record.get('player_id')) if connection_record else None
+            if bound_session_id != session_id or bound_player_id != player_id:
+                emit(
+                    'error',
+                    socket_error(
+                        'player_identity_mismatch',
+                        'This socket can only update typing for the player and session it joined with.',
+                    ),
+                )
+                telemetry_event(
+                    'socket.typing.player_identity_mismatch',
+                    payload={
+                        'sid': request.sid,
+                        'session_id': session_id,
+                        'player_id': player_id,
+                        'bound_session_id': bound_session_id,
+                        'bound_player_id': bound_player_id,
+                    },
+                    severity='warning',
+                )
+                return
+
+            is_typing = data.get('is_typing') is True or data.get('typing') is True
+            if _set_player_typing(session_id, player_id, request.sid, is_typing):
+                emit('active_players', _active_player_payloads(session_id), room=str(session_id))
+            telemetry_metric('socket.typing_status_total', 1)
         finally:
             clear_logging_context()
 
@@ -351,6 +422,9 @@ def register_socketio_events(socketio):
                     severity='warning',
                 )
                 return
+
+            if _set_player_typing(session_id, player_id, request.sid, False):
+                emit('active_players', _active_player_payloads(session_id), room=str(session_id))
 
             session_obj = workspace_session(session_id, workspace_id)
             if not session_obj or session_obj.campaign_id != campaign_id:

@@ -105,6 +105,7 @@ export type SessionState = {
   rolling_summary: string
   active_segments: unknown[]
   memory_snippets: unknown[]
+  state_snapshot: JsonRecord | null
   updated_at: string | null
 }
 

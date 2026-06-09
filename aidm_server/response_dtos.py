@@ -322,6 +322,7 @@ def session_state_payload(session_obj: Session, session_state: SessionState | No
             'rolling_summary': '',
             'active_segments': [],
             'memory_snippets': [],
+            'state_snapshot': safe_json_loads(session_obj.state_snapshot, None),
             'updated_at': None,
         }
 
@@ -333,6 +334,7 @@ def session_state_payload(session_obj: Session, session_state: SessionState | No
         'rolling_summary': session_state.rolling_summary,
         'active_segments': safe_json_loads(session_state.active_segments, []),
         'memory_snippets': safe_json_loads(session_state.memory_snippets, []),
+        'state_snapshot': safe_json_loads(session_obj.state_snapshot, None),
         'updated_at': isoformat(session_state.updated_at),
     }
 

@@ -34,7 +34,7 @@ from aidm_server.turn_events import record_turn_event
 
 
 STATE_UPDATE_EVENT = 'state_update'
-MANAGED_STATE_DOMAINS = ['inventory', 'currency', 'health', 'xp']
+MANAGED_STATE_DOMAINS = ['inventory', 'currency', 'health', 'xp', 'scene', 'quests', 'locations', 'npcs', 'flags']
 SAFE_PRE_DM_IMMEDIATE_CHANGE_TYPES = {'inventory.mark_used'}
 CONFIRMATION_DENIAL_PATTERN = re.compile(
     r"\b(?:do not|don't|does not|doesn't|did not|cannot|can't|fail|fails|failed|before you can|instead)\b",
@@ -276,6 +276,32 @@ def _state_change_signature(change: dict[str, Any]) -> tuple[Any, ...] | None:
         return (change_type, actor_id, int_or_default(change.get('amount'), default=0))
     if change_type in {'xp.add', 'xp.remove'}:
         return (change_type, actor_id, int_or_default(change.get('amount'), default=0))
+    if change_type in {'scene.update', 'scene.move_location'}:
+        return (
+            change_type,
+            normalize_item_name(change.get('locationId') or change.get('name')),
+            normalize_item_name(change.get('sceneType') or change.get('mood') or change.get('combatState')),
+        )
+    if change_type.startswith('location.'):
+        return (
+            change_type,
+            normalize_item_name(change.get('locationId') or change.get('name')),
+            normalize_item_name(change.get('connectedLocationId') or change.get('connectedLocationName')),
+        )
+    if change_type.startswith('quest.'):
+        return (
+            change_type,
+            normalize_item_name(change.get('questId') or change.get('title') or change.get('name')),
+            normalize_item_name(change.get('objectiveId') or change.get('stage')),
+        )
+    if change_type.startswith('npc.'):
+        return (
+            change_type,
+            normalize_item_name(change.get('npcId') or change.get('name')),
+            normalize_item_name(change.get('locationId') or change.get('disposition') or change.get('status')),
+        )
+    if change_type.startswith('flag.'):
+        return (change_type, normalize_item_name(change.get('flagKey')))
     return None
 
 
@@ -510,6 +536,13 @@ def _dm_context_packet(
         'stateChangesAlreadyApplied': [
             {
                 'type': change.get('type'),
+                'locationId': change.get('locationId'),
+                'locationName': change.get('locationName') or change.get('name'),
+                'questId': change.get('questId'),
+                'questTitle': change.get('questTitle') or change.get('title'),
+                'npcId': change.get('npcId'),
+                'npcName': change.get('npcName') or change.get('name'),
+                'flagKey': change.get('flagKey'),
                 'itemName': change.get('itemName'),
                 'amount': change.get('actualAmount', change.get('amount')),
                 'currency': change.get('currency'),

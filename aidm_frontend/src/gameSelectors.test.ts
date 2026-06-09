@@ -17,6 +17,7 @@ import {
   truncateText,
   turnNumber,
   turnPersistenceLabel,
+  worldStateFromSnapshot,
 } from './gameSelectors'
 import type { CampaignSegment, MapItem, Player, SessionLogEntry, TimelineEntry } from './types'
 
@@ -246,6 +247,70 @@ describe('game selector helpers', () => {
       threat: 'High',
       threatTone: 'high',
       weather: 'Cold rain',
+    })
+  })
+
+  it('builds world scene panel data from a live state snapshot', () => {
+    expect(
+      worldStateFromSnapshot({
+        currentScene: {
+          name: 'Blackwake Tavern',
+          sceneType: 'social',
+          mood: 'tense',
+          dangerLevel: 2,
+          activeQuestIds: ['find_missing_sailor'],
+        },
+        quests: [
+          {
+            id: 'find_missing_sailor',
+            title: 'Find the Missing Sailor',
+            status: 'active',
+            stage: 'Investigate the docks',
+          },
+        ],
+        locations: [
+          { id: 'blackwake_tavern', name: 'Blackwake Tavern', status: 'visited', type: 'tavern' },
+        ],
+        knownNpcs: [
+          {
+            id: 'captain_velra',
+            name: 'Captain Velra',
+            role: 'dock captain',
+            disposition: 'friendly',
+            status: 'met',
+          },
+        ],
+      }),
+    ).toEqual({
+      sceneName: 'Blackwake Tavern',
+      sceneType: 'social',
+      mood: 'tense',
+      dangerLevel: '2',
+      activeQuests: [
+        {
+          id: 'find_missing_sailor',
+          title: 'Find the Missing Sailor',
+          status: 'active',
+          stage: 'Investigate the docks',
+        },
+      ],
+      knownLocations: [
+        {
+          id: 'blackwake_tavern',
+          name: 'Blackwake Tavern',
+          status: 'visited',
+          type: 'tavern',
+        },
+      ],
+      knownNpcs: [
+        {
+          id: 'captain_velra',
+          name: 'Captain Velra',
+          role: 'dock captain',
+          disposition: 'friendly',
+          status: 'met',
+        },
+      ],
     })
   })
 })

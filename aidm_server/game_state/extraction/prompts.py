@@ -43,9 +43,16 @@ def build_post_dm_prompt(
     dm_response: str,
     recent_timeline: list[dict[str, Any]],
 ) -> str:
+    allowed_types = (
+        'inventory.add, inventory.remove, inventory.transfer, currency.add, currency.remove, currency.transfer, '
+        'health.heal, health.damage, xp.add, xp.remove, scene.update, scene.move_location, '
+        'location.discover, location.update, location.connect, quest.add, quest.update, '
+        'quest.objective.add, quest.objective.update, quest.complete, quest.fail, '
+        'npc.discover, npc.update, npc.move, npc.relationship.update, flag.set, flag.unset'
+    )
     return (
         'Return JSON with keys proposedChanges, uncertainChanges, notes. '
-        'Allowed proposedChanges types: inventory.add, inventory.remove, inventory.transfer, currency.add, currency.remove, currency.transfer, health.heal, health.damage, xp.add, xp.remove.\n\n'
+        f'Allowed proposedChanges types: {allowed_types}.\n\n'
         'For every inventory.add, inventory.remove, and inventory.transfer, include quantity; use 1 when exactly one item is indicated by context. '
         'For inventory.add, provide item as an object with name, quantity, and numeric weight in pounds when the item is physical. Do not return item as a bare string. '
         'If exact weight is not stated, infer a reasonable game weight from the item and context.\n\n'
@@ -53,6 +60,25 @@ def build_post_dm_prompt(
         'For currency.add, currency.remove, and currency.transfer, include amount and currency using key "currency" with one of pp, gp, ep, sp, cp. '
         'For transfer changes, include the source actor as actorId/fromActorId and the recipient as toActorId or toActorName.\n\n'
         'For XP changes, use xp.add or xp.remove with positive integer amount.\n\n'
+        'For scene.update, include only persistent scene fields that clearly changed: locationId, name, sceneType, dangerLevel, mood, combatState, description, activeNpcIds, activeQuestIds, musicTag. '
+        'sceneType must be one of social, exploration, travel, combat, dungeon, rest, mystery, shopping, dialogue. '
+        'mood must be one of calm, tense, eerie, heroic, sad, mysterious, dangerous. '
+        'combatState must be one of none, pending, active, resolved.\n\n'
+        'For scene.move_location, include locationId when known and name for the destination. This should only be used when the response says the party arrives, enters, leaves for, or otherwise actually moves to the place.\n\n'
+        'For location.discover and location.update, use locationId plus name. If no id is stated, provide a stable slug in locationId. '
+        'Use locationType for the location category, not type, with one of tavern, town, dungeon, forest, road, shop, castle, ruins, cave, wilderness, other. '
+        'Use status only when clearly known: known, discovered, visited, hidden, inaccessible. Do not create locations for throwaway flavor mentions.\n\n'
+        'For quests, use questId plus title. For quest.add include summary/stage/objectives when stated. '
+        'Quest status must be available, active, completed, failed, abandoned, or hidden. '
+        'Objectives have id, description, and status open, completed, failed, or optional. '
+        'Only use quest.complete or quest.fail when completion or failure is clearly confirmed by the DM response.\n\n'
+        'For NPCs, use npcId plus name. npc.discover is for newly known or directly introduced NPCs; npc.update is for known NPC facts. '
+        'NPC disposition must be friendly, neutral, hostile, suspicious, afraid, loyal, or unknown. '
+        'NPC status must be known, met, allied, hostile, dead, missing, or unknown. '
+        'Use memory for short stable NPC memories that the app should persist.\n\n'
+        'For flags, use flagKey and flagValue for flag.set; use flagKey for flag.unset.\n\n'
+        'Extract world/story changes only when the DM response clearly states them. Avoid speculative, conditional, hypothetical, or purely flavor-only mentions. '
+        'Do not duplicate already-applied changes. The app validates and applies changes; you only propose structured changes.\n\n'
         f'State before DM:\n{json.dumps(state_before_dm, separators=(",", ":"))}\n\n'
         f'Player message:\n{player_message}\n\n'
         f'Validated pre-DM actions:\n{json.dumps(validated_actions, separators=(",", ":"))}\n\n'

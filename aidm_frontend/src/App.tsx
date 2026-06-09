@@ -58,6 +58,7 @@ import {
   pendingRollOptionsFromTimeline,
   stringValue,
   truncateText,
+  worldStateFromSnapshot,
 } from './gameSelectors'
 import { profileIconSrcForCharacter } from './profileIcons'
 import './App.css'
@@ -659,6 +660,7 @@ function App() {
     itemQuantity,
     itemCostGold,
     setActionText,
+    updateActionText,
     setAdminPasscode,
     setSelectedInteractionTargetId,
     setSelectedInteractionType,
@@ -2044,6 +2046,10 @@ function App() {
     }) ||
     avatarDataUri(displayCharacter.name, 'character')
   const memorySnippets = memorySnippetRecords(sessionState?.memory_snippets)
+  const activeSessionSnapshot = isRecord(sessionState?.state_snapshot)
+    ? sessionState.state_snapshot
+    : snapshotRecord(activeSession)
+  const worldStatePanel = worldStateFromSnapshot(activeSessionSnapshot)
   const canonFacts = canonFactsFromMemorySnippets(memorySnippets, selectedSessionId)
   const visibleCanonFacts = inspectorTab === 'canon' ? canonFacts : canonFacts.slice(0, 3)
   const selectedSegment =
@@ -2525,6 +2531,7 @@ function App() {
           itemOptions,
           setSelectedItemName,
           setItemQuantity,
+          updateActionText,
           updateSelectedInventoryAction,
           updateItemDraftName,
           updateItemCostGold,
@@ -2553,6 +2560,7 @@ function App() {
         inventoryGoldLabel={inventoryGoldLabel}
         memorySnippetCount={memorySnippets.length}
         visibleCanonFacts={visibleCanonFacts}
+        worldStatePanel={worldStatePanel}
         mapPanelTitle={mapPanelTitle}
         mapDescription={mapDescription}
         mapMeta={mapMeta}

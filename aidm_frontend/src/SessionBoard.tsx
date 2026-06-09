@@ -1,4 +1,4 @@
-import type { ChangeEvent, Dispatch, RefObject, SetStateAction } from 'react'
+import { useState, type ChangeEvent, type Dispatch, type RefObject, type SetStateAction } from 'react'
 import {
   ArrowDown,
   ChevronDown,
@@ -20,6 +20,14 @@ import type { Campaign, ClarificationRequest, Player, SessionState, SessionSumma
 
 export type MainTab = 'turns' | 'dm' | 'notes'
 
+type ChatTextSize = 'default' | 'large' | 'extra'
+type ChatTextFont = 'default' | 'sans' | 'mono'
+
+type ChatTextSettings = {
+  size: ChatTextSize
+  font: ChatTextFont
+}
+
 type DmExecutionStats = {
   tokens: number | string
   time: string
@@ -28,6 +36,42 @@ type DmExecutionStats = {
 }
 
 type CanonFact = [fact: string, source: string]
+
+const CHAT_TEXT_SETTINGS_STORAGE_KEY = 'aidm:chatTextSettings'
+const DEFAULT_CHAT_TEXT_SETTINGS: ChatTextSettings = {
+  size: 'default',
+  font: 'default',
+}
+
+function isChatTextSize(value: unknown): value is ChatTextSize {
+  return value === 'default' || value === 'large' || value === 'extra'
+}
+
+function isChatTextFont(value: unknown): value is ChatTextFont {
+  return value === 'default' || value === 'sans' || value === 'mono'
+}
+
+function loadChatTextSettings(): ChatTextSettings {
+  try {
+    const rawValue = localStorage.getItem(CHAT_TEXT_SETTINGS_STORAGE_KEY)
+    if (!rawValue) return DEFAULT_CHAT_TEXT_SETTINGS
+    const parsed = JSON.parse(rawValue) as Partial<ChatTextSettings>
+    return {
+      size: isChatTextSize(parsed.size) ? parsed.size : DEFAULT_CHAT_TEXT_SETTINGS.size,
+      font: isChatTextFont(parsed.font) ? parsed.font : DEFAULT_CHAT_TEXT_SETTINGS.font,
+    }
+  } catch {
+    return DEFAULT_CHAT_TEXT_SETTINGS
+  }
+}
+
+function saveChatTextSettings(settings: ChatTextSettings) {
+  try {
+    localStorage.setItem(CHAT_TEXT_SETTINGS_STORAGE_KEY, JSON.stringify(settings))
+  } catch {
+    // Reading controls still work for the current page when storage is unavailable.
+  }
+}
 
 type SessionBoardProps = {
   activeSessionTitle: string
@@ -140,10 +184,18 @@ export function SessionBoard({
   actionComposerProps,
 }: SessionBoardProps) {
   const loading = workspaceLoading || sessionLoading
+  const [chatTextSettings, setChatTextSettings] = useState(loadChatTextSettings)
+  const [chatTextMenuOpen, setChatTextMenuOpen] = useState(false)
   const streamLabel =
     currentResponseEntry && turnPersistenceLabel(currentResponseEntry)
       ? turnPersistenceLabel(currentResponseEntry)
       : sendPending || streamingTurnActive ? 'Streaming...' : 'Ready'
+  const chatTextClassName = `chat-text-size-${chatTextSettings.size} chat-text-font-${chatTextSettings.font}`
+
+  const updateChatTextSettings = (nextSettings: ChatTextSettings) => {
+    setChatTextSettings(nextSettings)
+    saveChatTextSettings(nextSettings)
+  }
 
   const toggleTurnExpanded = (turnId: string) => {
     setExpandedTurnIds((current) => {
@@ -266,10 +318,62 @@ export function SessionBoard({
         </button>
       </div>
 
+      <div className="chat-reading-control">
+        <button
+          type="button"
+          className="chat-reading-toggle"
+          aria-label="Chat text options"
+          aria-expanded={chatTextMenuOpen}
+          aria-controls="chat-reading-menu"
+          title="Chat text options"
+          onClick={() => setChatTextMenuOpen((current) => !current)}
+        >
+          Aa
+        </button>
+        {chatTextMenuOpen ? (
+          <div id="chat-reading-menu" className="chat-reading-menu" role="group" aria-label="Chat text display">
+            <label>
+              <span>Size</span>
+              <select
+                aria-label="Chat text size"
+                value={chatTextSettings.size}
+                onChange={(event) =>
+                  updateChatTextSettings({
+                    ...chatTextSettings,
+                    size: event.target.value as ChatTextSize,
+                  })
+                }
+              >
+                <option value="default">Default</option>
+                <option value="large">Large</option>
+                <option value="extra">Extra</option>
+              </select>
+            </label>
+            <label>
+              <span>Font</span>
+              <select
+                aria-label="Chat text font"
+                value={chatTextSettings.font}
+                onChange={(event) =>
+                  updateChatTextSettings({
+                    ...chatTextSettings,
+                    font: event.target.value as ChatTextFont,
+                  })
+                }
+              >
+                <option value="default">Default</option>
+                <option value="sans">Sans</option>
+                <option value="mono">Mono</option>
+              </select>
+            </label>
+          </div>
+        ) : null}
+      </div>
+
       {mainTab === 'turns' ? (
         <>
           <section
-            className="turn-feed"
+            className={`turn-feed ${chatTextClassName}`}
             ref={turnFeedRef}
             onScroll={updateJumpToLatestVisibility}
           >
@@ -361,7 +465,7 @@ export function SessionBoard({
       ) : null}
 
       {mainTab === 'dm' ? (
-        <section className="turn-feed single-panel">
+        <section className={`turn-feed single-panel ${chatTextClassName}`}>
           {loading ? (
             <div className="panel-loading-strip" role="status">
               {sessionLoading ? 'Loading session response...' : 'Loading campaign workspace...'}

@@ -5,12 +5,51 @@ import re
 from typing import Any
 
 from aidm_server.game_state.action_types import PRE_DM_ACTION_TYPES
-from aidm_server.game_state.change_types import PHASE_1_STATE_CHANGE_TYPES
+from aidm_server.game_state.change_types import STATE_CHANGE_TYPES, WORLD_STATE_CHANGE_TYPES
+from aidm_server.game_state.models import stable_slug
 
 GENERIC_INTENT_SAFE_FIELDS = {'summary', 'intentDescription', 'intent_description', 'description', 'sourceText', 'source_text'}
 POSITIVE_INT_FIELDS = {'quantity', 'amount'}
 WEIGHT_FIELDS = ('weight', 'itemWeight', 'item_weight', 'weightLbs', 'weight_lbs')
 CURRENCY_FIELDS = ('currency', 'currencyType', 'currency_type', 'currencyName', 'currency_name', 'coinType', 'coin_type')
+WORLD_FIELD_ALIASES = {
+    'actor_id': 'actorId',
+    'turn_id': 'turnId',
+    'change_id': 'changeId',
+    'location_id': 'locationId',
+    'location_name': 'locationName',
+    'scene_type': 'sceneType',
+    'danger_level': 'dangerLevel',
+    'combat_state': 'combatState',
+    'active_npc_ids': 'activeNpcIds',
+    'active_quest_ids': 'activeQuestIds',
+    'music_tag': 'musicTag',
+    'updated_at_turn': 'updatedAtTurn',
+    'parent_location_id': 'parentLocationId',
+    'connected_location_id': 'connectedLocationId',
+    'connected_location_ids': 'connectedLocationIds',
+    'from_location_id': 'fromLocationId',
+    'to_location_id': 'toLocationId',
+    'npc_ids': 'npcIds',
+    'quest_ids': 'questIds',
+    'first_discovered_turn': 'firstDiscoveredTurn',
+    'last_visited_turn': 'lastVisitedTurn',
+    'quest_id': 'questId',
+    'related_npc_ids': 'relatedNpcIds',
+    'related_location_ids': 'relatedLocationIds',
+    'important_item_ids': 'importantItemIds',
+    'created_at_turn': 'createdAtTurn',
+    'completed_at_turn': 'completedAtTurn',
+    'objective_id': 'objectiveId',
+    'npc_id': 'npcId',
+    'last_seen_turn': 'lastSeenTurn',
+    'first_met_turn': 'firstMetTurn',
+    'score_delta': 'scoreDelta',
+    'relationship_score': 'relationshipScore',
+    'relationship_label': 'relationshipLabel',
+    'flag_key': 'flagKey',
+    'flag_value': 'flagValue',
+}
 CURRENCY_ALIASES = {
     'pp': 'pp',
     'platinum': 'pp',
@@ -40,6 +79,32 @@ CURRENCY_ALIASES = {
     'copper pieces': 'cp',
 }
 _MISSING = object()
+
+
+def _copy_aliases(payload: dict[str, Any], aliases: dict[str, str]) -> None:
+    for source_key, target_key in aliases.items():
+        if source_key in payload and target_key not in payload:
+            payload[target_key] = payload.pop(source_key)
+
+
+def _as_record(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item or '').strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _stable_record_id(*values: Any) -> str:
+    for value in values:
+        text = str(value or '').strip()
+        if text:
+            return stable_slug(text)
+    return ''
 
 
 def extract_json_object(text: str | None) -> dict[str, Any] | None:
@@ -213,12 +278,114 @@ def _normalize_notes(raw_notes: Any) -> list[str]:
     return []
 
 
+def _normalize_world_change_ids(change: dict[str, Any], raw_id: Any) -> None:
+    change_type = str(change.get('type') or '').strip()
+    _copy_aliases(change, WORLD_FIELD_ALIASES)
+    raw_record_id = str(raw_id or '').strip()
+
+    location = _as_record(change.get('location'))
+    quest = _as_record(change.get('quest'))
+    npc = _as_record(change.get('npc'))
+    objective = _as_record(change.get('objective'))
+
+    if change_type in {'scene.move_location', 'location.discover', 'location.update'}:
+        if 'locationName' in change and 'name' not in change:
+            change['name'] = change.get('locationName')
+        change['locationId'] = _stable_record_id(
+            change.get('locationId'),
+            location.get('id'),
+            location.get('locationId'),
+            raw_record_id if change_type.startswith('location.') else None,
+            change.get('name'),
+            location.get('name'),
+        )
+        if not change.get('name') and location.get('name'):
+            change['name'] = location.get('name')
+
+    if change_type == 'location.connect':
+        if change.get('locationName') and not change.get('name'):
+            change['name'] = change.get('locationName')
+        change['locationId'] = _stable_record_id(change.get('locationId'), change.get('fromLocationId'), raw_record_id, change.get('name'))
+        change['connectedLocationId'] = _stable_record_id(
+            change.get('connectedLocationId'),
+            change.get('toLocationId'),
+            change.get('connectedLocationName'),
+            change.get('toLocationName'),
+        )
+        if change.get('toLocationName') and not change.get('connectedLocationName'):
+            change['connectedLocationName'] = change.get('toLocationName')
+
+    if change_type.startswith('quest.'):
+        if 'name' in change and 'title' not in change:
+            change['title'] = change.get('name')
+        change['questId'] = _stable_record_id(
+            change.get('questId'),
+            quest.get('id'),
+            quest.get('questId'),
+            raw_record_id,
+            change.get('title'),
+            quest.get('title'),
+        )
+        if not change.get('title') and quest.get('title'):
+            change['title'] = quest.get('title')
+        if isinstance(change.get('objectives'), list):
+            for item in change['objectives']:
+                if isinstance(item, dict):
+                    _copy_aliases(item, WORLD_FIELD_ALIASES)
+                    if not item.get('id'):
+                        item['id'] = _stable_record_id(item.get('objectiveId'), item.get('description'))
+        elif objective:
+            _copy_aliases(objective, WORLD_FIELD_ALIASES)
+            if not objective.get('id'):
+                objective['id'] = _stable_record_id(objective.get('objectiveId'), objective.get('description'))
+            change['objective'] = objective
+        if not change.get('objectiveId') and objective.get('id'):
+            change['objectiveId'] = objective.get('id')
+
+    if change_type.startswith('npc.'):
+        if 'npcName' in change and 'name' not in change:
+            change['name'] = change.get('npcName')
+        change['npcId'] = _stable_record_id(
+            change.get('npcId'),
+            npc.get('id'),
+            npc.get('npcId'),
+            raw_record_id,
+            change.get('name'),
+            npc.get('name'),
+        )
+        if not change.get('name') and npc.get('name'):
+            change['name'] = npc.get('name')
+
+    if change_type.startswith('flag.'):
+        if change.get('key') and not change.get('flagKey'):
+            change['flagKey'] = change.get('key')
+        if 'value' in change and 'flagValue' not in change:
+            change['flagValue'] = change.get('value')
+        if change.get('flagKey'):
+            change['flagKey'] = stable_slug(change.get('flagKey'))
+
+    for key in (
+        'activeNpcIds',
+        'activeQuestIds',
+        'connectedLocationIds',
+        'npcIds',
+        'questIds',
+        'tags',
+        'relatedNpcIds',
+        'relatedLocationIds',
+        'importantItemIds',
+    ):
+        if key in change:
+            change[key] = _as_string_list(change.get(key))
+
+
 def normalize_state_change(raw_change: Any, *, fallback_actor_id: str, fallback_id: str, source: str) -> dict[str, Any] | None:
     if not isinstance(raw_change, dict):
         return None
     change_type = str(raw_change.get('type') or '').strip()
-    if change_type not in PHASE_1_STATE_CHANGE_TYPES:
+    if change_type not in STATE_CHANGE_TYPES:
         return None
+    is_world_change = change_type in WORLD_STATE_CHANGE_TYPES
     for field in POSITIVE_INT_FIELDS:
         if field in raw_change:
             try:
@@ -227,7 +394,9 @@ def normalize_state_change(raw_change: Any, *, fallback_actor_id: str, fallback_
             except (TypeError, ValueError):
                 return None
     change = dict(raw_change)
-    change['id'] = str(raw_change.get('id') or fallback_id)
+    raw_id = raw_change.get('id')
+    change_id = raw_change.get('changeId') or raw_change.get('change_id') or (None if is_world_change else raw_id) or fallback_id
+    change['id'] = str(change_id)
     change['type'] = change_type
     change['source'] = str(raw_change.get('source') or source)
     change['actorId'] = str(
@@ -239,6 +408,8 @@ def normalize_state_change(raw_change: Any, *, fallback_actor_id: str, fallback_
     )
     change['visible'] = bool(raw_change.get('visible', True))
     change['reason'] = str(raw_change.get('reason') or 'Extracted from DM response.')
+    if is_world_change:
+        _normalize_world_change_ids(change, raw_id)
     currency = _currency_code(raw_change)
     if currency:
         change['currency'] = currency
@@ -308,7 +479,47 @@ def normalize_state_change(raw_change: Any, *, fallback_actor_id: str, fallback_
 
 def _state_change_has_required_fields(change: dict[str, Any]) -> bool:
     change_type = str(change.get('type') or '').strip()
-    if not change.get('id') or not change.get('actorId'):
+    if not change.get('id'):
+        return False
+    if change_type in WORLD_STATE_CHANGE_TYPES:
+        if change_type == 'scene.update':
+            return any(
+                key in change
+                for key in (
+                    'locationId',
+                    'name',
+                    'sceneType',
+                    'dangerLevel',
+                    'mood',
+                    'combatState',
+                    'description',
+                    'activeNpcIds',
+                    'activeQuestIds',
+                    'musicTag',
+                )
+            )
+        if change_type == 'scene.move_location':
+            return bool(str(change.get('locationId') or change.get('name') or '').strip())
+        if change_type in {'location.discover', 'location.update'}:
+            return bool(str(change.get('locationId') or change.get('name') or '').strip())
+        if change_type == 'location.connect':
+            return bool(str(change.get('locationId') or '').strip() and str(change.get('connectedLocationId') or '').strip())
+        if change_type == 'quest.add':
+            return bool(str(change.get('questId') or change.get('title') or '').strip())
+        if change_type in {'quest.update', 'quest.complete', 'quest.fail'}:
+            return bool(str(change.get('questId') or change.get('title') or '').strip())
+        if change_type in {'quest.objective.add', 'quest.objective.update'}:
+            objective = change.get('objective') if isinstance(change.get('objective'), dict) else {}
+            return bool(
+                str(change.get('questId') or change.get('title') or '').strip()
+                and str(change.get('objectiveId') or objective.get('id') or objective.get('description') or '').strip()
+            )
+        if change_type in {'npc.discover', 'npc.update', 'npc.move', 'npc.relationship.update'}:
+            return bool(str(change.get('npcId') or change.get('name') or '').strip())
+        if change_type in {'flag.set', 'flag.unset'}:
+            return bool(str(change.get('flagKey') or '').strip())
+        return False
+    if not change.get('actorId'):
         return False
     if change_type == 'inventory.add':
         item = change.get('item') if isinstance(change.get('item'), dict) else {}

@@ -262,6 +262,7 @@ function resetApiData() {
         { turn_id: 3, dm_output: 'The third canon fact marks the hidden bridge.' },
         { turn_id: 4, dm_output: 'The fourth canon fact reveals the lantern city.' },
       ],
+      state_snapshot: {},
       updated_at: '2026-06-06T10:45:00.000Z',
     },
   }
@@ -432,6 +433,7 @@ function installFetchMock() {
             rolling_summary: '',
             active_segments: [],
             memory_snippets: [],
+            state_snapshot: session?.state_snapshot ?? {},
             updated_at: fixedNow.toISOString(),
           },
         )
@@ -599,6 +601,7 @@ function installFetchMock() {
           rolling_summary: '',
           active_segments: [],
           memory_snippets: [],
+          state_snapshot: session.state_snapshot,
           updated_at: fixedNow.toISOString(),
         }
         return jsonResponse({ session_id: sessionId })
@@ -651,6 +654,7 @@ function installFetchMock() {
           rolling_summary: body.sessionState?.rolling_summary ?? '',
           active_segments: body.sessionState?.active_segments ?? [],
           memory_snippets: body.sessionState?.memory_snippets ?? [],
+          state_snapshot: session.state_snapshot,
           updated_at: fixedNow.toISOString(),
         }
         const response: SessionImportResponse = {
@@ -1051,16 +1055,51 @@ describe('App user workflow regressions', () => {
     await renderLoadedApp()
 
     await act(async () => {
-      socketHandler<Array<{ id: number; character_name: string; name: string }>>('active_players')([
-        { id: 30, character_name: 'Ember', name: 'Danny' },
-        { id: 31, character_name: 'Borin', name: 'Maya' },
+      socketHandler<
+        Array<{
+          id: number
+          character_name: string
+          name: string
+          race?: string
+          sex?: string
+          profile_image?: string
+          class_?: string
+          char_class?: string
+          is_typing?: boolean
+        }>
+      >('active_players')([
+        {
+          id: 30,
+          character_name: 'Ember',
+          name: 'Danny',
+          race: 'Human',
+          sex: 'female',
+          profile_image: '/profile-icons/human_female.png',
+          class_: 'Wizard',
+          char_class: 'Wizard',
+          is_typing: true,
+        },
+        {
+          id: 31,
+          character_name: 'Borin',
+          name: 'Maya',
+          race: 'Dwarf',
+          sex: 'male',
+          profile_image: '/profile-icons/dwarf_male.png',
+          class_: 'Fighter',
+          char_class: 'Fighter',
+          is_typing: true,
+        },
       ])
     })
 
     const roster = screen.getByLabelText('Active players in this session')
     expect(screen.getByText('Active Players (2)')).toBeInTheDocument()
     expect(within(roster).getByText('Borin')).toBeInTheDocument()
-    expect(within(roster).getByText('Maya')).toBeInTheDocument()
+    expect(within(roster).getByText('Maya - Dwarf Fighter')).toBeInTheDocument()
+    expect(within(roster).getByAltText('Borin character icon')).toHaveAttribute('src', '/profile-icons/dwarf_male.png')
+    expect(within(roster).getByLabelText('Borin is typing')).toHaveTextContent('Typing...')
+    expect(within(roster).queryByLabelText('Ember is typing')).not.toBeInTheDocument()
     expect(within(roster).getByText('You')).toBeInTheDocument()
 
     await act(async () => {
@@ -1069,6 +1108,93 @@ describe('App user workflow regressions', () => {
 
     expect(screen.getByText('Active Players (0)')).toBeInTheDocument()
     expect(screen.getByText('No active players connected.')).toBeInTheDocument()
+  })
+
+  it('renders Scene State from the live session state snapshot without a workspace reload', async () => {
+    sessionsByCampaign[10] = [
+      {
+        ...sessionsByCampaign[10][0],
+        state_snapshot: {},
+      },
+    ]
+    sessionStates[20] = {
+      ...sessionStates[20],
+      state_snapshot: {
+        currentScene: {
+          name: 'Blackwake Tavern',
+          sceneType: 'social',
+          mood: 'tense',
+          dangerLevel: 2,
+          activeQuestIds: ['find_missing_sailor'],
+        },
+        quests: [
+          {
+            id: 'find_missing_sailor',
+            title: 'Find the Missing Sailor',
+            status: 'active',
+            stage: 'Investigate the docks',
+          },
+        ],
+        locations: [
+          { id: 'blackwake_tavern', name: 'Blackwake Tavern', status: 'visited', type: 'tavern' },
+        ],
+        knownNpcs: [
+          {
+            id: 'captain_velra',
+            name: 'Captain Velra',
+            role: 'dock captain',
+            disposition: 'friendly',
+            status: 'met',
+          },
+        ],
+      },
+    }
+
+    await renderLoadedApp()
+
+    expect(screen.getByText('Scene State')).toBeInTheDocument()
+    expect(screen.getAllByText('Blackwake Tavern').length).toBeGreaterThan(0)
+    expect(screen.getByText('Find the Missing Sailor')).toBeInTheDocument()
+    expect(screen.getByText('Captain Velra')).toBeInTheDocument()
+  })
+
+  it('emits typing presence while the composer text changes', async () => {
+    await renderLoadedApp()
+
+    socketMock.socket.emit.mockClear()
+    const actionInput = screen.getByLabelText(/Your Action/i)
+    fireEvent.change(actionInput, { target: { value: 'check the rune' } })
+
+    expect(socketMock.socket.emit).toHaveBeenCalledWith('typing_status', {
+      session_id: 20,
+      player_id: 30,
+      is_typing: true,
+    })
+
+    fireEvent.change(actionInput, { target: { value: '' } })
+    expect(socketMock.socket.emit).toHaveBeenCalledWith('typing_status', {
+      session_id: 20,
+      player_id: 30,
+      is_typing: false,
+    })
+  })
+
+  it('keeps default chat text and persists reader font controls', async () => {
+    await renderLoadedApp()
+
+    const feed = document.querySelector<HTMLElement>('.turn-feed')
+    expect(feed).toHaveClass('chat-text-size-default')
+    expect(feed).toHaveClass('chat-text-font-default')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chat text options' }))
+    fireEvent.change(screen.getByLabelText('Chat text size'), { target: { value: 'large' } })
+    fireEvent.change(screen.getByLabelText('Chat text font'), { target: { value: 'sans' } })
+
+    expect(feed).toHaveClass('chat-text-size-large')
+    expect(feed).toHaveClass('chat-text-font-sans')
+    expect(localStorage.getItem('aidm:chatTextSettings')).toBe(
+      JSON.stringify({ size: 'large', font: 'sans' }),
+    )
   })
 
   it('keeps item clarification choices visible through log refresh and resolves by socket', async () => {

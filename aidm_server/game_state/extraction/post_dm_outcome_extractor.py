@@ -130,7 +130,18 @@ def _attach_debug(payload: dict[str, Any], debug: dict[str, Any]) -> dict[str, A
 def _change_identity_value(change: dict[str, Any]) -> Any:
     item = change.get('item') if isinstance(change.get('item'), dict) else {}
     return (
-        change.get('itemId')
+        change.get('locationId')
+        or change.get('locationName')
+        or change.get('questId')
+        or change.get('questTitle')
+        or change.get('title')
+        or change.get('npcId')
+        or change.get('npcName')
+        or change.get('flagKey')
+        or change.get('name')
+        or change.get('objectiveId')
+        or change.get('connectedLocationId')
+        or change.get('itemId')
         or change.get('itemName')
         or item.get('id')
         or item.get('name')
@@ -174,6 +185,32 @@ def _already_applied_signature(change: dict[str, Any]) -> tuple[Any, ...] | None
         return (change_type, str(change.get('actorId') or ''), int(change.get('amount') or 0))
     if change_type in {'xp.add', 'xp.remove'}:
         return (change_type, str(change.get('actorId') or ''), int(change.get('amount') or 0))
+    if change_type in {'scene.update', 'scene.move_location'}:
+        return (
+            change_type,
+            normalize_item_name(change.get('locationId') or change.get('name')),
+            normalize_item_name(change.get('sceneType') or change.get('mood') or change.get('combatState')),
+        )
+    if change_type.startswith('location.'):
+        return (
+            change_type,
+            normalize_item_name(change.get('locationId') or change.get('name')),
+            normalize_item_name(change.get('connectedLocationId') or change.get('connectedLocationName')),
+        )
+    if change_type.startswith('quest.'):
+        return (
+            change_type,
+            normalize_item_name(change.get('questId') or change.get('title') or change.get('name')),
+            normalize_item_name(change.get('objectiveId') or change.get('stage')),
+        )
+    if change_type.startswith('npc.'):
+        return (
+            change_type,
+            normalize_item_name(change.get('npcId') or change.get('name')),
+            normalize_item_name(change.get('locationId') or change.get('disposition') or change.get('status')),
+        )
+    if change_type.startswith('flag.'):
+        return (change_type, normalize_item_name(change.get('flagKey')))
     return None
 
 

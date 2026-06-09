@@ -119,8 +119,8 @@
   }
 
   .turn-card p {
-    font-size: 0.95rem;
-    line-height: 1.24;
+    font-size: var(--chat-turn-font-size, 0.95rem);
+    line-height: var(--chat-turn-line-height, 1.24);
   }
 
   .turn-feed:not(.single-panel) .dm-response-card {
@@ -143,8 +143,8 @@
   }
 
   .response-copy p {
-    font-size: 0.98rem;
-    line-height: 1.38;
+    font-size: var(--chat-response-font-size, 0.98rem);
+    line-height: var(--chat-response-line-height, 1.38);
   }
 
   .action-composer {
@@ -257,6 +257,20 @@
 
   .canon-list div {
     min-height: 22px;
+  }
+
+  .scene-state-grid {
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.9fr) 48px;
+    gap: 5px;
+  }
+
+  .scene-state-grid div {
+    padding: 5px 6px;
+  }
+
+  .scene-state-grid strong,
+  .world-state-list span {
+    font-size: 0.72rem;
   }
 
   .canon-list span {

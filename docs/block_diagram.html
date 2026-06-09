@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIDM Block Diagram</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #5d6978;
+      --line: #d8dde6;
+      --accent: #1769aa;
+      --accent-soft: #e7f1fb;
+      --code: #eef2f6;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 40px 0 56px;
+    }
+
+    header {
+      margin-bottom: 28px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(2rem, 4vw, 3rem);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 36px 0 14px;
+      font-size: 1.45rem;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 14px;
+    }
+
+    .lede {
+      max-width: 820px;
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
+
+    .summary {
+      margin-top: 26px;
+      padding: 18px 20px;
+      border: 1px solid #bad5ed;
+      background: var(--accent-soft);
+      border-radius: 8px;
+    }
+
+    .diagram {
+      margin: 16px 0 24px;
+      padding: 20px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .mermaid {
+      min-width: 720px;
+      text-align: center;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 22px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      display: table;
+    }
+
+    th,
+    td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #edf1f5;
+      color: #263544;
+      font-weight: 650;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    code,
+    pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    code {
+      padding: 0.14em 0.35em;
+      border-radius: 4px;
+      background: var(--code);
+      font-size: 0.92em;
+    }
+
+    pre.code {
+      margin: 10px 0 20px;
+      padding: 14px 16px;
+      overflow-x: auto;
+      border-radius: 8px;
+      background: #1f2933;
+      color: #edf2f7;
+    }
+
+    .note {
+      color: var(--muted);
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    @media print {
+      body {
+        background: #fff;
+      }
+
+      main {
+        width: 100%;
+        padding: 0;
+      }
+
+      .diagram,
+      table {
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>AIDM Block Diagram</h1>
+      <p class="lede">High-level runtime map for the AIDM app: where the UI runs, where the APIs run, what database is used, and which outside services the backend can call.</p>
+    </header>
+
+    <section>
+      <h2>Main Runtime Blocks</h2>
+      <div class="diagram">
+        <pre class="mermaid">flowchart LR
+    user["Players / DM&lt;br/&gt;Browser"]
+    client["React + Vite frontend&lt;br/&gt;aidm_frontend&lt;br/&gt;Dev: 127.0.0.1:5173&lt;br/&gt;Unified: served by Flask"]
+    backend["Flask app&lt;br/&gt;aidm_server/main.py&lt;br/&gt;Default local port: 5050"]
+    guards["Request guards&lt;br/&gt;CORS, bearer auth, rate limits,&lt;br/&gt;request size, correlation IDs"]
+    api["REST API blueprints&lt;br/&gt;/api/campaigns&lt;br/&gt;/api/worlds&lt;br/&gt;/api/players&lt;br/&gt;/api/sessions&lt;br/&gt;/api/maps&lt;br/&gt;/api/segments&lt;br/&gt;/api/llm/config&lt;br/&gt;/api/tts/*&lt;br/&gt;/api/metrics*"]
+    socket["Flask-SocketIO&lt;br/&gt;/socket.io&lt;br/&gt;connect, join_session,&lt;br/&gt;send_message"]
+    turn["Turn engine&lt;br/&gt;rules, roll hints,&lt;br/&gt;state pipeline,&lt;br/&gt;streamed DM output"]
+    canon["Canon worker&lt;br/&gt;canon_jobs&lt;br/&gt;memory extraction&lt;br/&gt;session projection"]
+    db[("SQLAlchemy database&lt;br/&gt;Default SQLite:&lt;br/&gt;~/.aidm/dnd_ai_dm.db&lt;br/&gt;Override: AIDM_DATABASE_URI")]
+    llm["LLM provider&lt;br/&gt;Gemini, NVIDIA/Kimi,&lt;br/&gt;DeepSeek, or local fallback"]
+    tts["Deepgram TTS&lt;br/&gt;/api/tts/speak&lt;br/&gt;/api/tts/stream"]
+    obs["Optional observability&lt;br/&gt;/api/metrics/prometheus&lt;br/&gt;Prometheus: 9090&lt;br/&gt;Grafana: 3001"]
+    tunnel["Optional public access&lt;br/&gt;ngrok, Cloudflare Tunnel,&lt;br/&gt;or hosted backend"]
+
+    user --&gt; client
+    user -.-&gt; tunnel
+    tunnel -.-&gt; backend
+    client --&gt;|REST fetch /api/*| backend
+    client &lt;--&gt;|Socket.IO /socket.io| socket
+    backend --&gt; guards
+    guards --&gt; api
+    backend --&gt; socket
+    api --&gt; db
+    socket --&gt; turn
+    turn --&gt; db
+    turn --&gt; llm
+    turn --&gt; canon
+    canon --&gt; db
+    api --&gt; tts
+    backend --&gt; obs</pre>
+      </div>
+    </section>
+
+    <section>
+      <h2>Where Each Part Runs</h2>
+      <table>
+        <thead>
+          <tr><th>Block</th><th>Runs Where</th><th>Main Files / Commands</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Frontend UI</td><td>Browser, usually from Vite during development or from Flask in unified mode</td><td><code>aidm_frontend/src</code>, <code>npm run dev</code>, <code>make frontend</code></td></tr>
+          <tr><td>Backend API</td><td>Local Python Flask process, default launcher port <code>5050</code></td><td><code>aidm_server/main.py</code>, <code>scripts/run_local_backend.sh</code>, <code>make backend</code></td></tr>
+          <tr><td>Unified app</td><td>One Flask origin serving both built React assets and <code>/api/*</code></td><td><code>scripts/run_unified_local.sh</code>, <code>make unified</code></td></tr>
+          <tr><td>Realtime gameplay</td><td>Same backend process through Flask-SocketIO</td><td><code>aidm_server/blueprints/socketio_events.py</code>, <code>/socket.io</code></td></tr>
+          <tr><td>Database</td><td>SQLite by default in the user home folder; can be changed with <code>AIDM_DATABASE_URI</code></td><td><code>aidm_server/database.py</code>, <code>aidm_server/models.py</code>, <code>migrations/</code></td></tr>
+          <tr><td>AI model calls</td><td>External provider API or deterministic local fallback</td><td><code>aidm_server/llm_providers.py</code>, <code>aidm_server/provider_registry.py</code></td></tr>
+          <tr><td>TTS</td><td>External Deepgram API when configured</td><td><code>aidm_server/blueprints/system.py</code>, <code>/api/tts/*</code></td></tr>
+          <tr><td>Metrics</td><td>Backend memory snapshot, optional Prometheus/Grafana stack</td><td><code>/api/metrics</code>, <code>/api/metrics/prometheus</code>, <code>observability/</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>API Surface</h2>
+      <table>
+        <thead>
+          <tr><th>Area</th><th>REST Paths</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>System / health</td><td><code>GET /api/health</code>, <code>GET /api/metrics</code>, <code>GET /api/metrics/prometheus</code></td></tr>
+          <tr><td>Runtime AI config</td><td><code>GET /api/llm/config</code>, <code>PATCH /api/llm/config</code>, <code>POST /api/llm/config</code></td></tr>
+          <tr><td>Worlds</td><td><code>POST /api/worlds</code>, <code>GET /api/worlds</code>, <code>GET/PATCH/DELETE /api/worlds/&lt;world_id&gt;</code></td></tr>
+          <tr><td>Campaigns</td><td><code>POST /api/campaigns</code>, <code>GET /api/campaigns</code>, <code>GET/PATCH/DELETE /api/campaigns/&lt;campaign_id&gt;</code>, archive/restore/workspace/canon endpoints</td></tr>
+          <tr><td>Players</td><td><code>GET/POST /api/players/campaigns/&lt;campaign_id&gt;/players</code>, <code>GET/PATCH/DELETE /api/players/&lt;player_id&gt;</code></td></tr>
+          <tr><td>Sessions</td><td><code>POST /api/sessions/start</code>, <code>POST /api/sessions/&lt;session_id&gt;/end</code>, session list/import/archive/restore/delete/log/events/state endpoints</td></tr>
+          <tr><td>Maps</td><td><code>POST /api/maps</code>, <code>GET /api/maps</code>, <code>GET/PUT/PATCH /api/maps/&lt;map_id&gt;</code></td></tr>
+          <tr><td>Segments</td><td><code>POST /api/segments</code>, <code>GET /api/segments</code>, <code>POST /api/segments/activate</code>, <code>GET/PUT/PATCH/DELETE /api/segments/&lt;segment_id&gt;</code></td></tr>
+          <tr><td>TTS / feedback / beta</td><td><code>GET /api/tts/config</code>, <code>POST /api/tts/speak</code>, <code>POST /api/tts/stream</code>, <code>POST /api/feedback/coherence</code>, <code>GET /api/beta/summary</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Socket.IO Gameplay Flow</h2>
+      <div class="diagram">
+        <pre class="mermaid">sequenceDiagram
+    participant Browser
+    participant Socket as Flask-SocketIO
+    participant Engine as TurnEngine
+    participant DB as SQLite / SQLAlchemy
+    participant LLM as LLM Provider
+    participant Canon as Canon Worker
+
+    Browser-&gt;&gt;Socket: connect(auth token)
+    Browser-&gt;&gt;Socket: join_session(session_id, player_id)
+    Socket-&gt;&gt;DB: verify session/player/workspace
+    Socket--&gt;&gt;Browser: active_players and join messages
+    Browser-&gt;&gt;Socket: send_message(player input)
+    Socket-&gt;&gt;Engine: build TurnCommand
+    Engine-&gt;&gt;DB: serialize turn and write player event
+    Engine-&gt;&gt;LLM: stream DM prompt/context
+    LLM--&gt;&gt;Engine: streamed DM chunks
+    Engine--&gt;&gt;Browser: dm_response_start, dm_chunk, dm_response_end
+    Engine-&gt;&gt;DB: save turn, log entries, state/events
+    Engine-&gt;&gt;Canon: enqueue canon extraction job
+    Canon-&gt;&gt;DB: update story memory and projections</pre>
+      </div>
+    </section>
+
+    <section>
+      <h2>Database Map</h2>
+      <p>The backend uses SQLAlchemy models and Alembic migrations. The default local database is:</p>
+      <pre class="code">~/.aidm/dnd_ai_dm.db</pre>
+      <p>The database can be redirected with:</p>
+      <pre class="code">AIDM_DATABASE_URI</pre>
+      <table>
+        <thead>
+          <tr><th>Group</th><th>Tables</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Core campaign content</td><td><code>worlds</code>, <code>campaigns</code>, <code>maps</code>, <code>players</code>, <code>sessions</code>, <code>npcs</code>, <code>campaign_segments</code>, <code>story_events</code></td></tr>
+          <tr><td>Play history and session state</td><td><code>player_actions</code>, <code>session_log_entries</code>, <code>dm_turns</code>, <code>turn_events</code>, <code>session_states</code></td></tr>
+          <tr><td>Canon memory</td><td><code>story_entities</code>, <code>story_facts</code>, <code>story_threads</code>, <code>turn_canon_updates</code>, <code>canon_jobs</code></td></tr>
+          <tr><td>Operations and safety</td><td><code>rate_limit_events</code>, <code>dm_coherence_feedback</code>, <code>session_turn_locks</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>External Services And Env Vars</h2>
+      <table>
+        <thead>
+          <tr><th>Service</th><th>Purpose</th><th>Main Env Vars</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Gemini</td><td>DM narration/model generation</td><td><code>AIDM_LLM_PROVIDER=gemini</code>, <code>GOOGLE_GENAI_API_KEY</code>, <code>AIDM_LLM_MODEL</code>, <code>AIDM_LLM_FALLBACK_MODELS</code></td></tr>
+          <tr><td>NVIDIA / Kimi</td><td>OpenAI-compatible model generation</td><td><code>AIDM_LLM_PROVIDER=nvidia</code> or <code>kimi</code>, <code>AIDM_NVIDIA_API_KEY</code>, <code>AIDM_NVIDIA_INVOKE_URL</code>, <code>AIDM_LLM_MODEL</code></td></tr>
+          <tr><td>DeepSeek</td><td>OpenAI-compatible model generation</td><td><code>AIDM_LLM_PROVIDER=deepseek</code>, <code>AIDM_DEEPSEEK_API_KEY</code>, <code>AIDM_DEEPSEEK_BASE_URL</code>, <code>AIDM_LLM_MODEL</code></td></tr>
+          <tr><td>Local fallback</td><td>Deterministic no-key development mode</td><td><code>AIDM_LLM_PROVIDER=fallback</code>, <code>AIDM_LLM_MODEL=deterministic-v1</code></td></tr>
+          <tr><td>Deepgram</td><td>Text-to-speech audio</td><td><code>AIDM_DEEPGRAM_API_KEY</code>, <code>AIDM_DEEPGRAM_TTS_MODEL</code></td></tr>
+          <tr><td>External telemetry</td><td>Optional event delivery outside the process</td><td><code>AIDM_TELEMETRY_ENABLED</code>, <code>AIDM_TELEMETRY_ENDPOINT</code>, <code>AIDM_TELEMETRY_API_KEY</code></td></tr>
+          <tr><td>Auth and sharing</td><td>Protect public or tunneled play sessions</td><td><code>AIDM_AUTH_REQUIRED</code>, <code>AIDM_API_AUTH_TOKENS</code>, <code>AIDM_API_AUTH_TOKEN_WORKSPACES</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Local Deployment Choices</h2>
+      <div class="diagram">
+        <pre class="mermaid">flowchart TB
+    separate["Separate dev mode"]
+    vite["Vite frontend&lt;br/&gt;127.0.0.1:5173"]
+    flask["Flask backend&lt;br/&gt;127.0.0.1:5050"]
+    unified["Unified mode"]
+    oneOrigin["Flask serves built React app&lt;br/&gt;and /api/* from 127.0.0.1:5050"]
+    remote["Remote multiplayer"]
+    tunnel["Expose only port 5050&lt;br/&gt;through HTTPS tunnel or deployment"]
+
+    separate --&gt; vite
+    separate --&gt; flask
+    vite --&gt;|Vite proxy /api and /socket.io| flask
+    unified --&gt; oneOrigin
+    remote --&gt; tunnel
+    tunnel --&gt; oneOrigin</pre>
+      </div>
+    </section>
+
+    <section class="summary">
+      <p><strong>Cousin-level summary:</strong> the browser runs the React game UI, Flask runs the APIs and realtime socket server, SQLite stores the campaign/session/story state locally by default, and the backend calls external AI/TTS providers only when those API keys are configured.</p>
+      <p class="note">This HTML uses Mermaid from a public CDN, so the diagrams need an internet connection to render. The text and tables still display without it.</p>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: 'loose',
+      theme: 'base',
+      themeVariables: {
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        primaryColor: '#e7f1fb',
+        primaryTextColor: '#17202a',
+        primaryBorderColor: '#7fb0db',
+        lineColor: '#627386',
+        secondaryColor: '#f4f6f8',
+        tertiaryColor: '#ffffff'
+      }
+    });
+  </script>
+</body>
+</html>

@@ -26,10 +26,14 @@ class SocketState:
         return self.connections.pop(sid, None)
 
     def active_player_payloads(self, session_id: int) -> list[dict[str, Any]]:
-        return [
-            {key: value for key, value in player_data.items() if not key.startswith('_')}
-            for player_data in self.active_players.get(session_id, {}).values()
-        ]
+        payloads = []
+        for player_data in self.active_players.get(session_id, {}).values():
+            payload = {key: value for key, value in player_data.items() if not key.startswith('_')}
+            payload.pop('is_typing', None)
+            if self._typing_sids_for(player_data):
+                payload['is_typing'] = True
+            payloads.append(payload)
+        return payloads
 
     def ensure_session(self, session_id: int) -> None:
         self.active_players.setdefault(session_id, {})
@@ -50,6 +54,40 @@ class SocketState:
         }
         return True
 
+    def _typing_sids_for(self, player_data: dict[str, Any]) -> set[str]:
+        typing_sids = player_data.get('_typing_sids')
+        return typing_sids if isinstance(typing_sids, set) else set()
+
+    def player_is_typing(self, session_id: int, player_id: int) -> bool:
+        session_players = self.active_players.get(session_id)
+        if not session_players:
+            return False
+        player_data = session_players.get(player_id)
+        return bool(self._typing_sids_for(player_data)) if player_data else False
+
+    def set_player_typing(self, session_id: int, player_id: int, sid: str, is_typing: bool) -> bool:
+        session_players = self.active_players.get(session_id)
+        if not session_players:
+            return False
+
+        player_data = session_players.get(player_id)
+        if not player_data:
+            return False
+
+        typing_sids = self._typing_sids_for(player_data)
+        was_typing = bool(typing_sids)
+        if is_typing:
+            typing_sids.add(sid)
+        else:
+            typing_sids.discard(sid)
+
+        if typing_sids:
+            player_data['_typing_sids'] = typing_sids
+        else:
+            player_data.pop('_typing_sids', None)
+
+        return was_typing != bool(typing_sids)
+
     def release_active_player(self, session_id: int, player_id: int, sid: str) -> bool:
         session_players = self.active_players.get(session_id)
         if not session_players:
@@ -64,6 +102,12 @@ class SocketState:
             sids = set()
         sids.discard(sid)
         if sids:
+            typing_sids = self._typing_sids_for(existing)
+            typing_sids.discard(sid)
+            if typing_sids:
+                existing['_typing_sids'] = typing_sids
+            else:
+                existing.pop('_typing_sids', None)
             existing['_sids'] = sids
             return False
 

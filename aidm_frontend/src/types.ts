@@ -106,6 +106,12 @@ export type ActivePlayer = {
   id: number
   character_name: string
   name: string
+  race?: string | null
+  sex?: string | null
+  profile_image?: string | null
+  class_?: string | null
+  char_class?: string | null
+  is_typing?: boolean
 }
 
 export type RulesHint = {

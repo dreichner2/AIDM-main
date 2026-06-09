@@ -42,6 +42,38 @@ export type MapPanelMeta = {
   weather: string
 }
 
+export type WorldQuestSummary = {
+  id: string
+  title: string
+  status: string
+  stage: string
+}
+
+export type WorldLocationSummary = {
+  id: string
+  name: string
+  status: string
+  type: string
+}
+
+export type WorldNpcSummary = {
+  id: string
+  name: string
+  role: string
+  disposition: string
+  status: string
+}
+
+export type WorldStatePanel = {
+  sceneName: string
+  sceneType: string
+  mood: string
+  dangerLevel: string
+  activeQuests: WorldQuestSummary[]
+  knownLocations: WorldLocationSummary[]
+  knownNpcs: WorldNpcSummary[]
+}
+
 export type PendingRollOption = {
   turnId: number
   label: string
@@ -306,6 +338,60 @@ export function buildMapMeta(map: MapItem | undefined, segment: CampaignSegment 
     threat: rawThreat,
     threatTone,
     weather: stringValue(data.weather) || stringValue(data.climate) || 'Not recorded',
+  }
+}
+
+function recordArray(value: unknown): JsonRecord[] {
+  return Array.isArray(value) ? value.filter(isRecord) : []
+}
+
+export function worldStateFromSnapshot(snapshot: unknown): WorldStatePanel {
+  const root = isRecord(snapshot) ? snapshot : {}
+  const scene = isRecord(root.currentScene) ? root.currentScene : {}
+  const quests = recordArray(root.quests)
+  const locations = recordArray(root.locations)
+  const npcs = [...recordArray(root.knownNpcs), ...recordArray(root.partyNpcs)]
+  const activeQuestIds = new Set(
+    Array.isArray(scene.activeQuestIds)
+      ? scene.activeQuestIds.map((value) => stringValue(value)).filter(Boolean)
+      : [],
+  )
+  const activeQuests = quests
+    .filter((quest) => {
+      const id = stringValue(quest.id)
+      const status = stringValue(quest.status).toLowerCase()
+      return activeQuestIds.has(id) || status === 'active' || status === 'available'
+    })
+    .slice(0, 4)
+    .map((quest) => ({
+      id: stringValue(quest.id),
+      title: stringValue(quest.title, 'Untitled quest'),
+      status: stringValue(quest.status, 'unknown'),
+      stage: stringValue(quest.stage, 'No stage recorded'),
+    }))
+
+  return {
+    sceneName: stringValue(scene.name, 'No scene recorded'),
+    sceneType: stringValue(scene.sceneType, 'unknown'),
+    mood: stringValue(scene.mood, 'unknown'),
+    dangerLevel:
+      scene.dangerLevel === undefined || scene.dangerLevel === null
+        ? '0'
+        : stringValue(scene.dangerLevel, '0'),
+    activeQuests,
+    knownLocations: locations.slice(0, 5).map((location) => ({
+      id: stringValue(location.id),
+      name: stringValue(location.name, 'Unknown location'),
+      status: stringValue(location.status, 'unknown'),
+      type: stringValue(location.type, 'other'),
+    })),
+    knownNpcs: npcs.slice(0, 5).map((npc) => ({
+      id: stringValue(npc.id),
+      name: stringValue(npc.name, 'Unknown NPC'),
+      role: stringValue(npc.role, 'Role unknown'),
+      disposition: stringValue(npc.disposition, 'unknown'),
+      status: stringValue(npc.status, 'unknown'),
+    })),
   }
 }
 

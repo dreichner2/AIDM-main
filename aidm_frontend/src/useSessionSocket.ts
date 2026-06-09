@@ -95,7 +95,7 @@ function numericArray(value: unknown): number[] {
 function normalizeActivePlayers(payload: unknown): ActivePlayer[] {
   if (!Array.isArray(payload)) return []
   return payload
-    .map((entry) => {
+    .map((entry): ActivePlayer | null => {
       if (!entry || typeof entry !== 'object') return null
       const value = entry as Record<string, unknown>
       const id = Number(value.id)
@@ -104,6 +104,12 @@ function normalizeActivePlayers(payload: unknown): ActivePlayer[] {
         id,
         character_name: stringValue(value.character_name) || `Player ${id}`,
         name: stringValue(value.name) || 'Connected player',
+        race: stringValue(value.race) || null,
+        sex: stringValue(value.sex) || null,
+        profile_image: stringValue(value.profile_image) || null,
+        class_: stringValue(value.class_) || null,
+        char_class: stringValue(value.char_class) || null,
+        is_typing: value.is_typing === true,
       }
     })
     .filter((entry): entry is ActivePlayer => entry !== null)

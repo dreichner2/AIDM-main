@@ -94,6 +94,9 @@ export function useComposerActions({
   const [adminToolsUnlocked, setAdminToolsUnlocked] = useState(false)
   const [diceRoll, setDiceRoll] = useState<DiceRollState | null>(null)
   const diceRollKeyRef = useRef(0)
+  const typingStatusRef = useRef(false)
+  const typingBindingRef = useRef<{ socket: Socket; sessionId: number; playerId: number } | null>(null)
+  const typingIdleTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     const trimmed = adminPasscode.trim()
@@ -103,6 +106,74 @@ export function useComposerActions({
       sessionStorage.removeItem('aidm:adminPasscode')
     }
   }, [adminPasscode])
+
+  useEffect(() => {
+    return () => {
+      if (typingIdleTimerRef.current !== null) {
+        window.clearTimeout(typingIdleTimerRef.current)
+        typingIdleTimerRef.current = null
+      }
+      const binding = typingBindingRef.current
+      if (!typingStatusRef.current || !binding) return
+      if (binding.socket.connected !== false) {
+        binding.socket.emit('typing_status', {
+          session_id: binding.sessionId,
+          player_id: binding.playerId,
+          is_typing: false,
+        })
+      }
+      typingStatusRef.current = false
+      typingBindingRef.current = null
+    }
+  }, [selectedPlayerId, selectedSessionId])
+
+  const clearTypingIdleTimer = () => {
+    if (typingIdleTimerRef.current !== null) {
+      window.clearTimeout(typingIdleTimerRef.current)
+      typingIdleTimerRef.current = null
+    }
+  }
+
+  const emitTypingStatus = (isTyping: boolean) => {
+    if (!isTyping) clearTypingIdleTimer()
+    if (typingStatusRef.current === isTyping) return
+    const socket = socketRef.current
+    const binding = isTyping
+      ? socket && selectedSessionId && selectedPlayerId
+        ? { socket, sessionId: selectedSessionId, playerId: selectedPlayerId }
+        : null
+      : typingBindingRef.current
+    if (!binding) return
+    if (binding.socket.connected === false) {
+      if (!isTyping) {
+        typingStatusRef.current = false
+        typingBindingRef.current = null
+      }
+      return
+    }
+    typingStatusRef.current = isTyping
+    typingBindingRef.current = isTyping ? binding : null
+    binding.socket.emit('typing_status', {
+      session_id: binding.sessionId,
+      player_id: binding.playerId,
+      is_typing: isTyping,
+    })
+  }
+
+  const scheduleTypingIdle = () => {
+    clearTypingIdleTimer()
+    typingIdleTimerRef.current = window.setTimeout(() => emitTypingStatus(false), 1800)
+  }
+
+  const updateActionText = (nextText: string) => {
+    setActionText(nextText)
+    if (nextText.trim()) {
+      emitTypingStatus(true)
+      scheduleTypingIdle()
+    } else {
+      emitTypingStatus(false)
+    }
+  }
 
   const selectedAbility =
     selectedAbilityKey === PLAIN_ROLL_ABILITY_KEY
@@ -245,6 +316,7 @@ export function useComposerActions({
       ...(actionIntent.kind === 'admin' ? { admin_passcode: trimmedAdminPasscode } : {}),
     })
     setActionText('')
+    emitTypingStatus(false)
   }
 
   const applyComposerMode = (mode: ComposerMode, die = selectedDie) => {
@@ -461,6 +533,7 @@ export function useComposerActions({
     itemQuantity,
     itemCostGold,
     setActionText,
+    updateActionText,
     setAdminPasscode,
     setSelectedInteractionTargetId,
     setSelectedInteractionType,
