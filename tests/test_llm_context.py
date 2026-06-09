@@ -148,6 +148,217 @@ def test_build_dm_context_truncates_large_session_payloads(app):
     assert len(payload['session_state']['memory_snippets'][0]['dm_output']) <= 260
 
 
+def test_build_dm_context_includes_compact_live_world_state_from_snapshot(app):
+    with app.app_context():
+        world = World(name='Live World', description='world')
+        db.session.add(world)
+        db.session.flush()
+
+        campaign = Campaign(
+            title='Live Campaign',
+            world_id=world.world_id,
+            location='Campaign Seed Location',
+            current_quest='Campaign Seed Quest',
+        )
+        db.session.add(campaign)
+        db.session.flush()
+
+        player = Player(campaign_id=campaign.campaign_id, name='Alice', character_name='Alice')
+        db.session.add(player)
+        db.session.flush()
+
+        session = Session(
+            campaign_id=campaign.campaign_id,
+            state_snapshot=safe_json_dumps(
+                {
+                    'currentScene': {
+                        'locationId': 'blackwake_tavern',
+                        'name': 'Blackwake Tavern',
+                        'sceneType': 'social',
+                        'dangerLevel': 2,
+                        'mood': 'tense',
+                        'combatState': 'none',
+                        'description': 'A busy tavern full of dockside rumors.',
+                        'activeNpcIds': ['captain_velra'],
+                        'activeQuestIds': ['find_missing_sailor'],
+                    },
+                    'quests': [
+                        {
+                            'id': 'find_missing_sailor',
+                            'title': 'Find the Missing Sailor',
+                            'status': 'active',
+                            'stage': 'Investigate the docks',
+                            'summary': 'Find what happened to the missing sailor.',
+                            'objectives': [
+                                {
+                                    'id': 'talk_to_velra',
+                                    'description': 'Talk to Captain Velra.',
+                                    'status': 'open',
+                                }
+                            ],
+                        },
+                        {
+                            'id': 'old_finished_quest',
+                            'title': 'Old Finished Quest',
+                            'status': 'completed',
+                        },
+                    ],
+                    'locations': [
+                        {
+                            'id': 'blackwake_tavern',
+                            'name': 'Blackwake Tavern',
+                            'type': 'tavern',
+                            'status': 'visited',
+                            'description': 'A noisy tavern near the harbor.',
+                            'connectedLocationIds': ['north_docks'],
+                            'lastVisitedTurn': 12,
+                        }
+                    ],
+                    'knownNpcs': [
+                        {
+                            'id': 'captain_velra',
+                            'name': 'Captain Velra',
+                            'race': 'Human',
+                            'role': 'dock captain',
+                            'disposition': 'friendly',
+                            'status': 'met',
+                            'locationId': 'blackwake_tavern',
+                            'questIds': ['find_missing_sailor'],
+                            'memory': ['Private NPC memory should not enter the compact payload.'],
+                            'lastSeenTurn': 12,
+                        },
+                        {
+                            'id': 'marta_fenwick',
+                            'name': 'Marta Fenwick',
+                            'race': 'Halfling',
+                            'role': 'shopkeeper',
+                            'disposition': 'curious',
+                            'status': 'known',
+                            'locationId': 'north_docks',
+                            'lastSeenTurn': 11,
+                        },
+                    ],
+                    'flags': {'velra_met': True},
+                    'playerCharacters': [{'id': 'player_1', 'inventory': {'items': [{'name': 'Rope'}]}}],
+                    'stateChangeLedger': [{'id': 'secret_change'}],
+                },
+                {},
+            ),
+        )
+        db.session.add(session)
+        db.session.commit()
+
+        payload = json.loads(build_dm_context(world.world_id, campaign.campaign_id, session.session_id))
+
+    live_state = payload['live_world_state']
+    assert payload['campaign']['location'] == 'Campaign Seed Location'
+    assert live_state['currentScene']['name'] == 'Blackwake Tavern'
+    assert live_state['currentScene']['locationId'] == 'blackwake_tavern'
+    assert live_state['activeQuests'][0]['id'] == 'find_missing_sailor'
+    assert live_state['activeQuests'][0]['objectives'][0]['id'] == 'talk_to_velra'
+    assert [quest['id'] for quest in live_state['activeQuests']] == ['find_missing_sailor']
+    assert live_state['recentLocations'][0]['id'] == 'blackwake_tavern'
+    assert live_state['activeNpcs'][0]['id'] == 'captain_velra'
+    assert live_state['recentKnownNpcs'][0]['id'] == 'marta_fenwick'
+    assert live_state['flags'] == {'velra_met': True}
+
+    encoded_live_state = json.dumps(live_state)
+    assert 'stateChangeLedger' not in encoded_live_state
+    assert 'playerCharacters' not in encoded_live_state
+    assert 'Private NPC memory' not in encoded_live_state
+
+
+def test_build_dm_context_live_world_state_is_bounded(app):
+    with app.app_context():
+        world = World(name='Bounded World', description='world')
+        db.session.add(world)
+        db.session.flush()
+
+        campaign = Campaign(title='Bounded Campaign', world_id=world.world_id)
+        db.session.add(campaign)
+        db.session.flush()
+
+        session = Session(
+            campaign_id=campaign.campaign_id,
+            state_snapshot=safe_json_dumps(
+                {
+                    'currentScene': {
+                        'locationId': 'loc_0',
+                        'name': 'Location 0',
+                        'activeQuestIds': [f'quest_{index}' for index in range(10)],
+                        'activeNpcIds': [f'npc_{index}' for index in range(10)],
+                    },
+                    'quests': [
+                        {
+                            'id': f'quest_{index}',
+                            'title': f'Quest {index}',
+                            'status': 'active',
+                            'objectives': [
+                                {'id': f'quest_{index}_objective_{objective}', 'description': 'Objective', 'status': 'open'}
+                                for objective in range(6)
+                            ],
+                        }
+                        for index in range(10)
+                    ],
+                    'locations': [
+                        {
+                            'id': f'loc_{index}',
+                            'name': f'Location {index}',
+                            'status': 'visited',
+                            'lastVisitedTurn': index,
+                        }
+                        for index in range(12)
+                    ],
+                    'knownNpcs': [
+                        {
+                            'id': f'npc_{index}',
+                            'name': f'NPC {index}',
+                            'status': 'known',
+                            'lastSeenTurn': index,
+                        }
+                        for index in range(12)
+                    ],
+                    'flags': {f'flag_{index:02d}': index for index in range(25)},
+                },
+                {},
+            ),
+        )
+        db.session.add(session)
+        db.session.commit()
+
+        payload = json.loads(build_dm_context(world.world_id, campaign.campaign_id, session.session_id))
+
+    live_state = payload['live_world_state']
+    assert len(live_state['activeQuests']) == 5
+    assert all(len(quest['objectives']) == 5 for quest in live_state['activeQuests'])
+    assert len(live_state['recentLocations']) == 8
+    assert live_state['recentLocations'][0]['id'] == 'loc_0'
+    assert len(live_state['activeNpcs']) == 8
+    assert len(live_state['recentKnownNpcs']) <= 8
+    assert len(live_state['flags']) == 20
+
+
+def test_build_dm_context_invalid_snapshot_keeps_existing_context_fields(app):
+    with app.app_context():
+        world = World(name='Invalid Snapshot World', description='world')
+        db.session.add(world)
+        db.session.flush()
+
+        campaign = Campaign(title='Invalid Snapshot Campaign', world_id=world.world_id)
+        db.session.add(campaign)
+        db.session.flush()
+
+        session = Session(campaign_id=campaign.campaign_id, state_snapshot='not-json')
+        db.session.add(session)
+        db.session.commit()
+
+        payload = json.loads(build_dm_context(world.world_id, campaign.campaign_id, session.session_id))
+
+    assert payload['live_world_state'] == {}
+    for key in ['world', 'campaign', 'session_state', 'active_players', 'emergent_memory', 'recent_turns', 'pending_checks']:
+        assert key in payload
+
+
 def test_build_dm_context_shape_snapshot(app):
     ids = seed_world_campaign_player_session(app)
 
@@ -188,6 +399,7 @@ def test_build_dm_context_shape_snapshot(app):
             'active_segments': [],
             'memory_snippets': [],
         },
+        'live_world_state': {},
         'active_players': [
                 {
                     'player_id': '<player-id>',

@@ -141,6 +141,44 @@ def test_account_login_issues_session_token_and_uses_password_plus_workspace_tok
     assert missing_workspace.status_code == 403
 
 
+def test_account_login_replaces_stale_bearer_token_for_passwordless_account(tmp_path, monkeypatch):
+    app = _build_account_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+
+    login = _login(
+        client,
+        username='Danny',
+        first_name='Danny',
+        last_name='Reichner',
+    )
+    assert login.status_code == 201
+
+    stale_token = 'stale-account-token'
+    stale_login = client.post(
+        '/api/accounts/login',
+        headers={'Authorization': f'Bearer {stale_token}'},
+        json={
+            'username': 'Danny',
+            'first_name': 'Danny',
+            'last_name': 'Reichner',
+            'password': '',
+        },
+    )
+    assert stale_login.status_code == 200
+    payload = stale_login.get_json()
+    replacement_token = payload['account_token']
+    assert replacement_token
+    assert replacement_token != stale_token
+
+    join_owner = client.post(
+        '/api/accounts/workspace',
+        headers={'Authorization': f'Bearer {replacement_token}'},
+        json={'workspace_token': 'owner-token'},
+    )
+    assert join_owner.status_code == 200
+    assert join_owner.get_json()['workspace_id'] == 'owner'
+
+
 def test_account_character_visibility_and_legacy_claim(tmp_path, monkeypatch):
     app = _build_account_runtime(tmp_path, monkeypatch)
     client = app.test_client()

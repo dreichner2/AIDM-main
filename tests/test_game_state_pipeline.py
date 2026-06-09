@@ -902,6 +902,11 @@ def test_quest_update_updates_stage_and_objective_without_duplicates():
 def test_quest_complete_marks_completed_and_does_not_recomplete_on_retry():
     state = _state()
     state['quests'] = [{'id': 'find_missing_sailor', 'title': 'Find the Missing Sailor', 'status': 'active'}]
+    state['currentScene'] = {
+        'locationId': 'old_harbor',
+        'name': 'Old Harbor',
+        'activeQuestIds': ['find_missing_sailor', 'find_smuggler_cache'],
+    }
     validation = validate_state_changes(
         state=state,
         changes=[
@@ -921,8 +926,46 @@ def test_quest_complete_marks_completed_and_does_not_recomplete_on_retry():
     assert validation['rejected'] == []
     assert first['nextState']['quests'][0]['status'] == 'completed'
     assert first['nextState']['quests'][0]['completedAtTurn'] == 26
+    assert first['nextState']['quests'][0]['id'] == 'find_missing_sailor'
+    assert first['nextState']['currentScene']['activeQuestIds'] == ['find_smuggler_cache']
     assert retry['appliedChanges'] == []
     assert retry['nextState']['quests'][0]['completedAtTurn'] == 26
+    assert retry['nextState']['quests'][0]['id'] == 'find_missing_sailor'
+    assert retry['nextState']['currentScene']['activeQuestIds'] == ['find_smuggler_cache']
+
+
+def test_quest_fail_marks_failed_and_removes_from_active_scene_on_retry():
+    state = _state()
+    state['quests'] = [{'id': 'find_missing_sailor', 'title': 'Find the Missing Sailor', 'status': 'active'}]
+    state['currentScene'] = {
+        'locationId': 'old_harbor',
+        'name': 'Old Harbor',
+        'activeQuestIds': ['find_missing_sailor', 'find_smuggler_cache'],
+    }
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'fail_missing_sailor',
+                'type': 'quest.fail',
+                'source': 'post_dm',
+                'reason': 'The DM clearly confirms failure.',
+                'turnId': 27,
+                'questId': 'find_missing_sailor',
+            }
+        ],
+    )
+    first = apply_state_changes(state, validated_changes_for_application(validation))
+    retry = apply_state_changes(first['nextState'], validated_changes_for_application(validation))
+
+    assert validation['rejected'] == []
+    assert first['nextState']['quests'][0]['status'] == 'failed'
+    assert first['nextState']['quests'][0]['id'] == 'find_missing_sailor'
+    assert first['nextState']['currentScene']['activeQuestIds'] == ['find_smuggler_cache']
+    assert retry['appliedChanges'] == []
+    assert retry['nextState']['quests'][0]['status'] == 'failed'
+    assert retry['nextState']['quests'][0]['id'] == 'find_missing_sailor'
+    assert retry['nextState']['currentScene']['activeQuestIds'] == ['find_smuggler_cache']
 
 
 def test_npc_discover_adds_npc_and_links_location_and_quest():

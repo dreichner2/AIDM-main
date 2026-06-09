@@ -54,6 +54,9 @@ This README is aligned to the current codebase as of June 2026.
 - Closed-beta program execution (real users + ongoing telemetry review) is operational work, not fully automated in code.
 - Some Python 3.14+ deprecation warnings may still appear in optional/legacy paths.
 
+Runtime state source-of-truth boundaries are documented in
+[docs/runtime_state_boundaries.md](docs/runtime_state_boundaries.md).
+
 ---
 
 ## Quick Start (Beginner Friendly)
@@ -763,6 +766,7 @@ AIDM-main/
 │   └── telemetry.py           # Metrics/events + optional outbound delivery
 ├── docs/
 │   ├── beta_runbook.md
+│   ├── runtime_state_boundaries.md
 │   └── release_checklist.md
 ├── migrations/
 │   └── versions/

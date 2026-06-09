@@ -149,9 +149,10 @@ def login_or_create_account():
             created = True
         else:
             token_is_valid_for_account = bool(token_account and token_account.account_id == account.account_id)
-            if not token_is_valid_for_account and not password_matches(account, password):
+            password_is_valid = password_matches(account, password)
+            if not token_is_valid_for_account and not password_is_valid:
                 return error_response('unauthorized', 'Invalid account password.', 401)
-            if not token:
+            if not token_is_valid_for_account:
                 token = generate_account_token()
                 account.account_token_hash = hash_secret(token)
             if first_name:

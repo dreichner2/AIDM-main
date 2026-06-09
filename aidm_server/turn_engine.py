@@ -19,6 +19,7 @@ from aidm_server.character_state import (
 from aidm_server.canon_inventory import OWNED_ITEM_ACTIONS
 from aidm_server.database import db
 from aidm_server.emergent_memory import apply_immediate_state_changes, refresh_session_projection
+from aidm_server.game_state import STATE_PIPELINE_METADATA_KEY
 from aidm_server.game_state.orchestration.turn_pipeline import (
     augment_rules_hint_with_state_packet,
     post_dm_pipeline,
@@ -75,6 +76,25 @@ _HARMFUL_PVP_RE = re.compile(
     re.IGNORECASE,
 )
 _GENERIC_PLAYER_RACE_LABELS = {'human', 'elf', 'dwarf', 'gnome', 'halfling'}
+WORLD_STATE_CHANGE_TYPES = {
+    'scene.update',
+    'scene.move_location',
+    'location.discover',
+    'location.update',
+    'location.connect',
+    'quest.add',
+    'quest.update',
+    'quest.objective.add',
+    'quest.objective.update',
+    'quest.complete',
+    'quest.fail',
+    'npc.discover',
+    'npc.update',
+    'npc.move',
+    'npc.relationship.update',
+    'flag.set',
+    'flag.unset',
+}
 
 
 def _coerce_player_id(value) -> int | None:
@@ -103,6 +123,40 @@ def _affected_player_ids_from_state_summary(
         if fallback:
             affected.add(fallback)
     return sorted(affected)
+
+
+def _world_state_changed_from_applied_changes(applied_changes: list[dict]) -> bool:
+    return any(
+        isinstance(change, dict) and str(change.get('type') or '').strip() in WORLD_STATE_CHANGE_TYPES
+        for change in applied_changes
+    )
+
+
+def _state_application_event_details(
+    *,
+    stage: str,
+    player_id: int | None,
+    affected_player_ids: list[int],
+    inventory_changes_applied: list[dict],
+    character_state_changes_applied: list[dict],
+    state_log: dict,
+    applied_changes: list[dict],
+    state_applied: bool | None = None,
+) -> dict:
+    details = {
+        'stage': stage,
+        'player_id': player_id,
+        'affected_player_ids': affected_player_ids,
+        'inventory_changes_applied': inventory_changes_applied,
+        'character_state_changes_applied': character_state_changes_applied,
+        'state_log': state_log,
+    }
+    if state_applied is not None:
+        details['state_applied'] = state_applied
+    if _world_state_changed_from_applied_changes(applied_changes):
+        details['world_state_changed'] = True
+        details['snapshot_changed'] = True
+    return details
 
 
 @dataclass
@@ -1844,6 +1898,7 @@ class TurnEngine:
 
             immediate_state_summary: dict = {}
             state_log: dict = {}
+            post_pipeline_result: dict = {}
             if turn_obj and dm_succeeded:
                 try:
                     player_obj = db.session.get(Player, turn.player_id) if turn.player_id else None
@@ -1887,7 +1942,20 @@ class TurnEngine:
                 inventory_changes = immediate_state_summary.get('inventory_changes_applied') or []
                 character_state_changes = immediate_state_summary.get('character_state_changes_applied') or []
                 state_log_lines = state_log.get('lines') if isinstance(state_log, dict) else []
-                if inventory_changes or character_state_changes or state_log_lines:
+                metadata_payload = safe_json_loads(turn_obj.metadata_json, {}) if turn_obj else {}
+                metadata_payload = metadata_payload if isinstance(metadata_payload, dict) else {}
+                pipeline_metadata = metadata_payload.get(STATE_PIPELINE_METADATA_KEY)
+                pipeline_metadata = pipeline_metadata if isinstance(pipeline_metadata, dict) else {}
+                applied_changes_for_status = [
+                    *(pipeline_metadata.get('immediateAppliedChanges') or []),
+                    *(post_pipeline_result.get('postAppliedChanges') or []),
+                ]
+                if (
+                    inventory_changes
+                    or character_state_changes
+                    or state_log_lines
+                    or _world_state_changed_from_applied_changes(applied_changes_for_status)
+                ):
                     affected_player_ids = _affected_player_ids_from_state_summary(
                         inventory_changes,
                         character_state_changes,
@@ -1907,28 +1975,30 @@ class TurnEngine:
                         turn.session_id,
                         turn.turn_id,
                         'state_applied',
-                        {
-                            'stage': 'dm_response',
-                            'player_id': turn.player_id,
-                            'affected_player_ids': affected_player_ids,
-                            'inventory_changes_applied': inventory_changes,
-                            'character_state_changes_applied': character_state_changes,
-                            'state_log': state_log,
-                        },
+                        _state_application_event_details(
+                            stage='dm_response',
+                            player_id=turn.player_id,
+                            affected_player_ids=affected_player_ids,
+                            inventory_changes_applied=inventory_changes,
+                            character_state_changes_applied=character_state_changes,
+                            state_log=state_log,
+                            applied_changes=applied_changes_for_status,
+                        ),
                     )
                     self._emit_turn_status(
                         turn.session_id,
                         turn.turn_id,
                         'canon_applied',
-                        {
-                            'stage': 'state_applied',
-                            'player_id': turn.player_id,
-                            'affected_player_ids': affected_player_ids,
-                            'state_applied': True,
-                            'inventory_changes_applied': already_applied_inventory,
-                            'character_state_changes_applied': already_applied_character_state,
-                            'state_log': state_log,
-                        },
+                        _state_application_event_details(
+                            stage='state_applied',
+                            player_id=turn.player_id,
+                            affected_player_ids=affected_player_ids,
+                            inventory_changes_applied=already_applied_inventory,
+                            character_state_changes_applied=already_applied_character_state,
+                            state_log=state_log,
+                            applied_changes=applied_changes_for_status,
+                            state_applied=True,
+                        ),
                     )
 
             if turn_obj and dm_succeeded:

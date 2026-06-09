@@ -184,6 +184,19 @@ def _merge_unique(existing: Any, incoming: Any) -> list[str]:
     return merged
 
 
+def _remove_active_quest_id(state: dict[str, Any], quest_id: Any) -> None:
+    quest_id_text = _text(quest_id)
+    if not quest_id_text:
+        return
+    scene = state.get('currentScene')
+    if not isinstance(scene, dict):
+        return
+    active_quest_ids = scene.get('activeQuestIds')
+    if not isinstance(active_quest_ids, list):
+        return
+    scene['activeQuestIds'] = [item for item in active_quest_ids if _text(item) != quest_id_text]
+
+
 def _find_record(records: list[dict[str, Any]], *, record_id: Any = None, name: Any = None, title: Any = None) -> dict[str, Any] | None:
     requested_id = _text(record_id)
     requested_name = normalize_item_name(name or title)
@@ -744,6 +757,7 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
                 quest['updatedAtTurn'] = turn_id
                 if change_type == 'quest.complete':
                     quest['completedAtTurn'] = quest.get('completedAtTurn') or turn_id
+            _remove_active_quest_id(next_state, quest.get('id'))
             applied_change['questId'] = quest.get('id')
             applied_change['questTitle'] = quest.get('title')
         elif change_type in {'npc.discover', 'npc.update'}:

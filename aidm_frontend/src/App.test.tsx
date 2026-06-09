@@ -1881,6 +1881,9 @@ describe('App user workflow regressions', () => {
 
   it('refreshes the selected player when inventory state is applied before canon finishes', async () => {
     await renderLoadedApp()
+    const sessionStateFetchesBefore = fetchCalls.filter(
+      (call) => call.method === 'GET' && call.path === '/api/sessions/20/state',
+    ).length
 
     playerDetails[30] = {
       ...playerDetails[30],
@@ -1908,6 +1911,9 @@ describe('App user workflow regressions', () => {
     })
 
     await screen.findByText('Stick')
+    expect(
+      fetchCalls.filter((call) => call.method === 'GET' && call.path === '/api/sessions/20/state'),
+    ).toHaveLength(sessionStateFetchesBefore)
     expect(fetchCalls).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1916,6 +1922,116 @@ describe('App user workflow regressions', () => {
         }),
       ]),
     )
+  })
+
+  it('refreshes session state when a state_applied turn reports world snapshot changes', async () => {
+    await renderLoadedApp()
+    const sessionStateFetchesBefore = fetchCalls.filter(
+      (call) => call.method === 'GET' && call.path === '/api/sessions/20/state',
+    ).length
+
+    sessionStates[20] = {
+      ...sessionStates[20],
+      state_snapshot: {
+        currentScene: {
+          name: 'Moonlit Harbor',
+          locationId: 'moonlit_harbor',
+          sceneType: 'exploration',
+          dangerLevel: 1,
+          activeQuestIds: ['find_missing_sailor'],
+        },
+        quests: [
+          {
+            id: 'find_missing_sailor',
+            title: 'Find the Missing Sailor',
+            status: 'active',
+            stage: 'Search the moonlit harbor',
+          },
+        ],
+      },
+    }
+
+    await act(async () => {
+      socketHandler<{
+        session_id: number
+        turn_id: number
+        status: string
+        details: { player_id: number; world_state_changed: boolean; snapshot_changed: boolean }
+      }>('turn_status')({
+        session_id: 20,
+        turn_id: 7,
+        status: 'state_applied',
+        details: {
+          player_id: 30,
+          world_state_changed: true,
+          snapshot_changed: true,
+        },
+      })
+    })
+
+    await screen.findByText('Moonlit Harbor')
+    expect(
+      fetchCalls.filter((call) => call.method === 'GET' && call.path === '/api/sessions/20/state'),
+    ).toHaveLength(sessionStateFetchesBefore + 1)
+  })
+
+  it('does not reload session state twice for matching state_applied and canon_applied world flags', async () => {
+    await renderLoadedApp()
+    const sessionStateFetchesBefore = fetchCalls.filter(
+      (call) => call.method === 'GET' && call.path === '/api/sessions/20/state',
+    ).length
+
+    sessionStates[20] = {
+      ...sessionStates[20],
+      state_snapshot: {
+        currentScene: {
+          name: 'Old Bell Tower',
+          locationId: 'old_bell_tower',
+          sceneType: 'exploration',
+          dangerLevel: 2,
+          activeQuestIds: [],
+        },
+      },
+    }
+
+    await act(async () => {
+      socketHandler<{
+        session_id: number
+        turn_id: number
+        status: string
+        details: { player_id: number; world_state_changed: boolean; snapshot_changed: boolean }
+      }>('turn_status')({
+        session_id: 20,
+        turn_id: 8,
+        status: 'state_applied',
+        details: {
+          player_id: 30,
+          world_state_changed: true,
+          snapshot_changed: true,
+        },
+      })
+      socketHandler<{
+        session_id: number
+        turn_id: number
+        status: string
+        details: { player_id: number; state_applied: boolean; world_state_changed: boolean; snapshot_changed: boolean }
+      }>('turn_status')({
+        session_id: 20,
+        turn_id: 8,
+        status: 'canon_applied',
+        details: {
+          player_id: 30,
+          state_applied: true,
+          world_state_changed: true,
+          snapshot_changed: true,
+        },
+      })
+    })
+
+    await screen.findByText('Old Bell Tower')
+    expect(
+      fetchCalls.filter((call) => call.method === 'GET' && call.path === '/api/sessions/20/state'),
+    ).toHaveLength(sessionStateFetchesBefore + 1)
   })
 
   it('refreshes the selected player when a transfer affects them from another player turn', async () => {

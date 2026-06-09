@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useRef,
   type Dispatch,
   type MutableRefObject,
   type SetStateAction,
@@ -178,15 +179,19 @@ export function useSessionSocket({
   lastSpokenTurnIdRef,
   lastSpokenTextRef,
 }: UseSessionSocketOptions) {
+  const lastWorldSnapshotRefreshRef = useRef<{ sessionId: number; turnId: number } | null>(null)
+
   useEffect(() => {
     if (!selectedSessionId || !selectedPlayerId || !selectedCampaignId) {
       socketRef.current?.disconnect()
       socketRef.current = null
+      lastWorldSnapshotRefreshRef.current = null
       setActivePlayers([])
       setSocketStatus('idle')
       return
     }
 
+    lastWorldSnapshotRefreshRef.current = null
     const socketBaseUrl = normalizeBaseUrl(baseUrl)
     const ngrokBypassHeaders = socketBaseUrl ? ngrokBrowserWarningBypassHeaders(socketBaseUrl) : undefined
     const workspaceToken = storedWorkspaceToken().trim()
@@ -438,6 +443,20 @@ export function useSessionSocket({
         const playerId = Number(payload.details?.player_id)
         const affectedPlayerIds = numericArray(payload.details?.affected_player_ids)
         const selectedPlayer = Number(selectedPlayerId)
+        const shouldRefreshWorldSnapshot =
+          payload.details?.world_state_changed === true || payload.details?.snapshot_changed === true
+        if (shouldRefreshWorldSnapshot) {
+          const lastRefresh = lastWorldSnapshotRefreshRef.current
+          if (!lastRefresh || lastRefresh.sessionId !== selectedSessionId || lastRefresh.turnId !== payload.turn_id) {
+            lastWorldSnapshotRefreshRef.current = {
+              sessionId: selectedSessionId,
+              turnId: payload.turn_id,
+            }
+            loadSessionData(selectedSessionId).catch((error: unknown) => {
+              pushError('workspace', `Session refresh failed: ${error instanceof Error ? error.message : String(error)}`)
+            })
+          }
+        }
         const shouldRefreshSelectedPlayer =
           Number.isInteger(selectedPlayer) &&
           selectedPlayer > 0 &&

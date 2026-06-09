@@ -38,4 +38,34 @@ describe('class catalog', () => {
     )
     expect(scienceFantasyResults).toEqual(expect.arrayContaining(['Technomancer', 'Engineer', 'Operative']))
   })
+
+  it('supports modern roleplay professions as class choices', () => {
+    const modernResults = filterPlayableClasses({ query: '', category: 'Modern' }).map((entry) => entry.name)
+    expect(modernResults).toEqual(
+      expect.arrayContaining([
+        'Business Professional',
+        'Entertainer',
+        'Public Safety Officer',
+        'Medical Professional',
+        'Tradesperson',
+      ]),
+    )
+
+    expect(filterPlayableClasses({ query: 'businessman', category: 'All' }).map((entry) => entry.name)).toContain(
+      'Business Professional',
+    )
+    expect(filterPlayableClasses({ query: 'stripper', category: 'All' }).map((entry) => entry.name)).toContain(
+      'Entertainer',
+    )
+    expect(filterPlayableClasses({ query: 'police officer', category: 'All' }).map((entry) => entry.name)).toContain(
+      'Public Safety Officer',
+    )
+    expect(filterPlayableClasses({ query: 'doctor', category: 'All' }).map((entry) => entry.name)).toEqual(
+      expect.arrayContaining(['Medical Professional', 'Medic']),
+    )
+
+    const adultEntertainer = classSelectionFromValue('Entertainer - Adult Entertainer')
+    expect(adultEntertainer?.classEntry.name).toBe('Entertainer')
+    expect(adultEntertainer?.subclass?.name).toBe('Adult Entertainer')
+  })
 })
