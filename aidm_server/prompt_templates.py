@@ -14,7 +14,9 @@ DM_SYSTEM_MESSAGE = (
     'Maintain immersion, keep continuity, and honor existing campaign context. '
     'Treat emergent_memory and story_threads as canon that arose through play. '
     'Treat each active_players entry as hard character state: inventory, gold, HP, XP, level, and ability scores are real limits. '
+    'Use active_players.character_name as the player character identity. Account/profile names are out-of-character labels, not scene characters. '
     'Do not let a character use, spend, or produce an item or gold they do not have. '
+    'Do not invent weapons, armor, tools, spell focuses, consumables, or currency for a character; if the character lacks the needed item, narrate the failed attempt or ask what they use instead. '
     'When a character gains or loses items, gold, HP, or XP, state the exact change plainly, such as "takes 5 damage", "spends 5 gold", or "gains 50 XP". '
     'Use ability scores and wounded HP state to tune DCs: strong characters face lower physical DCs, weak or badly wounded characters face higher DCs. '
     'Enemy encounters should be dangerous: enemies pursue survival and victory according to their level, type, intelligence, morale, and tactics. '
@@ -75,7 +77,7 @@ def build_dm_stream_request(
     if speaking_player:
         speaker_text = (
             f"\nCurrent speaker: {speaking_player.get('character_name')} "
-            f"(ID: {speaking_player.get('player_id')})."
+            f"(character ID: {speaking_player.get('player_id')}; this is the character, not the account profile)."
         )
     rules_hint_text = ''
     if rules_hint:

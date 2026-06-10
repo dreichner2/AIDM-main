@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aidm_server.database import db
-from aidm_server.models import DmTurn, Player, PlayerAction, TurnEvent
+from aidm_server.models import DmTurn, Player, PlayerAction, TurnEvent, safe_json_dumps
 from tests.helpers import seed_world_campaign_player_session
 
 
@@ -33,6 +33,108 @@ def test_create_player_accepts_structured_inventory_and_get_returns_parsed_inven
         {'name': 'Rope', 'quantity': 2, 'weight': 10},
         {'name': 'Torch', 'quantity': 1, 'weight': 1},
     ]
+
+
+def test_create_player_assigns_starting_inventory_from_class(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    response = client.post(
+        f"/api/players/campaigns/{ids['campaign_id']}/players",
+        json={
+            'name': 'Borin',
+            'character_name': 'Borin Stoneshield',
+            'char_class': 'Fighter - Champion',
+        },
+    )
+    assert response.status_code == 201
+
+    player_id = response.get_json()['player_id']
+    player_response = client.get(f'/api/players/{player_id}')
+    assert player_response.status_code == 200
+    inventory = {item['name']: item for item in player_response.get_json()['inventory']}
+
+    assert inventory['Longsword']['type'] == 'weapon'
+    assert inventory['Longsword']['equipped'] is True
+    assert inventory['Longsword']['slot'] == 'main_hand'
+    assert inventory['Shield']['equipped'] is True
+    assert inventory['Shield']['slot'] == 'off_hand'
+    assert inventory['Chain Mail']['equipped'] is True
+    assert inventory['Chain Mail']['slot'] == 'body_armor'
+    assert inventory['Ration']['quantity'] == 5
+    assert inventory['Torch']['quantity'] == 5
+
+
+def test_create_player_assigns_starting_inventory_from_extended_class(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    response = client.post(
+        f"/api/players/campaigns/{ids['campaign_id']}/players",
+        json={
+            'name': 'Cass',
+            'character_name': 'Cass Quickshot',
+            'char_class': 'Gunslinger - Sniper',
+        },
+    )
+    assert response.status_code == 201
+
+    player_response = client.get(f"/api/players/{response.get_json()['player_id']}")
+    assert player_response.status_code == 200
+    inventory = {item['name']: item for item in player_response.get_json()['inventory']}
+
+    assert inventory['Pistol']['type'] == 'weapon'
+    assert inventory['Pistol']['equipped'] is True
+    assert inventory['Pistol']['slot'] == 'main_hand'
+    assert inventory['Leather Armor']['equipped'] is True
+    assert inventory['Ammunition']['quantity'] == 20
+    assert "Gunsmith's Tools" in inventory
+
+
+def test_create_player_respects_explicit_empty_inventory_over_class_starter(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    response = client.post(
+        f"/api/players/campaigns/{ids['campaign_id']}/players",
+        json={
+            'name': 'Mira',
+            'character_name': 'Mira Quickstep',
+            'char_class': 'Rogue',
+            'inventory': [],
+        },
+    )
+    assert response.status_code == 201
+
+    player_response = client.get(f"/api/players/{response.get_json()['player_id']}")
+    assert player_response.status_code == 200
+    assert player_response.get_json()['inventory'] == []
+
+
+def test_get_player_backfills_starting_inventory_for_existing_blank_player(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    response = client.get(f"/api/players/{ids['player_id']}")
+    assert response.status_code == 200
+    inventory = {item['name']: item for item in response.get_json()['inventory']}
+
+    assert inventory['Longbow']['equipped'] is True
+    assert inventory['Longbow']['slot'] == 'two_hands'
+    assert inventory['Leather Armor']['slot'] == 'body_armor'
+    assert inventory['Arrow']['quantity'] == 20
+
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        assert player.inventory
+
+
+def test_get_player_does_not_backfill_explicit_empty_inventory(client, app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        player.inventory = safe_json_dumps([], [])
+        db.session.commit()
+
+    response = client.get(f"/api/players/{ids['player_id']}")
+    assert response.status_code == 200
+    assert response.get_json()['inventory'] == []
 
 
 def test_create_player_validates_point_buy_stats(client, app):
@@ -126,6 +228,83 @@ def test_update_player_persists_profile_sheet_stats_and_inventory(client, app):
     detail_payload = detail_response.get_json()
     assert detail_payload['stats'] == {'strength': 10, 'dexterity': 18}
     assert detail_payload['inventory'][0]['name'] == 'Silver Key'
+
+
+def test_manual_equipment_endpoint_enforces_slots_and_preserves_inventory_payload(client, app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        player.inventory = safe_json_dumps(
+            [
+                {'id': 'great', 'name': 'Greatsword', 'quantity': 1, 'type': 'weapon', 'subtype': 'greatsword'},
+                {'id': 'long', 'name': 'Longsword', 'quantity': 1, 'type': 'weapon', 'subtype': 'sword', 'equipped': True, 'slot': 'main_hand'},
+                {'id': 'dagger', 'name': 'Dagger', 'quantity': 1, 'type': 'weapon', 'subtype': 'dagger', 'equipped': True, 'slot': 'off_hand'},
+                {'id': 'hood', 'name': 'Travel Hood', 'quantity': 1, 'type': 'clothing', 'subtype': 'hood', 'equipped': True, 'slot': 'hood'},
+                {'id': 'helmet', 'name': 'Iron Helmet', 'quantity': 1, 'type': 'armor', 'subtype': 'helmet', 'equipped': True, 'slot': 'helmet'},
+            ],
+            [],
+        )
+        db.session.commit()
+
+    response = client.patch(
+        f"/api/players/{ids['player_id']}/inventory/equipment",
+        json={'action': 'equip', 'item_id': 'great'},
+    )
+
+    assert response.status_code == 200
+    inventory = {item['id']: item for item in response.get_json()['inventory']}
+    assert inventory['great']['equipped'] is True
+    assert inventory['great']['slot'] == 'two_hands'
+    assert inventory['long'].get('equipped', False) is False
+    assert inventory['dagger'].get('equipped', False) is False
+    assert inventory['hood']['equipped'] is True
+    assert inventory['helmet']['equipped'] is True
+
+    unequip_response = client.patch(
+        f"/api/players/{ids['player_id']}/inventory/equipment",
+        json={'action': 'unequip', 'item_id': 'great'},
+    )
+    assert unequip_response.status_code == 200
+    assert {item['id']: item for item in unequip_response.get_json()['inventory']}['great'].get('equipped', False) is False
+
+
+def test_manual_equipment_endpoint_infers_sparse_axe_items(client, app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        player.inventory = safe_json_dumps(
+            [
+                {'id': 'greataxe', 'name': 'Greataxe', 'quantity': 1},
+                {'id': 'handaxe', 'name': 'Handaxe', 'quantity': 1, 'type': 'misc'},
+            ],
+            [],
+        )
+        db.session.commit()
+
+    greataxe_response = client.patch(
+        f"/api/players/{ids['player_id']}/inventory/equipment",
+        json={'action': 'equip', 'item_id': 'greataxe'},
+    )
+
+    assert greataxe_response.status_code == 200
+    inventory = {item['id']: item for item in greataxe_response.get_json()['inventory']}
+    assert inventory['greataxe']['type'] == 'weapon'
+    assert inventory['greataxe']['subtype'] == 'greataxe'
+    assert inventory['greataxe']['equipped'] is True
+    assert inventory['greataxe']['slot'] == 'two_hands'
+
+    handaxe_response = client.patch(
+        f"/api/players/{ids['player_id']}/inventory/equipment",
+        json={'action': 'equip', 'item_id': 'handaxe'},
+    )
+
+    assert handaxe_response.status_code == 200
+    inventory = {item['id']: item for item in handaxe_response.get_json()['inventory']}
+    assert inventory['greataxe'].get('equipped', False) is False
+    assert inventory['handaxe']['type'] == 'weapon'
+    assert inventory['handaxe']['subtype'] == 'handaxe'
+    assert inventory['handaxe']['equipped'] is True
+    assert inventory['handaxe']['slot'] == 'main_hand'
 
 
 def test_update_player_rejects_invalid_payloads(client, app):

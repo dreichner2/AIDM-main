@@ -93,7 +93,8 @@
   }
 
   .session-board {
-    grid-template-rows: 60px 38px minmax(0, 1fr) 240px;
+    --composer-row-height: 254px;
+    grid-template-rows: 60px 38px minmax(0, 1fr) minmax(var(--composer-row-height), auto);
   }
 
   .session-header h1 {
@@ -110,7 +111,7 @@
   }
 
   .jump-latest-button {
-    bottom: 256px;
+    bottom: calc(var(--composer-row-height) + 16px);
   }
 
   .turn-card {
@@ -148,12 +149,13 @@
   }
 
   .action-composer {
-    padding-top: 8px;
-    padding-bottom: 26px;
+    padding-top: 6px;
+    padding-bottom: 10px;
   }
 
   .composer-frame textarea {
-    min-height: 70px;
+    height: 98px;
+    min-height: 98px;
     padding-top: 11px;
     padding-bottom: 11px;
   }
@@ -247,7 +249,14 @@
   }
 
   .inventory-table div {
+    grid-template-columns: 24px minmax(0, 1fr) 28px 52px;
     min-height: 23px;
+  }
+
+  .inventory-table .equipment-toggle {
+    grid-column: 2 / -1;
+    justify-self: start;
+    margin-bottom: 4px;
   }
 
   .inventory-table .empty-row,
@@ -368,7 +377,8 @@
   }
 
   .action-composer {
-    padding-bottom: 28px;
+    min-height: 260px;
+    padding-bottom: 12px;
   }
 
   .campaign-rail,
@@ -379,7 +389,10 @@
   }
 
   .session-board {
-    grid-template-rows: auto auto auto auto;
+    height: min(100svh, 900px);
+    min-height: min(100svh, 760px);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    overflow: hidden;
     border-top: 1px solid var(--line);
     border-right: 0;
   }
@@ -396,8 +409,10 @@
   }
 
   .turn-feed {
+    min-height: 0;
     padding-left: 14px;
-    overflow: visible;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .jump-latest-button {
@@ -547,6 +562,89 @@
 
   .race-card-grid {
     grid-template-columns: 1fr;
+    max-height: min(520px, 50svh);
+    padding-right: 1px;
+  }
+
+  .race-card {
+    grid-template-columns: minmax(88px, 112px) minmax(0, 1fr);
+    min-height: 140px;
+    align-items: stretch;
+    align-content: stretch;
+    gap: 10px;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.035);
+  }
+
+  .race-card-art {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    height: 112px;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: 5px;
+    aspect-ratio: auto;
+  }
+
+  .race-card:hover .race-card-art img,
+  .race-card:focus-visible .race-card-art img,
+  .race-card.selected .race-card-art img {
+    filter: none;
+    transform: none;
+  }
+
+  .race-card-art span {
+    display: none;
+  }
+
+  .race-card-copy {
+    position: static;
+    z-index: auto;
+    max-height: none;
+    align-content: center;
+    gap: 5px;
+    overflow: visible;
+    padding: 0;
+    border-top: 0;
+    background: transparent;
+    backdrop-filter: none;
+    transition: none;
+  }
+
+  .race-card:hover .race-card-copy,
+  .race-card:focus-visible .race-card-copy,
+  .race-card.selected .race-card-copy {
+    max-height: none;
+    background: transparent;
+    backdrop-filter: none;
+  }
+
+  .race-card-copy strong {
+    font-size: 0.92rem;
+    line-height: 1.12;
+    white-space: normal;
+  }
+
+  .race-card-copy em {
+    min-height: 0;
+  }
+
+  .race-card-copy em,
+  .race-card-copy .race-trait-row,
+  .race-card-copy small {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .race-trait-row {
+    min-height: 0;
+    gap: 4px;
+  }
+
+  .race-card-copy small {
+    display: none;
+    min-height: 0;
   }
 
   .class-quick-grid,

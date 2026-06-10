@@ -10,6 +10,7 @@ from aidm_server.rules import RuleHint
 
 ROLL_TYPE_LABELS = {
     'attack': 'an Attack roll',
+    'initiative': 'initiative',
     'stealth': 'a Dexterity (Stealth) check',
     'social': 'a Charisma (Persuasion/Deception) check',
     'lore': 'an Intelligence (Investigation/Arcana) check',
@@ -23,6 +24,7 @@ ROLL_TYPE_LABELS = {
 ROLL_REQUEST_PATTERNS = [
     re.compile(r'\bplease\s+roll\b', re.IGNORECASE),
     re.compile(r'\broll\s+(?:a\s+)?d20\b', re.IGNORECASE),
+    re.compile(r'\broll\s+(?:for\s+)?initiative\b', re.IGNORECASE),
     re.compile(r'\bmake\s+(?:an?\s+)?[a-z][a-z \'-]{0,40}\s+check\b', re.IGNORECASE),
     re.compile(r'\bwhat\s+did\s+you\s+roll\b', re.IGNORECASE),
     re.compile(r'\broll\s+for\b', re.IGNORECASE),

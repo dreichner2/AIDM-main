@@ -430,6 +430,13 @@ start_backend_launch_agent() {
   /bin/launchctl kickstart -k "${LAUNCH_DOMAIN}/local.aidm.backend" >/dev/null 2>&1 || return 1
 }
 
+start_direct_background_backend() {
+  write_backend_launch_agent
+  stop_non_backend_port_listeners
+  log "LaunchAgent did not start; starting direct background backend."
+  /usr/bin/nohup "${BACKEND_HELPER}" >>"${LOG_DIR}/backend.log" 2>&1 &
+}
+
 write_tailscale_launch_agent() {
   [[ -x "${TAILSCALED_BIN}" ]] || return 1
 
@@ -529,7 +536,7 @@ start_backend() {
   fi
   ensure_backend_dependencies
   ensure_frontend_build
-  start_backend_launch_agent || fail "Could not start backend LaunchAgent."
+  start_backend_launch_agent || start_direct_background_backend
   wait_for_http "${BACKEND_HEALTH_URL}" "Backend" 5 || fail "Backend did not become ready at ${BACKEND_HEALTH_URL}."
 }
 

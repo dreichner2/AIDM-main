@@ -127,11 +127,19 @@ export type ActivePlayer = {
 }
 
 export type TurnControlMode = 'free' | 'spotlight' | 'structured'
+export type TurnControlSource = 'auto' | 'ai' | 'manual' | 'admin' | 'system'
 
 export type TurnControl = {
   mode: TurnControlMode
+  source?: TurnControlSource | string
+  focusType?: string | null
   activePlayerId: number | null
   activePlayerName: string | null
+  participantPlayerIds?: number[]
+  participantPlayerNames?: string[]
+  pendingJoinRequests?: JsonRecord[]
+  reason?: string | null
+  confidence?: number | null
   updatedByPlayerId?: number | null
   updatedAt?: string | null
 }

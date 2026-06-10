@@ -7,8 +7,8 @@ def test_race_registry_lists_curated_races_and_full_definition(client):
 
     races = response.get_json()['races']
     names = {race['name'] for race in races}
-    assert len(races) >= 30
-    assert {'Dragonborn', 'Aarakocra', 'Warforged'}.issubset(names)
+    assert len(races) >= 31
+    assert {'Dragonborn', 'Aarakocra', 'Warforged', 'Afro-Diasporic Human'}.issubset(names)
 
     dragonborn_response = client.get('/api/races/dragonborn')
     assert dragonborn_response.status_code == 200
@@ -29,6 +29,14 @@ def test_race_registry_lists_curated_races_and_full_definition(client):
     assert fairy['physical']['averageHeight'] == '2 to 3 feet'
     assert fairy['languages'] == ['Common', 'Sylvan']
     assert 'Flight' in [trait['name'] for trait in fairy['traits']]
+
+    afro_diasporic_response = client.get('/api/races/afro-diasporic-human')
+    assert afro_diasporic_response.status_code == 200
+    afro_diasporic = afro_diasporic_response.get_json()
+    assert afro_diasporic['source'] == 'curated'
+    assert afro_diasporic['visual']['portraitKey'] == 'afro-diasporic-human'
+    assert [trait['name'] for trait in afro_diasporic['traits']] == ['Adaptable', 'Versatile', 'Diaspora Ties']
+    assert 'African diaspora fantasy imagery' in afro_diasporic['descriptionLong']
 
 
 def test_curated_race_relationships_are_mostly_catalog_races(client):

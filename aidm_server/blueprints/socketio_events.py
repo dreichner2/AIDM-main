@@ -16,10 +16,12 @@ from aidm_server.socket_runtime import SocketRuntime
 from aidm_server.socket_state import SocketState
 from aidm_server.telemetry import telemetry_event, telemetry_metric
 from aidm_server.turn_control import (
+    TURN_CONTROL_MODES,
+    TURN_CONTROL_SOURCES,
+    conduct_turn_submission,
     set_session_turn_control,
     turn_control_from_session,
     turn_control_update_payload,
-    turn_submission_result,
 )
 from aidm_server.turn_engine import TurnCommand, TurnEngine
 from aidm_server.turn_rules import latest_pending_turn
@@ -270,6 +272,7 @@ def register_socketio_events(socketio):
             session_id = coerce_int(data.get('session_id') or data.get('sessionId'))
             player_id = coerce_int(data.get('player_id') or data.get('playerId'))
             mode = str(data.get('mode') or 'free').strip().lower()
+            source = str(data.get('source') or 'manual').strip().lower()
             active_player_id = coerce_int(data.get('active_player_id') or data.get('activePlayerId'))
             set_logging_context(session_id=session_id)
 
@@ -322,11 +325,20 @@ def register_socketio_events(socketio):
                 )
                 return
 
-            if mode not in {'free', 'spotlight', 'structured'}:
+            if mode not in TURN_CONTROL_MODES:
                 emit('error', socket_error('validation_error', 'Turn mode must be free, spotlight, or structured.'))
                 telemetry_event(
                     'socket.turn_control.invalid_mode',
                     payload={'sid': request.sid, 'session_id': session_id, 'mode': mode},
+                    severity='warning',
+                )
+                return
+
+            if source not in TURN_CONTROL_SOURCES or source in {'ai', 'system'}:
+                emit('error', socket_error('validation_error', 'Turn control source must be auto, manual, or admin.'))
+                telemetry_event(
+                    'socket.turn_control.invalid_source',
+                    payload={'sid': request.sid, 'session_id': session_id, 'source': source},
                     severity='warning',
                 )
                 return
@@ -352,6 +364,7 @@ def register_socketio_events(socketio):
                 mode=mode,
                 active_player_id=active_player_id,
                 updated_by_player_id=player_id,
+                source=source,
             )
             db.session.commit()
             emit('turn_control_updated', turn_control_update_payload(session_id, turn_control), room=str(session_id))
@@ -602,17 +615,40 @@ def register_socketio_events(socketio):
                 )
                 return
 
+            rate_key = f"{request.sid}:{session_id}"
+            limit_result = _socket_rate_limiter().allow(rate_key)
+            if not limit_result.allowed:
+                emit(
+                    'error',
+                    socket_error(
+                        'rate_limited',
+                        'Too many socket messages; please wait before sending more.',
+                        {'reset_in_seconds': limit_result.reset_in_seconds},
+                    ),
+                )
+                telemetry_event(
+                    'socket.send_message.rate_limited',
+                    payload={'sid': request.sid, 'session_id': session_id, 'reset_in_seconds': limit_result.reset_in_seconds},
+                    severity='warning',
+                )
+                return
+
             action_kind = (
                 str(message_payload.action_intent.get('kind')).strip()
                 if isinstance(message_payload.action_intent, dict) and message_payload.action_intent.get('kind') is not None
                 else ''
             )
             has_pending_roll = action_kind == 'roll' and latest_pending_turn(session_id, player_id) is not None
-            turn_allowed, turn_block_reason, turn_control = turn_submission_result(
+            current_active_player_ids = [
+                int(player['id']) for player in _active_player_payloads(session_id) if player.get('id')
+            ]
+            turn_allowed, turn_block_reason, turn_control, turn_control_changed, conductor_decision = conduct_turn_submission(
                 session_obj,
                 player_id=player_id,
+                message=message_payload.user_input,
                 action_intent=message_payload.action_intent,
                 has_pending_roll=has_pending_roll,
+                active_player_ids=current_active_player_ids,
             )
             if not turn_allowed:
                 emit(
@@ -634,24 +670,19 @@ def register_socketio_events(socketio):
                     severity='warning',
                 )
                 return
-
-            rate_key = f"{request.sid}:{session_id}"
-            limit_result = _socket_rate_limiter().allow(rate_key)
-            if not limit_result.allowed:
-                emit(
-                    'error',
-                    socket_error(
-                        'rate_limited',
-                        'Too many socket messages; please wait before sending more.',
-                        {'reset_in_seconds': limit_result.reset_in_seconds},
-                    ),
-                )
+            if turn_control_changed:
+                db.session.commit()
+                emit('turn_control_updated', turn_control_update_payload(session_id, turn_control), room=str(session_id))
                 telemetry_event(
-                    'socket.send_message.rate_limited',
-                    payload={'sid': request.sid, 'session_id': session_id, 'reset_in_seconds': limit_result.reset_in_seconds},
-                    severity='warning',
+                    'socket.turn_conductor.decision_applied',
+                    payload={
+                        'sid': request.sid,
+                        'session_id': session_id,
+                        'player_id': player_id,
+                        'decision': conductor_decision,
+                        'turn_control': turn_control,
+                    },
                 )
-                return
 
             engine = TurnEngine(
                 socketio=socketio,

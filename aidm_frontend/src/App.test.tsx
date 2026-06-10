@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { INITIATIVE_ROLL_ABILITY_KEY } from './gameActions'
 import type {
   BetaSummary,
   Campaign,
@@ -577,6 +578,34 @@ function installFetchMock() {
             updated_at: fixedNow.toISOString(),
           },
         )
+      }
+
+      const equipmentMatch = path.match(/^\/api\/players\/(\d+)\/inventory\/equipment$/)
+      if (method === 'PATCH' && equipmentMatch) {
+        const playerId = Number(equipmentMatch[1])
+        const current = playerDetails[playerId]
+        if (!current) {
+          return jsonResponse({ error: 'Player not found.', error_code: 'player_not_found' }, { status: 404 })
+        }
+        const itemId = body.item_id ?? body.itemId
+        const itemName = body.item_name ?? body.itemName
+        const action = body.action === 'unequip' ? 'unequip' : 'equip'
+        const inventory = Array.isArray(current.inventory)
+          ? current.inventory.map((entry) => ({ ...(entry as Record<string, unknown>) }))
+          : []
+        const target = inventory.find((entry) =>
+          itemId ? entry.id === itemId : String(entry.name).toLowerCase() === String(itemName).toLowerCase()
+        )
+        if (target) {
+          const targetName = String(target.name ?? target.item ?? '').toLowerCase()
+          target.equipped = action === 'equip'
+          target.slot = action === 'equip'
+            ? target.slot ?? (/greataxe|great axe|greatsword|great sword|maul|two.?hand/.test(targetName) ? 'two_hands' : 'main_hand')
+            : target.slot
+        }
+        const updated = { ...current, inventory }
+        playerDetails[playerId] = updated as PlayerDetail
+        return jsonResponse(updated)
       }
 
       const playerMatch = path.match(/^\/api\/players\/(\d+)$/)
@@ -1231,6 +1260,47 @@ describe('App user workflow regressions', () => {
     )
   })
 
+  it('rolls initiative from the Roll selector using the dexterity modifier', async () => {
+    await renderLoadedApp()
+
+    const actionInput = screen.getByLabelText(/Your Action/i)
+    fireEvent.click(screen.getByRole('button', { name: 'Roll' }))
+    fireEvent.change(screen.getByLabelText('Roll ability'), {
+      target: { value: INITIATIVE_ROLL_ABILITY_KEY },
+    })
+
+    expect(screen.getByRole('option', { name: 'Initiative (DEX +1)' })).toBeInTheDocument()
+    expect(actionInput).toHaveValue('I roll for initiative:')
+    expect(screen.getByLabelText('Roll modifier')).toHaveValue(1)
+    expect(screen.getByLabelText('Roll reason')).toHaveValue('initiative')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Roll dice' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Dice Roller' })
+    expect((actionInput as HTMLTextAreaElement).value).toMatch(/^I roll for initiative: \d+/)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete roll' }))
+
+    await waitFor(() =>
+      expect(socketMock.socket.emit).toHaveBeenCalledWith(
+        'send_message',
+        expect.objectContaining({
+          message: expect.stringMatching(/^I roll for initiative: \d+/),
+          action_intent: expect.objectContaining({
+            kind: 'roll',
+            ability: {
+              key: 'dexterity',
+              label: 'Initiative',
+              modifier: 1,
+            },
+            roll: expect.objectContaining({
+              modifier: 1,
+              reason: 'initiative',
+            }),
+          }),
+        }),
+      ),
+    )
+  })
+
   it('shows active players from the session socket roster and clears them on disconnect', async () => {
     await renderLoadedApp()
 
@@ -1290,9 +1360,38 @@ describe('App user workflow regressions', () => {
     expect(screen.getByText('No active players connected.')).toBeInTheDocument()
   })
 
-  it('emits turn control mode changes through the session socket', async () => {
+  it('equips an inventory item from the sidebar', async () => {
+    playerDetails[30] = {
+      ...playerDetails[30],
+      inventory: [
+        { id: 'greataxe', name: 'Greataxe', quantity: 1, weight: 7 },
+        { id: 'handaxe', name: 'Handaxe', quantity: 1, weight: 2, type: 'misc' },
+      ],
+    }
+    await renderLoadedApp()
+
+    expect(screen.getByRole('button', { name: 'Equip Greataxe' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Equip Handaxe' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Equip Greataxe' }))
+
+    await waitFor(() =>
+      expect(fetchCalls.some((call) => call.method === 'PATCH' && call.path === '/api/players/30/inventory/equipment')).toBe(true),
+    )
+    expect(await screen.findByText(/Equipped - two hands/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Unequip Greataxe' })).toBeInTheDocument()
+  })
+
+  it('keeps turn mode overrides behind the hidden admin tools', async () => {
     await renderLoadedApp()
     socketMock.socket.emit.mockClear()
+
+    expect(screen.queryByRole('button', { name: 'Auto' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Structured' })).not.toBeInTheDocument()
+
+    const actionLabel = screen.getByText(/Your Action/i)
+    for (let index = 0; index < 5; index += 1) {
+      fireEvent.click(actionLabel)
+    }
 
     fireEvent.click(screen.getByRole('button', { name: 'Structured' }))
 
@@ -1302,12 +1401,26 @@ describe('App user workflow regressions', () => {
         session_id: 20,
         player_id: 30,
         mode: 'structured',
+        source: 'manual',
         active_player_id: 30,
+      }),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Auto' }))
+
+    expect(socketMock.socket.emit).toHaveBeenCalledWith(
+      'set_turn_control',
+      expect.objectContaining({
+        session_id: 20,
+        player_id: 30,
+        mode: 'free',
+        source: 'auto',
+        active_player_id: null,
       }),
     )
   })
 
-  it('keeps out-of-turn actions as queued drafts instead of sending them', async () => {
+  it('lets an outside player send into spotlight so the conductor can judge joining', async () => {
     sessionStates[20] = {
       ...sessionStates[20],
       state_snapshot: {
@@ -1320,7 +1433,33 @@ describe('App user workflow regressions', () => {
     }
     await renderLoadedApp()
 
-    expect(screen.getByText('Spotlight: Borin')).toBeInTheDocument()
+    expect(screen.getByText('Auto: Spotlight - Borin')).toBeInTheDocument()
+    const actionInput = screen.getByLabelText(/Your Action/i)
+    fireEvent.change(actionInput, { target: { value: 'I step beside Borin and add my support.' } })
+    socketMock.socket.emit.mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: /Send/i }))
+
+    expect(socketMock.socket.emit).toHaveBeenCalledWith('send_message', expect.objectContaining({
+      message: 'I step beside Borin and add my support.',
+    }))
+    expect(screen.queryByText('Queued draft')).not.toBeInTheDocument()
+  })
+
+  it('keeps structured out-of-turn actions as queued drafts instead of sending them', async () => {
+    sessionStates[20] = {
+      ...sessionStates[20],
+      state_snapshot: {
+        turnControl: {
+          mode: 'structured',
+          activePlayerId: 31,
+          activePlayerName: 'Borin',
+        },
+      },
+    }
+    await renderLoadedApp()
+
+    expect(screen.getByText('Auto: Structured - Borin')).toBeInTheDocument()
     const actionInput = screen.getByLabelText(/Your Action/i)
     fireEvent.change(actionInput, { target: { value: 'I kick open the side door.' } })
     socketMock.socket.emit.mockClear()

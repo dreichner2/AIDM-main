@@ -535,10 +535,15 @@
 
 .inventory-table div {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 34px 62px;
+  grid-template-columns: 28px minmax(0, 1fr) 34px 62px auto;
+  gap: 6px;
   align-items: center;
   min-height: 28px;
   border-top: 1px solid var(--line);
+}
+
+.inventory-table div.equipped {
+  background: rgba(255, 210, 122, 0.05);
 }
 
 .inventory-table .empty-row,
@@ -553,12 +558,39 @@
   color: var(--text);
   font-size: 0.82rem;
   font-weight: 390;
+  min-width: 0;
+}
+
+.inventory-table strong small {
+  display: block;
+  margin-top: 1px;
+  color: var(--orange);
+  font-size: 0.64rem;
+  font-weight: 620;
+  line-height: 1.1;
 }
 
 .item-icon {
   display: grid;
   place-items: center;
   color: var(--orange) !important;
+}
+
+.equipment-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 76px;
+  padding: 4px 7px;
+  border: 1px solid rgba(255, 210, 122, 0.24);
+  color: var(--text);
+  background: rgba(255, 210, 122, 0.07);
+  font-size: 0.68rem;
+}
+
+.equipment-toggle:disabled {
+  opacity: 0.55;
 }
 
 .view-link {

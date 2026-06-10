@@ -8,6 +8,7 @@ describe('profile icon race matching', () => {
     expect(profileIconRaceForCharacter('half elf')).toBe('elf')
     expect(profileIconRaceForCharacter('bunny person')).toBe('harengon')
     expect(profileIconRaceForCharacter('robot warrior')).toBe('warforged')
+    expect(profileIconRaceForCharacter('African American')).toBe('afro-diasporic-human')
   })
 
   it('selects the sex-specific portrait when one is available', () => {
@@ -19,6 +20,9 @@ describe('profile icon race matching', () => {
     )
     expect(profileIconSrcForCharacter({ race: 'demon', sex: '', seed: 'Mira' })).toBe(
       '/profile-icons/tiefling_male.png',
+    )
+    expect(profileIconSrcForCharacter({ race: 'Afro-Diasporic Human', sex: 'female' })).toBe(
+      '/profile-icons/afro_diasporic_human_female.jpeg',
     )
   })
 })

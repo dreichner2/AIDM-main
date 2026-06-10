@@ -198,6 +198,9 @@ def normalize_declared_action(raw_action: Any, *, fallback_actor_id: str, fallba
         'target_name',
         'weaponName',
         'weapon_name',
+        'slot',
+        'equipmentSlot',
+        'equipment_slot',
         'attackStyle',
         'attack_style',
         'fromActorId',
@@ -244,6 +247,8 @@ def _declared_action_has_required_fields(action: dict[str, Any]) -> bool:
     action_type = str(action.get('type') or '')
     if action_type in {'inventory.consume', 'inventory.use', 'inventory.transfer'}:
         return bool(str(action.get('itemName') or '').strip()) and 'quantity' in action
+    if action_type in {'inventory.equip', 'inventory.unequip'}:
+        return bool(str(action.get('itemName') or '').strip())
     if action_type == 'currency.transfer':
         return bool(str(action.get('currency') or '').strip() and action.get('amount'))
     if action_type == 'combat.attack':
@@ -417,6 +422,10 @@ def normalize_state_change(raw_change: Any, *, fallback_actor_id: str, fallback_
         change['itemName'] = change.pop('item_name')
     if 'item_id' in change and 'itemId' not in change:
         change['itemId'] = change.pop('item_id')
+    if 'equipment_slot' in change and 'slot' not in change:
+        change['slot'] = change.pop('equipment_slot')
+    if 'equipmentSlot' in change and 'slot' not in change:
+        change['slot'] = change.get('equipmentSlot')
     if 'from_actor_id' in change and 'fromActorId' not in change:
         change['fromActorId'] = change.pop('from_actor_id')
     if 'to_actor_id' in change and 'toActorId' not in change:
@@ -526,6 +535,8 @@ def _state_change_has_required_fields(change: dict[str, Any]) -> bool:
         return bool(str(change.get('itemName') or item.get('name') or '').strip()) and 'quantity' in change
     if change_type == 'inventory.remove':
         return bool(str(change.get('itemId') or change.get('itemName') or '').strip()) and 'quantity' in change
+    if change_type in {'inventory.equip', 'inventory.unequip'}:
+        return bool(str(change.get('itemId') or change.get('itemName') or '').strip())
     if change_type == 'inventory.transfer':
         return (
             bool(str(change.get('itemId') or change.get('itemName') or '').strip())

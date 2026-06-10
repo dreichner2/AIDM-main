@@ -3,6 +3,8 @@ from __future__ import annotations
 
 PRE_DM_ACTION_TYPES = {
     'inventory.consume',
+    'inventory.equip',
+    'inventory.unequip',
     'inventory.use',
     'inventory.transfer',
     'currency.transfer',
@@ -13,6 +15,8 @@ PRE_DM_ACTION_TYPES = {
 
 OWNED_ITEM_ACTION_TYPES = {
     'inventory.consume',
+    'inventory.equip',
+    'inventory.unequip',
     'inventory.use',
     'inventory.transfer',
     'combat.attack',

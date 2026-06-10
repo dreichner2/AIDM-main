@@ -25,7 +25,7 @@ def test_dm_stream_request_snapshot():
     assert 'Do not decide new player goals' in request.system_message
     assert 'exact d20 modifier' in request.system_message
     assert request.prompt == (
-        '\nCurrent speaker: Ember (ID: 7).\n'
+        '\nCurrent speaker: Ember (character ID: 7; this is the character, not the account profile).\n'
         'CONTEXT:\n{"campaign":"Smoke"}\n\n\n'
         'RULES_HINT:\n{"requires_roll": false}\n'
         'PLAYER INPUT:\nopen the iron gate\n'

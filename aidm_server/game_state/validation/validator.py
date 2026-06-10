@@ -4,6 +4,12 @@ from copy import deepcopy
 from typing import Any
 
 from aidm_server.canon_text import int_or_default
+from aidm_server.game_state.equipment import (
+    conflict_items,
+    equipment_slot_label,
+    infer_equipment_slot,
+    is_equippable,
+)
 from aidm_server.game_state.action_types import PRE_DM_ACTION_TYPES
 from aidm_server.game_state.change_types import CURRENCY_TYPES, STATE_CHANGE_TYPES, WORLD_STATE_CHANGE_TYPES
 from aidm_server.game_state.models import (
@@ -331,6 +337,106 @@ def _validate_inventory_transfer(
     )
 
 
+def _validate_equipment_action(
+    action: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    current_turn: int,
+    recent_context: list[str],
+    selected_item_id: str | None,
+    equip: bool,
+) -> dict[str, Any]:
+    item_name = str(_action_value(action, 'itemName', 'item_name') or '').strip()
+    actor, item, resolution = _resolve_action_item(
+        action=action,
+        state=state,
+        item_name=item_name,
+        current_turn=current_turn,
+        recent_context=recent_context,
+        selected_item_id=selected_item_id,
+    )
+    if not actor:
+        return _invalid(action, resolution.get('reason') or 'Actor not found.')
+    if resolution.get('status') == 'needs_clarification':
+        return _clarification(action, resolution)
+    if resolution.get('status') == 'missing' or not item:
+        return _invalid(action, f"{actor_name(actor)} does not have {item_name or 'that item'}.")
+
+    if not equip:
+        if not item.get('equipped'):
+            return _valid(
+                action,
+                f"{item.get('name')} is already unequipped.",
+                normalized_action={**action, 'itemId': item.get('id'), 'itemName': item.get('name'), 'resolution': resolution},
+            )
+        change = {
+            'id': stable_change_id(current_turn, 'pre_dm', action.get('id'), 'inventory.unequip', item.get('id')),
+            'turnId': current_turn,
+            'type': 'inventory.unequip',
+            'source': 'pre_dm',
+            'actorId': actor.get('id'),
+            'itemId': item.get('id'),
+            'itemName': item.get('name'),
+            'reason': f"{actor_name(actor)} unequipped {item.get('name')}.",
+            'visible': False,
+        }
+        return _valid(
+            action,
+            f"{actor_name(actor)} can unequip {item.get('name')}.",
+            normalized_action={**action, 'itemId': item.get('id'), 'itemName': item.get('name'), 'resolution': resolution},
+            immediate_changes=[change],
+        )
+
+    if not is_equippable(item):
+        return _invalid(action, f"{item.get('name')} is not equippable.")
+    slot = infer_equipment_slot(
+        item,
+        requested_slot=_action_value(action, 'slot', 'equipment_slot'),
+        equipped_items=actor_items(actor),
+    )
+    if not slot:
+        return _invalid(action, f"{item.get('name')} does not have an equipment slot.")
+    if item.get('equipped') and str(item.get('slot') or '') == slot:
+        return _valid(
+            action,
+            f"{item.get('name')} is already equipped in {equipment_slot_label(slot)}.",
+            normalized_action={
+                **action,
+                'itemId': item.get('id'),
+                'itemName': item.get('name'),
+                'slot': slot,
+                'resolution': resolution,
+            },
+        )
+    conflicts = conflict_items(actor_items(actor), item, slot)
+    change = {
+        'id': stable_change_id(current_turn, 'pre_dm', action.get('id'), 'inventory.equip', item.get('id'), slot),
+        'turnId': current_turn,
+        'type': 'inventory.equip',
+        'source': 'pre_dm',
+        'actorId': actor.get('id'),
+        'itemId': item.get('id'),
+        'itemName': item.get('name'),
+        'slot': slot,
+        'conflictItemIds': [conflict.get('id') for conflict in conflicts if conflict.get('id')],
+        'conflictItemNames': [conflict.get('name') for conflict in conflicts if conflict.get('name')],
+        'reason': f"{actor_name(actor)} equipped {item.get('name')} in {equipment_slot_label(slot)}.",
+        'visible': False,
+    }
+    return _valid(
+        action,
+        f"{actor_name(actor)} can equip {item.get('name')} in {equipment_slot_label(slot)}.",
+        normalized_action={
+            **action,
+            'itemId': item.get('id'),
+            'itemName': item.get('name'),
+            'slot': slot,
+            'resolution': resolution,
+        },
+        immediate_changes=[change],
+    )
+
+
 def _validate_currency_transfer(action: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     actor = find_actor(state, _action_value(action, 'fromActorId', 'from_actor_id') or _action_value(action, 'actorId', 'actor_id'))
     if not actor:
@@ -466,6 +572,24 @@ def validate_declared_actions(
                 recent_context=recent_context or [],
                 selected_item_id=selected_item_id,
             )
+        elif action_type == 'inventory.equip':
+            result = _validate_equipment_action(
+                action,
+                state,
+                current_turn=current_turn,
+                recent_context=recent_context or [],
+                selected_item_id=selected_item_id,
+                equip=True,
+            )
+        elif action_type == 'inventory.unequip':
+            result = _validate_equipment_action(
+                action,
+                state,
+                current_turn=current_turn,
+                recent_context=recent_context or [],
+                selected_item_id=selected_item_id,
+                equip=False,
+            )
         elif action_type == 'inventory.transfer':
             result = _validate_inventory_transfer(
                 action,
@@ -568,6 +692,45 @@ def _validate_inventory_change(state: dict[str, Any], change: dict[str, Any]) ->
     normalized['itemId'] = item.get('id')
     normalized['itemName'] = item.get('name')
     return 'accepted', 'Inventory remove is valid.', normalized
+
+
+def _validate_equipment_change(state: dict[str, Any], change: dict[str, Any]) -> tuple[str, str, dict[str, Any] | None]:
+    actor = find_actor(state, _action_value(change, 'actorId', 'actor_id'))
+    if not actor:
+        return 'rejected', 'Actor not found.', None
+    item_id = _action_value(change, 'itemId', 'item_id')
+    item_name = _action_value(change, 'itemName', 'item_name')
+    item = None
+    for candidate in actor_items(actor):
+        if item_id and str(candidate.get('id')) == str(item_id):
+            item = candidate
+            break
+        if item_name and normalize_item_name(candidate.get('name')) == normalize_item_name(item_name):
+            item = candidate
+            break
+    if not item:
+        return 'rejected', 'Item not found in inventory.', None
+
+    normalized = deepcopy(change)
+    normalized['itemId'] = item.get('id')
+    normalized['itemName'] = item.get('name')
+    if str(change.get('type') or '') == 'inventory.unequip':
+        return 'accepted', 'Equipment unequip is valid.', normalized
+
+    if not is_equippable(item):
+        return 'rejected', 'Item is not equippable.', None
+    slot = infer_equipment_slot(
+        item,
+        requested_slot=_action_value(change, 'slot', 'equipment_slot'),
+        equipped_items=actor_items(actor),
+    )
+    if not slot:
+        return 'rejected', 'Equippable item does not have a valid slot.', None
+    conflicts = conflict_items(actor_items(actor), item, slot)
+    normalized['slot'] = slot
+    normalized['conflictItemIds'] = [conflict.get('id') for conflict in conflicts if conflict.get('id')]
+    normalized['conflictItemNames'] = [conflict.get('name') for conflict in conflicts if conflict.get('name')]
+    return 'accepted', 'Equipment equip is valid.', normalized
 
 
 def _validate_currency_change(state: dict[str, Any], change: dict[str, Any]) -> tuple[str, str, dict[str, Any] | None]:
@@ -1109,6 +1272,8 @@ def validate_state_changes(*, state: dict[str, Any], changes: list[dict[str, Any
 
         if change_type in {'inventory.add', 'inventory.remove'}:
             status, reason, normalized = _validate_inventory_change(state, change)
+        elif change_type in {'inventory.equip', 'inventory.unequip'}:
+            status, reason, normalized = _validate_equipment_change(state, change)
         elif change_type in {'currency.add', 'currency.remove'}:
             status, reason, normalized = _validate_currency_change(state, change)
         elif change_type in {'health.heal', 'health.damage'}:

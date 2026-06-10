@@ -9,6 +9,7 @@ from typing import Any, Iterable
 from aidm_server.canon_inventory import clean_inventory_item_name, item_weight_for_name
 from aidm_server.canon_text import int_or_default, normalized_name, positive_int
 from aidm_server.character_state import character_state_for_player
+from aidm_server.game_state.equipment import infer_equipment_slot
 from aidm_server.models import Campaign, Player, Session, safe_json_dumps, safe_json_loads
 from aidm_server.time_utils import utc_now
 
@@ -24,13 +25,16 @@ CURRENCY_STAT_KEYS = {
 STAT_CURRENCY_CODES = {value: key for key, value in CURRENCY_STAT_KEYS.items()}
 WEAPON_WORDS = {
     'axe',
+    'battleaxe',
     'blade',
     'bow',
     'club',
     'crossbow',
     'dagger',
+    'greataxe',
     'greatsword',
     'hammer',
+    'handaxe',
     'knife',
     'longbow',
     'longsword',
@@ -43,8 +47,10 @@ WEAPON_WORDS = {
     'staff',
     'sword',
 }
+WEAPON_PHRASES = {'battle axe', 'great axe', 'hand axe', 'war pick'}
 CONSUMABLE_WORDS = {'potion', 'ration', 'food', 'drink', 'elixir', 'vial', 'flask'}
 ARMOR_WORDS = {'armor', 'armour', 'mail', 'shield', 'helm', 'helmet'}
+CLOTHING_WORDS = {'hood', 'cowl', 'cloak', 'cape', 'clothing', 'clothes', 'shirt', 'tunic', 'robe', 'boots', 'gloves', 'underwear'}
 
 
 def normalize_item_name(value: Any) -> str:
@@ -112,17 +118,20 @@ def _list_text(value: Any) -> list[str]:
 
 def _infer_item_type(item: dict[str, Any], name: str) -> str:
     explicit = str(item.get('type') or '').strip().lower()
-    if explicit:
-        return explicit
     name_key = normalize_item_name(name)
     tokens = set(name_key.split())
+    inferred_from_name = None
     if tokens & CONSUMABLE_WORDS:
-        return 'consumable'
-    if tokens & WEAPON_WORDS:
-        return 'weapon'
-    if tokens & ARMOR_WORDS:
-        return 'armor'
-    return 'misc'
+        inferred_from_name = 'consumable'
+    elif tokens & WEAPON_WORDS or any(phrase in name_key for phrase in WEAPON_PHRASES):
+        inferred_from_name = 'weapon'
+    elif tokens & ARMOR_WORDS:
+        inferred_from_name = 'armor'
+    elif tokens & CLOTHING_WORDS:
+        inferred_from_name = 'clothing'
+    if explicit and (explicit != 'misc' or inferred_from_name is None):
+        return explicit
+    return inferred_from_name or 'misc'
 
 
 def _infer_item_subtype(item: dict[str, Any], name: str, item_type: str) -> str | None:
@@ -131,6 +140,12 @@ def _infer_item_subtype(item: dict[str, Any], name: str, item_type: str) -> str 
         return explicit
     name_key = normalize_item_name(name)
     if item_type == 'weapon':
+        if 'greataxe' in name_key or 'great axe' in name_key:
+            return 'greataxe'
+        if 'handaxe' in name_key or 'hand axe' in name_key:
+            return 'handaxe'
+        if 'axe' in name_key:
+            return 'axe'
         if 'sword' in name_key or 'blade' in name_key:
             return 'sword'
         if 'bow' in name_key:
@@ -141,6 +156,17 @@ def _infer_item_subtype(item: dict[str, Any], name: str, item_type: str) -> str 
             return 'staff'
     if item_type == 'consumable' and any(word in name_key for word in CONSUMABLE_WORDS):
         return 'potion' if 'potion' in name_key else 'consumable'
+    if item_type in {'armor', 'clothing'}:
+        if 'shield' in name_key:
+            return 'shield'
+        if 'helm' in name_key or 'helmet' in name_key:
+            return 'helmet'
+        if 'hood' in name_key or 'cowl' in name_key:
+            return 'hood'
+        if 'cloak' in name_key or 'cape' in name_key:
+            return 'cloak'
+        if 'underwear' in name_key or 'underclothes' in name_key:
+            return 'underwear'
     return None
 
 
@@ -174,7 +200,7 @@ def normalize_inventory_item(raw_item: Any) -> dict[str, Any] | None:
         'type': item_type,
         'subtype': subtype,
         'equipped': bool(raw_item.get('equipped')),
-        'slot': raw_item.get('slot') or ('none' if not raw_item.get('equipped') else None),
+        'slot': raw_item.get('slot') or raw_item.get('equipmentSlot') or raw_item.get('equipment_slot') or None,
         'aliases': aliases,
         'tags': tags,
         'lastUsedAtTurn': raw_item.get('lastUsedAtTurn', raw_item.get('last_used_at_turn')),
@@ -183,6 +209,11 @@ def normalize_inventory_item(raw_item: Any) -> dict[str, Any] | None:
         'weight': raw_item.get('weight'),
         'metadata': raw_item.get('metadata') if isinstance(raw_item.get('metadata'), dict) else {},
     }
+    inferred_slot = infer_equipment_slot(item)
+    if inferred_slot:
+        item['slot'] = item.get('slot') or inferred_slot
+    else:
+        item['slot'] = item.get('slot') or 'none'
     if item['weight'] is None:
         item['weight'] = item_weight_for_name(name)
     return item
@@ -224,6 +255,7 @@ def dump_inventory_items(items: Iterable[dict[str, Any]]) -> str:
             compact['equipped'] = True
         if normalized.get('slot') and normalized.get('slot') != 'none':
             compact['slot'] = normalized.get('slot')
+            compact['equipmentSlot'] = normalized.get('slot')
         aliases = normalized.get('aliases') if isinstance(normalized.get('aliases'), list) else []
         default_aliases = {normalize_item_name(normalized.get('subtype'))} if normalized.get('subtype') else set()
         meaningful_aliases = [alias for alias in aliases if normalize_item_name(alias) not in default_aliases]
@@ -368,6 +400,7 @@ def compact_state_for_extraction(state: dict[str, Any]) -> dict[str, Any]:
                         'type': item.get('type'),
                         'subtype': item.get('subtype'),
                         'equipped': item.get('equipped'),
+                        'slot': item.get('slot'),
                         'aliases': item.get('aliases') or [],
                         'tags': item.get('tags') or [],
                     }

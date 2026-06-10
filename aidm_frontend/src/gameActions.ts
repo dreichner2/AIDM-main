@@ -2,10 +2,12 @@ export type ComposerMode = 'action' | 'roll' | 'ability' | 'item' | 'interact' |
 export type RollMode = 'normal' | 'advantage' | 'disadvantage'
 export type ResultVisibility = 'hidden_until_landed' | 'visible'
 export type InteractionType = 'speak_to' | 'act_on' | 'give_to' | 'take_from'
-export type InventoryAction = 'pick_up' | 'buy' | 'use' | 'drop' | 'give' | 'sell'
+export type InventoryAction = 'pick_up' | 'buy' | 'use' | 'equip' | 'unequip' | 'drop' | 'give' | 'sell'
 
 export const DICE_OPTIONS = ['d4', 'd6', 'd8', 'd10', 'd12', 'd20', 'd100'] as const
 export const PLAIN_ROLL_ABILITY_KEY = 'plain_roll'
+export const INITIATIVE_ROLL_ABILITY_KEY = 'initiative_roll'
+export const INITIATIVE_ROLL_REASON = 'initiative'
 export const INTERACTION_TYPE_OPTIONS: Array<{ value: InteractionType; label: string }> = [
   { value: 'speak_to', label: 'Speak to' },
   { value: 'act_on', label: 'Act on' },
@@ -16,6 +18,8 @@ export const INVENTORY_ACTION_OPTIONS: Array<{ value: InventoryAction; label: st
   { value: 'pick_up', label: 'Pick up' },
   { value: 'buy', label: 'Buy' },
   { value: 'use', label: 'Use' },
+  { value: 'equip', label: 'Equip' },
+  { value: 'unequip', label: 'Unequip' },
   { value: 'drop', label: 'Drop' },
   { value: 'give', label: 'Give' },
   { value: 'sell', label: 'Sell' },
@@ -29,8 +33,11 @@ export type AbilityOption = {
 }
 
 export type ItemOption = {
+  id?: string
   name: string
   quantity: string
+  equipped?: boolean
+  slot?: string
 }
 
 export type InteractionTarget = {
@@ -105,6 +112,7 @@ const COMPOSER_PREFIX_PATTERNS = [
   /^\/ooc\s+/i,
   /^\/admin\s+/i,
   /^\/emote\s+/i,
+  /^I roll for initiative(?:\s*\([^)]*\))?\s*:\s*/i,
   /^I roll a d\d{1,3}(?:\s*[+-]\s*\d+)?(?:\s+for\s+[^:\n]{1,120})?(?:\s*\([^)]*\))?\s*:\s*/i,
   /^[^:\n]{1,80}\s+attempts an ability check(?:\s*\([^)]*\))?:\s*/i,
   /^[^:\n]{1,80}\s+attempts a [^:\n]{1,40} check(?:\s*\([^)]*\))?:\s*/i,
@@ -114,6 +122,10 @@ const COMPOSER_PREFIX_PATTERNS = [
   /^[^:\n]{1,80}\s+tr(?:y|ies) to buy\s+/i,
   /^[^:\n]{1,80}\s+use(?:s)?\s+[^:\n]{1,80}:\s*/i,
   /^[^:\n]{1,80}\s+use(?:s)?\s+/i,
+  /^[^:\n]{1,80}\s+equip(?:s)?\s+[^:\n]{1,80}:\s*/i,
+  /^[^:\n]{1,80}\s+equip(?:s)?\s+/i,
+  /^[^:\n]{1,80}\s+unequip(?:s)?\s+[^:\n]{1,80}:\s*/i,
+  /^[^:\n]{1,80}\s+unequip(?:s)?\s+/i,
   /^[^:\n]{1,80}\s+drop(?:s)?\s+[^:\n]{1,80}:\s*/i,
   /^[^:\n]{1,80}\s+drop(?:s)?\s+/i,
   /^[^:\n]{1,80}\s+give(?:s)?\s+[^:\n]{1,80}:\s*/i,
@@ -190,6 +202,14 @@ export function abilityModifierValue(ability: AbilityOption | null) {
   return parseRollModifier(ability.modifier)
 }
 
+export function isInitiativeRollAbility(ability: AbilityOption | null) {
+  return Boolean(ability && ability.key === 'dexterity' && ability.label.toLowerCase() === 'initiative')
+}
+
+export function isInitiativeRollReason(reason: string) {
+  return reason.trim().toLowerCase() === INITIATIVE_ROLL_REASON
+}
+
 export function parsePositiveInteger(value: string, fallback = 1) {
   const parsed = Number(value.replace(/\s+/g, ''))
   if (!Number.isFinite(parsed)) return fallback
@@ -249,6 +269,16 @@ export function resolveRoll(draft: RollDraft, roller: (die: string) => number = 
 }
 
 export function diceRollMessage(roll: RollResult) {
+  if (isInitiativeRollReason(roll.reason)) {
+    const dexModifier = formatModifier(roll.modifier)
+    const detail =
+      roll.mode === 'normal'
+        ? dexModifier
+          ? ` (d20 ${roll.kept} ${dexModifier} DEX)`
+          : ''
+        : ` (${roll.mode}; rolls ${roll.rolls.join(', ')}${dexModifier ? `; ${dexModifier} DEX` : ''})`
+    return `I roll for initiative: ${roll.total}${detail}`
+  }
   const modifier = formatModifier(roll.modifier)
   const rollSummary =
     roll.mode === 'normal'
@@ -267,6 +297,7 @@ export function abilityActionText(characterName: string, ability: AbilityOption 
 
 export function rollActionText(die: string, ability: AbilityOption | null, current: string) {
   const body = stripComposerCommand(current)
+  if (isInitiativeRollAbility(ability)) return `I roll for initiative: ${body}`.trim()
   const modifier = ability ? formatModifier(abilityModifierValue(ability)) : ''
   const reason = ability ? ` for ${ability.label} check` : ''
   return `I roll a ${normalizeDie(die)}${modifier}${reason}: ${body}`.trim()
@@ -288,10 +319,14 @@ export function itemActionText(
   const uses = firstPerson ? 'use' : 'uses'
   const drops = firstPerson ? 'drop' : 'drops'
   const gives = firstPerson ? 'give' : 'gives'
+  const equips = firstPerson ? 'equip' : 'equips'
+  const unequips = firstPerson ? 'unequip' : 'unequips'
   if (inventoryAction === 'pick_up') return `${characterName} ${tries} to pick up ${cleanItemName}${suffix}`.trim()
   if (inventoryAction === 'buy') {
     return `${characterName} ${tries} to buy ${cleanItemName}${cost ? ` for ${cost} gold` : ''}${suffix}`.trim()
   }
+  if (inventoryAction === 'equip') return `${characterName} ${equips} ${cleanItemName}${suffix}`.trim()
+  if (inventoryAction === 'unequip') return `${characterName} ${unequips} ${cleanItemName}${suffix}`.trim()
   if (inventoryAction === 'drop') return `${characterName} ${drops} ${cleanItemName}${suffix}`.trim()
   if (inventoryAction === 'give') return `${characterName} ${gives} ${cleanItemName}${suffix}`.trim()
   if (inventoryAction === 'sell') {

@@ -801,23 +801,29 @@ select:focus-visible {
 
 .race-card-grid {
   display: grid;
+  width: 100%;
+  min-width: 0;
   max-height: min(454px, 44svh);
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   overflow: auto;
-  padding: 1px 3px 1px 1px;
+  padding: 1px;
 }
 
 .race-card {
+  position: relative;
   display: grid;
-  min-height: 236px;
-  align-content: start;
-  gap: 9px;
-  padding: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 304px;
+  align-content: stretch;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   color: var(--text);
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(0, 0, 0, 0.26);
   text-align: left;
 }
 
@@ -825,16 +831,20 @@ select:focus-visible {
 .race-card:focus-visible,
 .race-card.selected {
   border-color: rgba(255, 176, 103, 0.48);
-  background: rgba(255, 107, 44, 0.09);
+  background: rgba(0, 0, 0, 0.32);
 }
 
 .race-card-art {
-  position: relative;
+  position: absolute;
+  inset: 0;
   display: block;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.13);
-  border-radius: 5px;
-  aspect-ratio: 1 / 1;
+  border: 0;
+  border-radius: inherit;
+  aspect-ratio: auto;
   background: rgba(0, 0, 0, 0.26);
 }
 
@@ -843,10 +853,22 @@ select:focus-visible {
   height: 100%;
   display: block;
   object-fit: cover;
+  object-position: center center;
+  transition:
+    filter 180ms ease,
+    transform 180ms ease;
+}
+
+.race-card:hover .race-card-art img,
+.race-card:focus-visible .race-card-art img,
+.race-card.selected .race-card-art img {
+  filter: saturate(1.05) contrast(1.04);
+  transform: scale(1.035);
 }
 
 .race-card-art span {
   position: absolute;
+  display: none;
   right: 0;
   bottom: 0;
   left: 0;
@@ -859,15 +881,43 @@ select:focus-visible {
 }
 
 .race-card-copy {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1;
   display: grid;
   min-width: 0;
+  max-height: 54px;
   gap: 6px;
+  overflow: hidden;
+  padding: 11px 10px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  background:
+    linear-gradient(180deg, rgba(3, 8, 9, 0.04), rgba(3, 8, 9, 0.58) 38%, rgba(3, 8, 9, 0.72)),
+    rgba(6, 13, 14, 0.34);
+  backdrop-filter: blur(8px);
+  transition:
+    backdrop-filter 180ms ease,
+    background 180ms ease,
+    max-height 180ms ease;
+}
+
+.race-card:hover .race-card-copy,
+.race-card:focus-visible .race-card-copy,
+.race-card.selected .race-card-copy {
+  max-height: 220px;
+  background:
+    linear-gradient(180deg, rgba(3, 8, 9, 0.04), rgba(3, 8, 9, 0.38) 30%, rgba(3, 8, 9, 0.56)),
+    rgba(6, 13, 14, 0.2);
+  backdrop-filter: blur(6px);
 }
 
 .race-card-copy strong {
   overflow: hidden;
   color: var(--heading);
   font-size: 0.84rem;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.78);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -880,8 +930,32 @@ select:focus-visible {
   font-size: 0.74rem;
   font-style: normal;
   line-height: 1.25;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.78);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.race-card-copy em,
+.race-card-copy .race-trait-row,
+.race-card-copy small {
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+
+.race-card:hover .race-card-copy em,
+.race-card:hover .race-card-copy .race-trait-row,
+.race-card:hover .race-card-copy small,
+.race-card:focus-visible .race-card-copy em,
+.race-card:focus-visible .race-card-copy .race-trait-row,
+.race-card:focus-visible .race-card-copy small,
+.race-card.selected .race-card-copy em,
+.race-card.selected .race-card-copy .race-trait-row,
+.race-card.selected .race-card-copy small {
+  opacity: 1;
+  transform: none;
 }
 
 .race-trait-row {
@@ -913,6 +987,7 @@ select:focus-visible {
   color: var(--text);
   font-size: 0.7rem;
   line-height: 1.25;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.78);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }

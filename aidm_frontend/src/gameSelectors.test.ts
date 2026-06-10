@@ -28,18 +28,24 @@ describe('game selector helpers', () => {
         'Torch',
         { name: 'Healing Potion', quantity: 2, weight: 0.5 },
         { item: 'Chain Mail', count: '1', weight: '55' },
+        { name: 'Greataxe', quantity: 1 },
+        { name: 'Handaxe', quantity: 1, type: 'misc' },
       ],
     })
 
     expect(inventory).toEqual([
-      { item: 'Torch', count: '1', weight: '—', icon: 'sword', weightValue: null },
-      { item: 'Healing Potion', count: '2', weight: '1 lb', icon: 'potion', weightValue: 1 },
-      { item: 'Chain Mail', count: '1', weight: '55 lb', icon: 'armor', weightValue: 55 },
+      { id: '', item: 'Torch', count: '1', weight: '—', icon: 'sword', weightValue: null, type: '', subtype: '', equipped: false, slot: '', equippable: false },
+      { id: '', item: 'Healing Potion', count: '2', weight: '1 lb', icon: 'potion', weightValue: 1, type: '', subtype: '', equipped: false, slot: '', equippable: false },
+      { id: '', item: 'Chain Mail', count: '1', weight: '55 lb', icon: 'armor', weightValue: 55, type: '', subtype: '', equipped: false, slot: 'body_armor', equippable: true },
+      { id: '', item: 'Greataxe', count: '1', weight: '—', icon: 'sword', weightValue: null, type: '', subtype: '', equipped: false, slot: 'two_hands', equippable: true },
+      { id: '', item: 'Handaxe', count: '1', weight: '—', icon: 'sword', weightValue: null, type: 'misc', subtype: '', equipped: false, slot: 'main_hand', equippable: true },
     ])
     expect(itemOptionsFromInventory(inventory)).toEqual([
-      { name: 'Torch', quantity: '1' },
-      { name: 'Healing Potion', quantity: '2' },
-      { name: 'Chain Mail', quantity: '1' },
+      { id: '', name: 'Torch', quantity: '1', equipped: false, slot: '' },
+      { id: '', name: 'Healing Potion', quantity: '2', equipped: false, slot: '' },
+      { id: '', name: 'Chain Mail', quantity: '1', equipped: false, slot: 'body_armor' },
+      { id: '', name: 'Greataxe', quantity: '1', equipped: false, slot: 'two_hands' },
+      { id: '', name: 'Handaxe', quantity: '1', equipped: false, slot: 'main_hand' },
     ])
     expect(inventoryCapacity({ carrying_capacity: 120 })).toBe(120)
     expect(inventoryWeightLabel(inventory, 120)).toBe('Weight 56 / 120 lb')

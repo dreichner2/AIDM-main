@@ -9,6 +9,7 @@ def test_profile_icon_race_matching_maps_common_descriptions():
     assert profile_icon_race_for_character('half elf') == 'elf'
     assert profile_icon_race_for_character('bunny person') == 'harengon'
     assert profile_icon_race_for_character('robot warrior') == 'warforged'
+    assert profile_icon_race_for_character('African American') == 'afro-diasporic-human'
 
 
 def test_profile_icon_defaults_to_male_when_sex_is_missing():
@@ -18,3 +19,7 @@ def test_profile_icon_defaults_to_male_when_sex_is_missing():
 
 def test_profile_icon_uses_explicit_female_when_set():
     assert profile_icon_src_for_character('half elf', 'female') == '/profile-icons/elf_female.png'
+    assert (
+        profile_icon_src_for_character('Afro-Diasporic Human', 'female')
+        == '/profile-icons/afro_diasporic_human_female.jpeg'
+    )

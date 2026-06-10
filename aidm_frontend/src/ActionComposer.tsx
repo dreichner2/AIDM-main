@@ -3,6 +3,7 @@ import { MessagesSquare, Volume2, VolumeX, X } from 'lucide-react'
 import { ThinIcon } from './AppChrome'
 import {
   DICE_OPTIONS,
+  INITIATIVE_ROLL_ABILITY_KEY,
   INVENTORY_ACTION_OPTIONS,
   INTERACTION_TYPE_OPTIONS,
   PLAIN_ROLL_ABILITY_KEY,
@@ -19,7 +20,7 @@ import {
   type RollMode,
 } from './gameActions'
 import type { PendingRollOption } from './gameSelectors'
-import type { ActivePlayer, TurnControl, TurnControlMode } from './types'
+import type { ActivePlayer, TurnControl, TurnControlMode, TurnControlSource } from './types'
 
 export type ActionComposerProps = {
   actionInputRef: RefObject<HTMLTextAreaElement | null>
@@ -40,7 +41,7 @@ export type ActionComposerProps = {
   selectedPlayerHasTurn: boolean
   queuedActionText: string
   clearQueuedAction: () => void
-  updateTurnControl: (mode: TurnControlMode, activePlayerId?: number | null) => void
+  updateTurnControl: (mode: TurnControlMode, activePlayerId?: number | null, source?: TurnControlSource) => void
   ttsEnabled: boolean
   ttsStatusClassName: string
   ttsStatusLabel: string
@@ -150,16 +151,23 @@ export function ActionComposer({
 }: ActionComposerProps) {
   const characterName = selectedCharacterName ?? 'I'
   const adminUnlockRef = useRef({ count: 0, startedAt: 0 })
-  const inventoryActionUsesOwnedItem = ['use', 'drop', 'give', 'sell'].includes(selectedInventoryAction)
+  const inventoryActionUsesOwnedItem = ['use', 'equip', 'unequip', 'drop', 'give', 'sell'].includes(selectedInventoryAction)
   const currentItemName = inventoryActionUsesOwnedItem ? selectedItem?.name ?? itemDraftName : itemDraftName
+  const dexterityAbility = abilityOptions.find((ability) => ability.key === 'dexterity')
+  const initiativeOptionLabel =
+    dexterityAbility?.modifier && dexterityAbility.modifier !== '—'
+      ? `Initiative (DEX ${dexterityAbility.modifier})`
+      : 'Initiative (DEX)'
   const activeTurnPlayerId = turnControl.activePlayerId ?? selectedPlayerId ?? activePlayers[0]?.id ?? null
+  const conductorControlled = turnControl.source === 'auto' || turnControl.source === 'ai'
+  const manualOverrideActive = turnControl.source === 'manual' || turnControl.source === 'admin'
   const turnModeButton = (mode: TurnControlMode, label: string) => (
     <button
       key={mode}
       type="button"
-      aria-pressed={turnControl.mode === mode}
-      className={turnControl.mode === mode ? 'selected' : ''}
-      onClick={() => updateTurnControl(mode, mode === 'free' ? null : activeTurnPlayerId)}
+      aria-pressed={manualOverrideActive && turnControl.mode === mode}
+      className={manualOverrideActive && turnControl.mode === mode ? 'selected' : ''}
+      onClick={() => updateTurnControl(mode, mode === 'free' ? null : activeTurnPlayerId, 'manual')}
       disabled={!selectedPlayerId}
     >
       {label}
@@ -188,32 +196,43 @@ export function ActionComposer({
       </label>
       <div className={`turn-control-strip ${selectedPlayerHasTurn ? 'open' : 'locked'}`} aria-live="polite">
         <div className="turn-control-summary">
-          <span>Turn mode</span>
+          <span>Flow</span>
           <strong>{turnControlStatusLabel}</strong>
         </div>
-        <div className="turn-control-actions" role="group" aria-label="Turn mode">
-          {turnModeButton('free', 'Free')}
-          {turnModeButton('spotlight', 'Spotlight')}
-          {turnModeButton('structured', 'Structured')}
-          {turnControl.mode !== 'free' ? (
-            <select
-              aria-label="Active turn player"
-              value={activeTurnPlayerId ?? ''}
-              onChange={(event) => updateTurnControl(turnControl.mode, Number(event.target.value) || selectedPlayerId)}
-              disabled={!activePlayers.length || !selectedPlayerId}
+        {adminToolsUnlocked ? (
+          <div className="turn-control-actions" role="group" aria-label="Turn mode override">
+            <button
+              type="button"
+              aria-pressed={conductorControlled}
+              className={conductorControlled ? 'selected' : ''}
+              onClick={() => updateTurnControl('free', null, 'auto')}
+              disabled={!selectedPlayerId}
             >
-              {activePlayers.length ? (
-                activePlayers.map((player) => (
-                  <option key={player.id} value={player.id}>
-                    {player.character_name || player.name}
-                  </option>
-                ))
-              ) : (
-                <option value={selectedPlayerId ?? ''}>{selectedCharacterName ?? 'Current player'}</option>
-              )}
-            </select>
-          ) : null}
-        </div>
+              Auto
+            </button>
+            {turnModeButton('free', 'Free')}
+            {turnModeButton('spotlight', 'Spotlight')}
+            {turnModeButton('structured', 'Structured')}
+            {turnControl.mode !== 'free' ? (
+              <select
+                aria-label="Active turn player"
+                value={activeTurnPlayerId ?? ''}
+                onChange={(event) => updateTurnControl(turnControl.mode, Number(event.target.value) || selectedPlayerId)}
+                disabled={!activePlayers.length || !selectedPlayerId}
+              >
+                {activePlayers.length ? (
+                  activePlayers.map((player) => (
+                    <option key={player.id} value={player.id}>
+                      {player.character_name || player.name}
+                    </option>
+                  ))
+                ) : (
+                  <option value={selectedPlayerId ?? ''}>{selectedCharacterName ?? 'Current player'}</option>
+                )}
+              </select>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       {queuedActionText ? (
         <div className="queued-action-strip">
@@ -244,7 +263,7 @@ export function ActionComposer({
           value={actionText}
           onChange={(event) => updateActionText(event.target.value)}
           placeholder={selectedCharacterName ? 'Write your action...' : 'Choose a player before sending.'}
-          rows={4}
+          rows={3}
         />
         <div className="input-action-row">
           <div className="mode-buttons">
@@ -318,6 +337,7 @@ export function ActionComposer({
             onChange={(event) => updateRollAbilityKey(event.target.value)}
           >
             <option value={PLAIN_ROLL_ABILITY_KEY}>Plain roll</option>
+            <option value={INITIATIVE_ROLL_ABILITY_KEY}>{initiativeOptionLabel}</option>
             {abilityOptions.map((ability) => (
               <option key={ability.key} value={ability.key}>
                 {ability.label} {ability.modifier}

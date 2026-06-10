@@ -1,5 +1,5 @@
 import { useState, type Dispatch, type FormEvent, type SetStateAction } from 'react'
-import { ChevronDown, Coins, ExternalLink } from 'lucide-react'
+import { ChevronDown, Coins, ExternalLink, ShieldCheck, ShieldOff } from 'lucide-react'
 import { ThinIcon } from './AppChrome'
 import {
   truncateText,
@@ -59,6 +59,8 @@ type InspectorPanelProps = {
   inventoryRows: InventoryRow[]
   inventoryWeightLabel: string
   inventoryGoldLabel: string
+  equipmentPendingItemKey: string | null
+  toggleInventoryEquipment: (item: InventoryRow) => Promise<void>
   memorySnippetCount: number
   visibleCanonFacts: CanonFact[]
   worldStatePanel: WorldStatePanel
@@ -129,6 +131,8 @@ export function InspectorPanel({
   inventoryRows,
   inventoryWeightLabel,
   inventoryGoldLabel,
+  equipmentPendingItemKey,
+  toggleInventoryEquipment,
   memorySnippetCount,
   visibleCanonFacts,
   worldStatePanel,
@@ -355,13 +359,29 @@ export function InspectorPanel({
           <div className="inventory-table">
             {inventoryRows.length ? (
               inventoryRows.slice(0, inspectorTab === 'inventory' ? 8 : 4).map((item, index) => (
-                <div key={`${item.item}-${index}`}>
+                <div key={`${item.id || item.item}-${index}`} className={item.equipped ? 'equipped' : ''}>
                   <span className={`item-icon ${item.icon}`}>
                     <ThinIcon name={inventoryIconName(item.icon)} size={15} />
                   </span>
-                  <strong>{item.item}</strong>
+                  <strong>
+                    {item.item}
+                    {item.equipped ? <small>Equipped{item.slot ? ` - ${item.slot.replace(/_/g, ' ')}` : ''}</small> : null}
+                  </strong>
                   <span>{item.count}</span>
                   <span>{item.weight}</span>
+                  {item.equippable ? (
+                    <button
+                      type="button"
+                      className="equipment-toggle"
+                      aria-label={`${item.equipped ? 'Unequip' : 'Equip'} ${item.item}`}
+                      title={`${item.equipped ? 'Unequip' : 'Equip'} ${item.item}`}
+                      disabled={equipmentPendingItemKey === (item.id || item.item)}
+                      onClick={() => void toggleInventoryEquipment(item)}
+                    >
+                      {item.equipped ? <ShieldOff size={13} /> : <ShieldCheck size={13} />}
+                      {item.equipped ? 'Unequip' : 'Equip'}
+                    </button>
+                  ) : null}
                 </div>
               ))
             ) : (

@@ -19,6 +19,7 @@ from aidm_server.emergent_memory import (
     validate_canon_patch,
 )
 from aidm_server.models import CanonJob, Campaign, CampaignSegment, DmTurn, safe_json_dumps, safe_json_loads
+from aidm_server.segment_state import build_segment_state_payload
 from aidm_server.segment_triggers import evaluate_segment_trigger, parse_trigger_spec
 from aidm_server.socket_contracts import segment_triggered_payload
 from aidm_server.telemetry import telemetry_event, telemetry_metric
@@ -194,16 +195,7 @@ def _claim_canon_job(job_id: int) -> CanonJob | None:
 
 
 def _segment_state_payload(session_id: int, campaign: Campaign) -> tuple[dict, dict]:
-    session_state = refresh_session_projection(session_id, campaign)
-    session_state_payload = {
-        'current_location': session_state.current_location,
-        'current_quest': session_state.current_quest,
-    }
-    campaign_state = {
-        'location': campaign.location,
-        'current_quest': campaign.current_quest,
-    }
-    return session_state_payload, campaign_state
+    return build_segment_state_payload(session_id, campaign)
 
 
 def _activate_state_segments(turn: DmTurn, segments_to_activate: list[tuple[CampaignSegment, dict]]) -> list[dict]:

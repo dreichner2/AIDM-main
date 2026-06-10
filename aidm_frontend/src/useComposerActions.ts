@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from 'react'
 import type { Socket } from 'socket.io-client'
 import {
+  INITIATIVE_ROLL_ABILITY_KEY,
+  INITIATIVE_ROLL_REASON,
   PLAIN_ROLL_ABILITY_KEY,
   abilityModifierValue,
   buildActionIntent,
@@ -26,7 +28,6 @@ import {
 import type { PendingRollOption } from './gameSelectors'
 import {
   canSubmitWithTurnControl,
-  playerHasTurn,
   turnControlBlockMessage,
   turnControlStatusLabel,
 } from './turnControl'
@@ -243,13 +244,23 @@ export function useComposerActions({
     }
   }
 
+  const dexterityAbility =
+    abilityOptions.find((ability) => ability.key === 'dexterity') ?? {
+      key: 'dexterity',
+      label: 'DEX',
+      score: '—',
+      modifier: '—',
+    }
+  const initiativeAbility: AbilityOption = { ...dexterityAbility, label: 'Initiative' }
   const selectedAbility =
     selectedAbilityKey === PLAIN_ROLL_ABILITY_KEY
       ? null
-      : abilityOptions.find((ability) => ability.key === selectedAbilityKey) ?? null
+      : selectedAbilityKey === INITIATIVE_ROLL_ABILITY_KEY
+        ? initiativeAbility
+        : abilityOptions.find((ability) => ability.key === selectedAbilityKey) ?? null
   const selectedItem =
     itemOptions.find((item) => item.name === selectedItemName) ?? itemOptions[0] ?? null
-  const selectedInventoryActionRequiresItem = ['use', 'drop', 'give', 'sell'].includes(selectedInventoryAction)
+  const selectedInventoryActionRequiresItem = ['use', 'equip', 'unequip', 'drop', 'give', 'sell'].includes(selectedInventoryAction)
   const itemIntentName = selectedInventoryActionRequiresItem
     ? selectedItem?.name ?? itemDraftName
     : itemDraftName
@@ -416,10 +427,22 @@ export function useComposerActions({
     const nextAbility =
       nextKey === PLAIN_ROLL_ABILITY_KEY
         ? null
-        : abilityOptions.find((ability) => ability.key === nextKey) ?? null
-    setSelectedAbilityKey(nextAbility?.key ?? PLAIN_ROLL_ABILITY_KEY)
+        : nextKey === INITIATIVE_ROLL_ABILITY_KEY
+          ? initiativeAbility
+          : abilityOptions.find((ability) => ability.key === nextKey) ?? null
+    setSelectedAbilityKey(
+      nextKey === INITIATIVE_ROLL_ABILITY_KEY
+        ? INITIATIVE_ROLL_ABILITY_KEY
+        : nextAbility?.key ?? PLAIN_ROLL_ABILITY_KEY,
+    )
     setRollModifier(String(abilityModifierValue(nextAbility)))
-    setRollReason(nextAbility ? `${nextAbility.label} check` : '')
+    setRollReason(
+      nextKey === INITIATIVE_ROLL_ABILITY_KEY
+        ? INITIATIVE_ROLL_REASON
+        : nextAbility
+          ? `${nextAbility.label} check`
+          : '',
+    )
     if (composerMode === 'roll') {
       setActionText((current) =>
         composerTextForMode(
@@ -533,7 +556,10 @@ export function useComposerActions({
       die: normalizedDie,
       modifier: parseRollModifier(rollModifier),
       mode: rollMode,
-      reason: rollReason || (selectedAbility ? `${selectedAbility.label} check` : ''),
+      reason:
+        selectedAbilityKey === INITIATIVE_ROLL_ABILITY_KEY
+          ? INITIATIVE_ROLL_REASON
+          : rollReason || (selectedAbility ? `${selectedAbility.label} check` : ''),
       resultVisibility: 'hidden_until_landed',
       targetPendingTurnId,
     })
@@ -625,7 +651,7 @@ export function useComposerActions({
     toggleAdminTools,
     queuedActionText,
     clearQueuedAction: () => setQueuedActionText(''),
-    selectedPlayerHasTurn: playerHasTurn(turnControl, selectedPlayerId),
+    selectedPlayerHasTurn: canSubmitWithTurnControl(turnControl, selectedPlayerId, 'message', false),
     turnControlStatusLabel: turnControlStatusLabel(turnControl),
     updateSelectedDie,
   }

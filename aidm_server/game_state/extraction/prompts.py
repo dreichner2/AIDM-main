@@ -21,8 +21,9 @@ def build_pre_dm_prompt(*, current_state: dict[str, Any], player_message: str, r
     return (
         'Return JSON with key declaredActions, where each action has id, type, actorId, confidence, '
         'sourceText, requiresDMResolution, and type-specific fields.\n'
-        'Allowed types: inventory.consume, inventory.use, inventory.transfer, currency.transfer, combat.attack, generic.intent.\n\n'
+        'Allowed types: inventory.consume, inventory.use, inventory.equip, inventory.unequip, inventory.transfer, currency.transfer, combat.attack, generic.intent.\n\n'
         'For inventory.consume, inventory.use, and inventory.transfer, include quantity; use 1 when exactly one item is indicated by context. '
+        'For inventory.equip and inventory.unequip, include itemName or itemId and include slot only when the player explicitly names a slot such as main_hand, off_hand, helmet, hood, body_armor, clothing, or underwear. '
         'For currency.transfer, include amount and currency using key "currency" with one of pp, gp, ep, sp, cp.\n\n'
         'For transfer actions, include fromActorId when known and toActorId or toActorName. Do not invent recipients.\n\n'
         'For generic.intent, include summary with the concrete object/action the player described. '
@@ -44,7 +45,7 @@ def build_post_dm_prompt(
     recent_timeline: list[dict[str, Any]],
 ) -> str:
     allowed_types = (
-        'inventory.add, inventory.remove, inventory.transfer, currency.add, currency.remove, currency.transfer, '
+        'inventory.add, inventory.remove, inventory.transfer, inventory.equip, inventory.unequip, currency.add, currency.remove, currency.transfer, '
         'health.heal, health.damage, xp.add, xp.remove, scene.update, scene.move_location, '
         'location.discover, location.update, location.connect, quest.add, quest.update, '
         'quest.objective.add, quest.objective.update, quest.complete, quest.fail, '
@@ -58,6 +59,7 @@ def build_post_dm_prompt(
         'Only use inventory.add when the DM response says the character actually takes, receives, buys, loots, pockets, claims, or picks up the item; merely seeing, spotting, finding, or noticing an item in the scene is not an inventory gain. '
         'If exact weight is not stated, infer a reasonable game weight from the item and context.\n\n'
         'For inventory.remove and inventory.transfer, include itemName or itemId.\n\n'
+        'For inventory.equip and inventory.unequip, include itemName or itemId. Use equip when the DM response confirms gear is equipped, worn, donned, wielded, readied, or strapped on. Use unequip when gear is removed, taken off, doffed, stowed, sheathed, or put away. Do not emit equip/unequip for flavor-only mentions.\n\n'
         'For currency.add, currency.remove, and currency.transfer, include amount and currency using key "currency" with one of pp, gp, ep, sp, cp. '
         'For transfer changes, include the source actor as actorId/fromActorId and the recipient as toActorId or toActorName.\n\n'
         'For XP changes, use xp.add or xp.remove with positive integer amount.\n\n'

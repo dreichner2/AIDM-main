@@ -50,6 +50,7 @@ import {
   inventoryCapacity,
   inventoryGoldLabel as buildInventoryGoldLabel,
   inventoryWeightLabel as buildInventoryWeightLabel,
+  type InventoryRow,
   isRecord,
   itemOptionsFromInventory,
   memorySnippetRecords,
@@ -79,6 +80,7 @@ import type {
   StreamingTurn,
   TimelineEntry,
   TurnControlMode,
+  TurnControlSource,
   TtsRuntimeConfig,
   World,
 } from './types'
@@ -392,6 +394,7 @@ function App() {
   const [campaignChooserDismissedKey, setCampaignChooserDismissedKey] = useState('')
   const [characterJoinDialogOpen, setCharacterJoinDialogOpen] = useState(false)
   const [socketReconnectKey, setSocketReconnectKey] = useState(0)
+  const [equipmentPendingItemKey, setEquipmentPendingItemKey] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const resetRuntimeState = useCallback(() => {
     setHealth(null)
@@ -742,7 +745,7 @@ function App() {
   })
 
   const updateTurnControl = useCallback(
-    (mode: TurnControlMode, activePlayerId?: number | null) => {
+    (mode: TurnControlMode, activePlayerId?: number | null, source: TurnControlSource = 'manual') => {
       if (!activeSessionId || !selectedPlayerDetailId) {
         pushError('validation', 'Choose a session and player before changing turn mode.')
         return
@@ -757,6 +760,7 @@ function App() {
         session_id: activeSessionId,
         player_id: selectedPlayerDetailId,
         mode,
+        source,
         active_player_id: nextActivePlayerId,
       })
     },
@@ -2044,6 +2048,60 @@ function App() {
     setPlayerDetail,
   ])
 
+  const toggleInventoryEquipment = useCallback(async (item: InventoryRow) => {
+    if (!selectedPlayerDetailId) {
+      pushError('validation', 'Choose a player before changing equipment.')
+      return
+    }
+    if (!item.equippable) {
+      pushError('validation', `${item.item} cannot be equipped.`)
+      return
+    }
+    const itemKey = item.id || item.item
+    const requestAuth = auth
+    const requestAccessSnapshot = storedRuntimeAccessSnapshot(requestAuth)
+    setEquipmentPendingItemKey(itemKey)
+    try {
+      const updated = await apiFetch<PlayerDetail>(
+        baseUrl,
+        `/api/players/${selectedPlayerDetailId}/inventory/equipment`,
+        requestAuth,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            action: item.equipped ? 'unequip' : 'equip',
+            item_id: item.id || undefined,
+            item_name: item.id ? undefined : item.item,
+          }),
+        },
+      )
+      setPlayerDetail(updated)
+      if (activeSessionId) {
+        await loadSessionData(activeSessionId)
+      }
+    } catch (error) {
+      if (isUnauthorizedError(error)) {
+        if (requestAccessSnapshot !== storedRuntimeAccessSnapshot()) return
+        openAuthTokenPrompt()
+        clearAuthTokenErrors()
+        return
+      }
+      pushError('workspace', `Equipment update failed: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setEquipmentPendingItemKey((current) => (current === itemKey ? null : current))
+    }
+  }, [
+    activeSessionId,
+    auth,
+    baseUrl,
+    clearAuthTokenErrors,
+    loadSessionData,
+    openAuthTokenPrompt,
+    pushError,
+    selectedPlayerDetailId,
+    setPlayerDetail,
+  ])
+
   useSessionSocket({
     auth,
     baseUrl,
@@ -2653,6 +2711,8 @@ function App() {
         inventoryRows={inventoryRows}
         inventoryWeightLabel={inventoryWeightLabel}
         inventoryGoldLabel={inventoryGoldLabel}
+        equipmentPendingItemKey={equipmentPendingItemKey}
+        toggleInventoryEquipment={toggleInventoryEquipment}
         memorySnippetCount={memorySnippets.length}
         visibleCanonFacts={visibleCanonFacts}
         worldStatePanel={worldStatePanel}

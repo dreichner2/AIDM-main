@@ -9,6 +9,9 @@ from aidm_server.canon_inventory import inventory_payload
 from aidm_server.character_state import serialize_stats_payload
 from aidm_server.database import db
 from aidm_server.errors import error_response
+from aidm_server.game_state.application.applier import apply_state_changes
+from aidm_server.game_state.models import display_actor_id, dump_inventory_items, load_inventory_items, stable_change_id
+from aidm_server.game_state.validation.validator import validate_state_changes, validated_changes_for_application
 from aidm_server.models import DmTurn, Player, PlayerAction, TurnEvent, safe_json_dumps
 from aidm_server.pagination import jsonify_page, limited_page
 from aidm_server.response_dtos import player_detail_payload, player_summary_payload
@@ -16,6 +19,7 @@ from aidm_server.race_system import (
     normalize_character_race_selection,
     race_selection_to_json,
 )
+from aidm_server.starting_inventory import starting_inventory_for_class
 from aidm_server.validation import (
     coerce_int,
     missing_fields,
@@ -52,6 +56,16 @@ def _race_selection_payload(payload: dict, fallback_race: str | None):
     except ValueError as exc:
         return None, str(exc)
     return selection, None
+
+
+def _assign_missing_starting_inventory(player: Player) -> bool:
+    if player.inventory:
+        return False
+    inventory_items = starting_inventory_for_class(player.class_)
+    if not inventory_items:
+        return False
+    player.inventory = safe_json_dumps(inventory_items, [])
+    return True
 
 
 @players_bp.route('/campaigns/<int:campaign_id>/players', methods=['GET', 'POST'])
@@ -118,6 +132,11 @@ def add_player(campaign_id):
             race = race_selection['raceName']
 
         raw_inventory = payload.get('inventory')
+        inventory_items = (
+            inventory_payload(raw_inventory)
+            if raw_inventory is not None
+            else starting_inventory_for_class(class_name)
+        )
         new_player = Player(
             workspace_id=current_workspace_id(),
             account_id=current_account_id(),
@@ -130,7 +149,7 @@ def add_player(campaign_id):
             class_=class_name,
             level=level,
             stats=stats_payload,
-            inventory=(safe_json_dumps(inventory_payload(raw_inventory), []) if raw_inventory is not None else None),
+            inventory=(safe_json_dumps(inventory_items, []) if raw_inventory is not None or inventory_items else None),
             character_sheet=_structured_text(payload.get('character_sheet')),
         )
         db.session.add(new_player)
@@ -162,6 +181,9 @@ def get_player_by_id(player_id):
     player = workspace_player(player_id)
     if not player:
         return error_response('player_not_found', 'Player not found.', 404)
+
+    if _assign_missing_starting_inventory(player):
+        db.session.commit()
 
     return jsonify(player_detail_payload(player))
 
@@ -246,6 +268,72 @@ def update_player(player_id):
         db.session.rollback()
         logger.error('Failed to update player: %s', str(exc))
         return error_response('player_update_failed', 'Failed to update player.', 400)
+
+
+@players_bp.route('/<int:player_id>/inventory/equipment', methods=['PATCH'])
+def update_player_equipment(player_id):
+    payload = parse_json_body(request)
+    if payload is None:
+        return error_response('validation_error', 'Expected JSON request body.', 400)
+
+    player = workspace_player(player_id)
+    if not player:
+        return error_response('player_not_found', 'Player not found.', 404)
+
+    action = str(payload.get('action') or '').strip().lower()
+    if action not in {'equip', 'unequip'}:
+        return error_response('validation_error', 'action must be equip or unequip.', 400)
+
+    item_id = str(payload.get('item_id') or payload.get('itemId') or '').strip()
+    item_name = str(payload.get('item_name') or payload.get('itemName') or '').strip()
+    if not item_id and not item_name:
+        return error_response('validation_error', 'item_id or item_name is required.', 400)
+
+    actor_id = display_actor_id(player.player_id)
+    items = load_inventory_items(player.inventory)
+    state = {
+        'playerCharacters': [
+            {
+                'id': actor_id,
+                'playerId': player.player_id,
+                'name': player.character_name,
+                'inventory': {'items': items, 'currency': {}},
+                'metadata': {},
+            }
+        ],
+        'stateChangeLedger': [],
+    }
+    change = {
+        'id': stable_change_id('manual_equipment', player.player_id, action, item_id, item_name, payload.get('slot')),
+        'type': f'inventory.{action}',
+        'source': 'manual',
+        'actorId': actor_id,
+        'itemId': item_id or None,
+        'itemName': item_name or None,
+        'slot': payload.get('slot') or payload.get('equipmentSlot') or payload.get('equipment_slot'),
+        'visible': True,
+        'reason': f"Manual inventory {action}.",
+    }
+    validation = validate_state_changes(state=state, changes=[change])
+    if validation.get('rejected'):
+        reason = validation['rejected'][0].get('reason') or 'Equipment update was rejected.'
+        return error_response('validation_error', reason, 400, {'validation': validation})
+
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+    next_actor = (result.get('nextState') or {}).get('playerCharacters', [{}])[0]
+    next_inventory = next_actor.get('inventory') if isinstance(next_actor.get('inventory'), dict) else {}
+    player.inventory = dump_inventory_items(next_inventory.get('items') or [])
+    db.session.commit()
+    return jsonify(
+        {
+            **player_detail_payload(player),
+            'equipment_update': {
+                'action': action,
+                'applied_changes': result.get('appliedChanges') or [],
+                'validation': validation,
+            },
+        }
+    )
 
 
 @players_bp.route('/<int:player_id>', methods=['DELETE'])

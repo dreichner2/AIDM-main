@@ -35,7 +35,7 @@ from aidm_server.turn_events import record_turn_event
 
 STATE_UPDATE_EVENT = 'state_update'
 MANAGED_STATE_DOMAINS = ['inventory', 'currency', 'health', 'xp', 'scene', 'quests', 'locations', 'npcs', 'flags']
-SAFE_PRE_DM_IMMEDIATE_CHANGE_TYPES = {'inventory.mark_used'}
+SAFE_PRE_DM_IMMEDIATE_CHANGE_TYPES = {'inventory.mark_used', 'inventory.equip', 'inventory.unequip'}
 CONFIRMATION_DENIAL_PATTERN = re.compile(
     r"\b(?:do not|don't|does not|doesn't|did not|cannot|can't|fail|fails|failed|before you can|instead)\b",
     re.IGNORECASE,
@@ -251,10 +251,10 @@ def _confirmed_pre_dm_changes(
 def _state_change_signature(change: dict[str, Any]) -> tuple[Any, ...] | None:
     change_type = str(change.get('type') or '').strip()
     actor_id = str(change.get('actorId') or change.get('actor_id') or '')
-    if change_type in {'inventory.add', 'inventory.remove'}:
+    if change_type in {'inventory.add', 'inventory.remove', 'inventory.equip', 'inventory.unequip'}:
         item = change.get('item') if isinstance(change.get('item'), dict) else {}
         item_name = change.get('itemName') or change.get('item_name') or item.get('name')
-        return (change_type, actor_id, normalize_item_name(item_name))
+        return (change_type, actor_id, normalize_item_name(item_name), normalize_item_name(change.get('slot')))
     if change_type == 'inventory.transfer':
         item_name = change.get('itemName') or change.get('item_name')
         to_actor = str(change.get('toActorId') or change.get('to_actor_id') or change.get('toActorName') or change.get('to_actor_name') or '')
@@ -548,6 +548,7 @@ def _dm_context_packet(
                 'npcName': change.get('npcName') or change.get('name'),
                 'flagKey': change.get('flagKey'),
                 'itemName': change.get('itemName'),
+                'slot': change.get('slot'),
                 'amount': change.get('actualAmount', change.get('amount')),
                 'currency': change.get('currency'),
                 'xp': change.get('actualAmount', change.get('amount')) if str(change.get('type') or '').startswith('xp.') else None,

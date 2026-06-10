@@ -17,6 +17,7 @@ export type RaceKey =
   | 'harengon'
   | 'hobgoblin'
   | 'human'
+  | 'afro-diasporic-human'
   | 'kenku'
   | 'kobold'
   | 'lizardfolk'
@@ -108,6 +109,10 @@ export const PROFILE_ICON_FILES: Record<RaceKey, SexedIcons> = {
     male: 'human_male.png',
     female: 'human_female.png',
   },
+  'afro-diasporic-human': {
+    male: 'afro_diasporic_human_male.jpeg',
+    female: 'afro_diasporic_human_female.jpeg',
+  },
   kenku: {
     male: '11_Kenku_male.png',
     female: '12_Kenku_female.png',
@@ -180,6 +185,16 @@ export const RACE_ALIASES: Record<RaceKey, string[]> = {
   harengon: ['harengon', 'rabbit', 'rabbitfolk', 'bunny', 'hare'],
   hobgoblin: ['hobgoblin', 'hob goblin', 'military goblin'],
   human: ['human', 'humanoid', 'mortal'],
+  'afro-diasporic-human': [
+    'afro-diasporic human',
+    'afro diasporic human',
+    'afro-diasporic',
+    'afro diasporic',
+    'african american',
+    'african american human',
+    'african diaspora human',
+    'black human',
+  ],
   kenku: ['kenku', 'crow', 'raven', 'corvid', 'flightless bird'],
   kobold: ['kobold', 'little dragon', 'tiny dragon', 'small dragon'],
   lizardfolk: ['lizardfolk', 'lizard', 'lizard person', 'reptile', 'reptilian'],

@@ -63,6 +63,13 @@ def _change_message(change: dict[str, Any], *, status: str, reason: str | None =
         return f"Added {_item_name(change)} x{quantity}."
     if change_type == 'inventory.remove':
         return f"Removed {_item_name(change)} x{quantity}."
+    if change_type == 'inventory.equip':
+        slot = str(change.get('slotLabel') or change.get('slot') or 'equipment').replace('_', ' ')
+        conflicts = change.get('conflictItemNames') if isinstance(change.get('conflictItemNames'), list) else []
+        conflict_suffix = f" Unequipped {', '.join(str(item) for item in conflicts if item)}." if conflicts else ''
+        return f"Equipped {_item_name(change)} in {slot}.{conflict_suffix}"
+    if change_type == 'inventory.unequip':
+        return f"Unequipped {_item_name(change)}."
     if change_type == 'currency.add':
         return f"Added {_amount(change)} {str(change.get('currency') or '').lower()}."
     if change_type == 'currency.remove':

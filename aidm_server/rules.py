@@ -143,6 +143,7 @@ _GENERIC_ROLL_REQUEST_PATTERNS = [
 
 DC_HINTS = {
     "attack": "10-18 (target armor dependent)",
+    "initiative": "initiative order",
     "stealth": "12-17",
     "social": "12-18",
     "lore": "10-18",
@@ -162,6 +163,7 @@ def _extract_roll_value(text: str) -> int | None:
 
     patterns = [
         r'\broll(?:ed|ing)?\s*(?:a\s*)?(?:d20\s*)?(?:=|is|:)?\s*(\d{1,2})\b',
+        r'\binitiative\s*(?:=|is|:)?\s*(\d{1,2})\b',
         r'\bd20\s*(?:=|is|:)\s*(\d{1,2})\b',
         r'\bcheck\s*(?:=|is|:)\s*(\d{1,2})\b',
     ]
@@ -269,6 +271,18 @@ def classify_player_action(message: str) -> RuleHint:
                 DC_HINTS["mobility"],
                 "High-risk movement or escape detected",
                 confidence=0.86,
+                roll_value=roll_value,
+            )
+        )
+
+    if 'initiative' in tokens and (roll_value is not None or 'roll' in tokens):
+        return _with_resolution(
+            RuleHint(
+                True,
+                "initiative",
+                DC_HINTS["initiative"],
+                "Initiative roll detected",
+                confidence=0.9,
                 roll_value=roll_value,
             )
         )

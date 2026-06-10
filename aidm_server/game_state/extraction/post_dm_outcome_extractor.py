@@ -58,6 +58,16 @@ ITEM_LOSS_PATTERN = re.compile(
     r'(?:the|a|an|some|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
     re.IGNORECASE,
 )
+ITEM_EQUIP_PATTERN = re.compile(
+    r'\b(?:you\s+)?(?:equip|equips|equipped|wield|wields|wielded|ready|readies|readied|wear|wears|wore|don|dons|donned|put on|puts on|strap on|straps on|strapped on|draw|draws|drew)\s+'
+    r'(?:the|a|an|some|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
+    re.IGNORECASE,
+)
+ITEM_UNEQUIP_PATTERN = re.compile(
+    r'\b(?:you\s+)?(?:unequip|unequips|unequipped|doff|doffs|doffed|stow|stows|stowed|sheathe|sheathes|sheathed|put away|puts away|take off|takes off|took off|remove|removes|removed)\s+'
+    r'(?:the|a|an|some|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
+    re.IGNORECASE,
+)
 EXPLICIT_INVENTORY_STATE_PATTERN = re.compile(
     r'\bstate change:\s*[^.\n]*?\*{0,2}'
     r'(?P<verb>gain|gains|add|adds|receive|receives|take|takes|pick up|picks up|'
@@ -218,7 +228,7 @@ def _assign_turn_scoped_change_ids(changes: list[dict[str, Any]], *, turn_id: in
 
 def _already_applied_signature(change: dict[str, Any]) -> tuple[Any, ...] | None:
     change_type = str(change.get('type') or '').strip()
-    if change_type in {'inventory.add', 'inventory.remove'}:
+    if change_type in {'inventory.add', 'inventory.remove', 'inventory.equip', 'inventory.unequip'}:
         item = change.get('item') if isinstance(change.get('item'), dict) else {}
         return (
             change_type,
@@ -353,7 +363,16 @@ def _add_change(
     **payload,
 ) -> None:
     change = {
-        'id': stable_change_id(turn_id, 'post_dm', change_type, actor_id, payload.get('itemName'), payload.get('currency'), payload.get('amount')),
+        'id': stable_change_id(
+            turn_id,
+            'post_dm',
+            change_type,
+            actor_id,
+            payload.get('itemName'),
+            payload.get('slot'),
+            payload.get('currency'),
+            payload.get('amount'),
+        ),
         'turnId': turn_id,
         'type': change_type,
         'source': 'post_dm',
@@ -594,6 +613,27 @@ def _heuristic_extract(
     for sentence in _item_extraction_sentences(text):
         if _is_conditional_item_context(sentence):
             continue
+        for pattern, change_type in ((ITEM_EQUIP_PATTERN, 'inventory.equip'), (ITEM_UNEQUIP_PATTERN, 'inventory.unequip')):
+            for match in pattern.finditer(sentence):
+                item_name = _clean_item(match.group('item'))
+                if not _looks_like_item(item_name):
+                    continue
+                if _inventory_change_already_applied(
+                    change_type=change_type,
+                    actor_id=actor_id,
+                    item_name=item_name,
+                    already_applied_changes=already_applied_changes,
+                ):
+                    continue
+                _add_change(
+                    changes,
+                    turn_id=turn_id,
+                    actor_id=actor_id,
+                    change_type=change_type,
+                    itemName=item_name,
+                    reason=f'DM stated equipment {change_type.split(".")[-1]} for {item_name}.',
+                    already=already,
+                )
         for pattern, change_type in ((ITEM_GAIN_PATTERN, 'inventory.add'), (ITEM_LOSS_PATTERN, 'inventory.remove')):
             for match in pattern.finditer(sentence):
                 if change_type == 'inventory.add' and _is_observed_only_item_context(sentence, match.group('verb')):

@@ -11,11 +11,17 @@ import type {
 } from './types'
 
 export type InventoryRow = {
+  id: string
   item: string
   count: string
   weight: string
   icon: string
   weightValue: number | null
+  type: string
+  subtype: string
+  equipped: boolean
+  slot: string
+  equippable: boolean
 }
 
 export type StatBlock = {
@@ -171,19 +177,36 @@ export function normalizeInventory(value: unknown): InventoryRow[] {
       : []
   const iconFor = (item: string, index: number) => {
     const normalized = item.toLowerCase()
-    if (normalized.includes('sword') || normalized.includes('blade')) return 'sword'
+    if (normalized.includes('sword') || normalized.includes('blade') || normalized.includes('axe') || normalized.includes('hammer') || normalized.includes('maul')) return 'sword'
     if (normalized.includes('shield')) return 'shield'
     if (normalized.includes('potion') || normalized.includes('vial')) return 'potion'
     if (normalized.includes('armor') || normalized.includes('mail')) return 'armor'
     if (normalized.includes('ration') || normalized.includes('food')) return 'ration'
     return ['sword', 'shield', 'potion', 'armor', 'ration'][index % 5]
   }
+  const inferredSlotFor = (entry: JsonRecord, item: string, itemType: string, subtype: string) => {
+    const rawSlot = stringValue(entry.slot ?? entry.equipmentSlot ?? entry.equipment_slot)
+    if (rawSlot && rawSlot !== 'none') return rawSlot
+    const normalized = `${item} ${itemType} ${subtype} ${(Array.isArray(entry.tags) ? entry.tags.join(' ') : '')}`.toLowerCase()
+    const looksLikeWeapon = itemType === 'weapon' || /\b(?:axe|battleaxe|battle axe|blade|bow|club|crossbow|dagger|flail|greataxe|great axe|greatsword|great sword|handaxe|hand axe|javelin|knife|lance|longsword|mace|maul|morningstar|pike|quarterstaff|rapier|scimitar|shortsword|sickle|sling|spear|staff|sword|trident|war pick|warhammer|whip)\b/.test(normalized)
+    if (looksLikeWeapon) return /\b(?:greatsword|great sword|greataxe|great axe|greatclub|great club|maul|longbow|shortbow|heavy crossbow|halberd|glaive|pike|two.?hand)\b/.test(normalized) ? 'two_hands' : 'main_hand'
+    if (normalized.includes('shield')) return 'off_hand'
+    if (normalized.includes('helmet') || normalized.includes('helm')) return 'helmet'
+    if (normalized.includes('hood') || normalized.includes('cowl')) return 'hood'
+    if (normalized.includes('underwear') || normalized.includes('underclothes')) return 'underwear'
+    if (normalized.includes('cloak') || normalized.includes('cape')) return 'cloak'
+    if (normalized.includes('glove') || normalized.includes('gauntlet')) return 'hands'
+    if (normalized.includes('boot') || normalized.includes('shoe')) return 'feet'
+    if (normalized.includes('armor') || normalized.includes('armour') || normalized.includes('mail') || normalized.includes('breastplate') || normalized.includes('vest')) return 'body_armor'
+    if (normalized.includes('clothing') || normalized.includes('clothes') || normalized.includes('shirt') || normalized.includes('tunic') || normalized.includes('robe')) return 'clothing'
+    return ''
+  }
   return source.map((entry, index) => {
     if (typeof entry === 'string') {
-      return { item: entry, count: '1', weight: '—', icon: iconFor(entry, index), weightValue: null }
+      return { id: '', item: entry, count: '1', weight: '—', icon: iconFor(entry, index), weightValue: null, type: '', subtype: '', equipped: false, slot: '', equippable: false }
     }
     if (!isRecord(entry)) {
-      return { item: `Item ${index + 1}`, count: '1', weight: '—', icon: 'ration', weightValue: null }
+      return { id: '', item: `Item ${index + 1}`, count: '1', weight: '—', icon: 'ration', weightValue: null, type: '', subtype: '', equipped: false, slot: '', equippable: false }
     }
     const item =
       stringValue(entry.name) ||
@@ -194,12 +217,21 @@ export function normalizeInventory(value: unknown): InventoryRow[] {
     const weightNumber = numberValue(entry.weight)
     const weightValue =
       weightNumber === null ? null : Math.round(weightNumber * countNumber * 10) / 10
+    const type = stringValue(entry.type)
+    const subtype = stringValue(entry.subtype)
+    const slot = inferredSlotFor(entry, item, type.toLowerCase(), subtype.toLowerCase())
     return {
+      id: stringValue(entry.id ?? entry.itemId ?? entry.item_id),
       item,
       count: stringValue(entry.quantity ?? entry.count, '1'),
       weight: weightNumber === null ? '—' : `${weightValue} lb`,
       icon: stringValue(entry.icon, iconFor(item, index)),
       weightValue,
+      type,
+      subtype,
+      equipped: entry.equipped === true,
+      slot,
+      equippable: Boolean(slot),
     }
   })
 }
@@ -261,8 +293,11 @@ export function abilityOptionsFromStatBlock(statBlock: StatBlock): AbilityOption
 
 export function itemOptionsFromInventory(inventoryRows: InventoryRow[]): ItemOption[] {
   return inventoryRows.map((row) => ({
+    id: row.id,
     name: row.item,
     quantity: row.count,
+    equipped: row.equipped,
+    slot: row.slot,
   }))
 }
 

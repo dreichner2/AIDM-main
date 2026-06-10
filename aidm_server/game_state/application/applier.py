@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from aidm_server.canon_text import int_or_default
+from aidm_server.game_state.equipment import conflict_items, equipment_slot_label, infer_equipment_slot
 from aidm_server.game_state.models import (
     CURRENCY_CODES,
     CURRENCY_STAT_KEYS,
@@ -82,6 +83,41 @@ def _remove_item(items: list[dict[str, Any]], change: dict[str, Any]) -> dict[st
     item['quantity'] = max(0, int_or_default(item.get('quantity'), default=1) - quantity)
     if item['quantity'] <= 0:
         items.remove(item)
+    return item
+
+
+def _equip_item(items: list[dict[str, Any]], change: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str | None]:
+    item = _find_item(
+        items,
+        item_id=_change_value(change, 'itemId', 'item_id'),
+        item_name=_change_value(change, 'itemName', 'item_name'),
+    )
+    if not item:
+        return None, [], None
+    slot = infer_equipment_slot(item, requested_slot=_change_value(change, 'slot', 'equipment_slot'), equipped_items=items)
+    if not slot:
+        return item, [], None
+    conflicts = conflict_items(items, item, slot)
+    for conflict in conflicts:
+        conflict['equipped'] = False
+        conflict['slot'] = conflict.get('slot') or infer_equipment_slot(conflict) or 'none'
+    item['equipped'] = True
+    item['slot'] = slot
+    if change.get('turnId') or change.get('turn_id'):
+        item['lastEquippedAtTurn'] = change.get('turnId') or change.get('turn_id')
+    return item, conflicts, slot
+
+
+def _unequip_item(items: list[dict[str, Any]], change: dict[str, Any]) -> dict[str, Any] | None:
+    item = _find_item(
+        items,
+        item_id=_change_value(change, 'itemId', 'item_id'),
+        item_name=_change_value(change, 'itemName', 'item_name'),
+    )
+    if not item:
+        return None
+    item['equipped'] = False
+    item['slot'] = item.get('slot') or infer_equipment_slot(item) or 'none'
     return item
 
 
@@ -653,6 +689,26 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
             applied_change['itemId'] = _change_value(change, 'itemId', 'item_id') or (removed or {}).get('id')
             applied_change['itemName'] = _change_value(change, 'itemName', 'item_name') or (removed or {}).get('name')
             applied_change['actualAmount'] = max(1, int_or_default(change.get('quantity'), default=1))
+        elif change_type == 'inventory.equip' and actor:
+            item, conflicts, slot = _equip_item(actor_items(actor), change)
+            if not item or not slot:
+                skipped.append({'change': change, 'reason': 'Item missing or not equippable during equip.'})
+                continue
+            applied_change['itemId'] = item.get('id')
+            applied_change['itemName'] = item.get('name')
+            applied_change['slot'] = slot
+            applied_change['slotLabel'] = equipment_slot_label(slot)
+            applied_change['conflictItemIds'] = [conflict.get('id') for conflict in conflicts if conflict.get('id')]
+            applied_change['conflictItemNames'] = [conflict.get('name') for conflict in conflicts if conflict.get('name')]
+        elif change_type == 'inventory.unequip' and actor:
+            item = _unequip_item(actor_items(actor), change)
+            if not item:
+                skipped.append({'change': change, 'reason': 'Item missing during unequip.'})
+                continue
+            applied_change['itemId'] = item.get('id')
+            applied_change['itemName'] = item.get('name')
+            applied_change['slot'] = item.get('slot')
+            applied_change['slotLabel'] = equipment_slot_label(item.get('slot'))
         elif change_type == 'inventory.mark_used' and actor:
             item = _find_item(actor_items(actor), item_id=_change_value(change, 'itemId', 'item_id'))
             if item:
@@ -871,6 +927,19 @@ def legacy_immediate_summary_from_applied(applied_changes: list[dict[str, Any]],
                     'action': 'acquire' if change_type == 'inventory.add' else 'lose',
                     'item_name': change.get('itemName') or change.get('item_name') or change.get('item', {}).get('name'),
                     'quantity': max(1, int_or_default(change.get('quantity'), default=1)),
+                    'source': change.get('source') or 'state_pipeline',
+                    'state_change_id': change.get('id'),
+                }
+            )
+        elif change_type in {'inventory.equip', 'inventory.unequip'}:
+            inventory_changes.append(
+                {
+                    'player_id': parse_actor_player_id(change.get('actorId') or change.get('actor_id')),
+                    'action': 'equip' if change_type == 'inventory.equip' else 'unequip',
+                    'item_name': change.get('itemName') or change.get('item_name'),
+                    'quantity': 1,
+                    'slot': change.get('slot'),
+                    'conflict_item_names': change.get('conflictItemNames') or [],
                     'source': change.get('source') or 'state_pipeline',
                     'state_change_id': change.get('id'),
                 }

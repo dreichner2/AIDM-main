@@ -400,6 +400,11 @@ def test_build_dm_context_shape_snapshot(app):
             'memory_snippets': [],
         },
         'live_world_state': {},
+        'player_identity_rules': [
+            'character_name is the in-world player character identity.',
+            'Account/profile names are out-of-character labels and are not characters in the scene.',
+            'Only active_players are currently active in this session unless recent narration explicitly says otherwise.',
+        ],
         'active_players': [
                 {
                     'player_id': '<player-id>',

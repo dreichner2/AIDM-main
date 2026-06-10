@@ -108,6 +108,46 @@ def test_extract_pickup_item_from_player_message(app):
     assert result['declaredActions'][0]['summary'] == 'Player attempts to pick up stick.'
 
 
+def test_extract_equipment_actions_from_player_message(app):
+    with app.app_context():
+        equip_result = extract_pre_dm_actions(
+            current_state={},
+            player_message='I equip my greatsword.',
+            recent_timeline=[],
+            actor_id='player_1',
+        )
+        unequip_result = extract_pre_dm_actions(
+            current_state={},
+            player_message='I take off my iron helmet.',
+            recent_timeline=[],
+            actor_id='player_1',
+        )
+
+    assert equip_result['declaredActions'][0]['type'] == 'inventory.equip'
+    assert equip_result['declaredActions'][0]['itemName'] == 'greatsword'
+    assert unequip_result['declaredActions'][0]['type'] == 'inventory.unequip'
+    assert unequip_result['declaredActions'][0]['itemName'] == 'iron helmet'
+
+
+def test_post_dm_extracts_equipment_outcomes(app):
+    with app.app_context():
+        result = extract_post_dm_outcomes(
+            state_before_dm={},
+            player_message='I change gear.',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response='You strap on the iron helmet, then stow the dagger.',
+            recent_timeline=[],
+            actor_id='player_1',
+            turn_id=42,
+        )
+
+    changes = result['proposedChanges']
+    assert [change['type'] for change in changes] == ['inventory.equip', 'inventory.unequip']
+    assert changes[0]['itemName'] == 'iron helmet'
+    assert changes[1]['itemName'] == 'dagger'
+
+
 def test_pre_dm_helper_debug_captures_raw_response(app, monkeypatch):
     helper_text = (
         '{"declaredActions":[{"id":"act_001","type":"generic.intent","actorId":"player_1",'
@@ -624,6 +664,83 @@ def test_mixed_state_change_stress_batch_is_atomic_non_negative_and_idempotent()
     assert source['xp']['current'] >= 0
     assert len([line for line in state_log['lines'] if line['changeType'] in {'inventory.remove', 'inventory.add'} and 'Sword' in line['message']]) == 1
     assert any(line['message'] == 'Added 75 XP.' for line in state_log['lines'])
+
+
+def test_equipping_two_handed_weapon_clears_both_hands_without_touching_armor_slots():
+    state = _state(
+        items=[
+            _item('Greatsword', item_id='greatsword_1', item_type='weapon', subtype='greatsword'),
+            {**_item('Longsword', item_id='longsword_1', item_type='weapon', subtype='sword', equipped=True), 'slot': 'main_hand'},
+            {**_item('Dagger', item_id='dagger_1', item_type='weapon', subtype='dagger', equipped=True), 'slot': 'off_hand'},
+            {**_item('Iron Helmet', item_id='helmet_1', item_type='armor', subtype='helmet', equipped=True), 'slot': 'helmet'},
+            {**_item('Travel Hood', item_id='hood_1', item_type='clothing', subtype='hood', equipped=True), 'slot': 'hood'},
+        ],
+    )
+    validation = validate_declared_actions(
+        state=state,
+        declared_actions=[
+            {
+                'id': 'equip_greatsword',
+                'type': 'inventory.equip',
+                'actorId': 'player_1',
+                'sourceText': 'I equip my greatsword.',
+                'itemName': 'Greatsword',
+            }
+        ],
+        current_turn=7,
+    )
+    result = apply_state_changes(state, validation['immediateChanges'])
+    items = {item['id']: item for item in result['nextState']['playerCharacters'][0]['inventory']['items']}
+
+    assert validation['validatedActions'][0]['status'] == 'valid'
+    assert validation['immediateChanges'][0]['slot'] == 'two_hands'
+    assert set(validation['immediateChanges'][0]['conflictItemIds']) == {'longsword_1', 'dagger_1'}
+    assert items['greatsword_1']['equipped'] is True
+    assert items['greatsword_1']['slot'] == 'two_hands'
+    assert items['longsword_1']['equipped'] is False
+    assert items['dagger_1']['equipped'] is False
+    assert items['helmet_1']['equipped'] is True
+    assert items['hood_1']['equipped'] is True
+
+
+def test_equipment_slots_allow_hood_under_helmet_but_replace_same_slot():
+    state = _state(
+        items=[
+            {**_item('Travel Hood', item_id='hood_1', item_type='clothing', subtype='hood', equipped=True), 'slot': 'hood'},
+            {**_item('Iron Helmet', item_id='helmet_1', item_type='armor', subtype='helmet', equipped=True), 'slot': 'helmet'},
+            _item('Steel Helmet', item_id='helmet_2', item_type='armor', subtype='helmet'),
+            _item('Shortsword', item_id='shortsword_1', item_type='weapon', subtype='sword'),
+            _item('Dagger', item_id='dagger_1', item_type='weapon', subtype='dagger'),
+        ],
+    )
+    first_validation = validate_state_changes(
+        state=state,
+        changes=[
+            {'id': 'equip_shortsword', 'type': 'inventory.equip', 'actorId': 'player_1', 'itemId': 'shortsword_1'},
+        ],
+    )
+    first_result = apply_state_changes(state, validated_changes_for_application(first_validation))
+    second_validation = validate_state_changes(
+        state=first_result['nextState'],
+        changes=[
+            {'id': 'equip_dagger', 'type': 'inventory.equip', 'actorId': 'player_1', 'itemId': 'dagger_1'},
+            {'id': 'equip_steel_helmet', 'type': 'inventory.equip', 'actorId': 'player_1', 'itemId': 'helmet_2'},
+        ],
+    )
+    result = apply_state_changes(first_result['nextState'], validated_changes_for_application(second_validation))
+    items = {item['id']: item for item in result['nextState']['playerCharacters'][0]['inventory']['items']}
+
+    assert first_validation['rejected'] == []
+    assert second_validation['rejected'] == []
+    dagger_change = next(change['change'] for change in second_validation['accepted'] if change['change']['itemId'] == 'dagger_1')
+    assert dagger_change['conflictItemIds'] == []
+    assert items['shortsword_1']['equipped'] is True
+    assert items['shortsword_1']['slot'] == 'main_hand'
+    assert items['dagger_1']['equipped'] is True
+    assert items['dagger_1']['slot'] == 'off_hand'
+    assert items['helmet_2']['equipped'] is True
+    assert items['helmet_1']['equipped'] is False
+    assert items['hood_1']['equipped'] is True
 
 
 def test_invalid_state_change_stress_rejects_without_partial_mutation():

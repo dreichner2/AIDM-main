@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
+from aidm_server.contracts import ProviderResponse
 from aidm_server.database import db
+import aidm_server.game_state.extraction.post_dm_outcome_extractor as post_extractor_module
+import aidm_server.turn_control as turn_control_module
 from aidm_server.models import (
     Campaign,
     CampaignSegment,
@@ -43,6 +46,16 @@ def _seed_second_player(app, campaign_id: int) -> int:
         db.session.add(player)
         db.session.commit()
         return player.player_id
+
+
+class FakeConductorProvider:
+    def __init__(self, text: str):
+        self.text = text
+        self.requests = []
+
+    def generate(self, request):
+        self.requests.append(request)
+        return ProviderResponse(text=self.text, provider='fake-conductor', model='fake-conductor-v1')
 
 
 def _turn_status_payloads(received, status):
@@ -305,6 +318,242 @@ def test_turn_control_blocks_out_of_turn_player(app, socketio):
         assert DmTurn.query.filter_by(session_id=ids['session_id'], player_id=second_player_id).count() == 0
 
 
+def test_turn_control_can_return_to_auto_source(app, socketio):
+    ids = seed_world_campaign_player_session(app)
+
+    client = socketio.test_client(app, flask_test_client=app.test_client())
+    client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    client.get_received()
+
+    client.emit(
+        'set_turn_control',
+        {
+            'session_id': ids['session_id'],
+            'player_id': ids['player_id'],
+            'mode': 'spotlight',
+            'source': 'manual',
+            'active_player_id': ids['player_id'],
+        },
+    )
+    manual_payload = _event_payload(client.get_received(), 'turn_control_updated')
+    assert manual_payload['turn_control']['mode'] == 'spotlight'
+    assert manual_payload['turn_control']['source'] == 'manual'
+
+    client.emit(
+        'set_turn_control',
+        {
+            'session_id': ids['session_id'],
+            'player_id': ids['player_id'],
+            'mode': 'free',
+            'source': 'auto',
+        },
+    )
+    auto_payload = _event_payload(client.get_received(), 'turn_control_updated')
+
+    assert auto_payload['turn_control']['mode'] == 'free'
+    assert auto_payload['turn_control']['source'] == 'auto'
+    assert auto_payload['turn_control']['activePlayerId'] is None
+
+
+def test_ai_conductor_adds_player_to_spotlight_conversation(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        yield 'Borin steps into the conversation without breaking the guard\'s focus.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    ids = seed_world_campaign_player_session(app)
+    second_player_id = _seed_second_player(app, ids['campaign_id'])
+    provider = FakeConductorProvider(
+        json.dumps(
+            {
+                'decision': 'add_participant',
+                'mode': 'spotlight',
+                'activePlayerId': ids['player_id'],
+                'participantPlayerIds': [ids['player_id'], second_player_id],
+                'focusType': 'conversation',
+                'reason': 'Borin is joining the same conversation.',
+                'confidence': 0.91,
+            }
+        )
+    )
+    app.config['AIDM_TURN_CONDUCTOR_HELPER_IN_TESTS'] = True
+    monkeypatch.setattr(turn_control_module, 'get_helper_provider', lambda: provider)
+
+    first_client = socketio.test_client(app, flask_test_client=app.test_client())
+    second_client = socketio.test_client(app, flask_test_client=app.test_client())
+    first_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    second_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': second_player_id})
+    first_client.get_received()
+    second_client.get_received()
+
+    first_client.emit(
+        'set_turn_control',
+        {
+            'session_id': ids['session_id'],
+            'player_id': ids['player_id'],
+            'mode': 'spotlight',
+            'active_player_id': ids['player_id'],
+        },
+    )
+    first_client.get_received()
+    second_client.get_received()
+
+    second_client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': second_player_id,
+            'message': 'I step beside Ember and add, "We can make this worth your time."',
+        },
+    )
+    received = second_client.get_received()
+    updated_payload = _event_payload(received, 'turn_control_updated')
+    start_payload = _event_payload(received, 'dm_response_start')
+
+    assert updated_payload is not None
+    assert updated_payload['turn_control']['mode'] == 'spotlight'
+    assert updated_payload['turn_control']['source'] == 'ai'
+    assert updated_payload['turn_control']['activePlayerId'] == ids['player_id']
+    assert set(updated_payload['turn_control']['participantPlayerIds']) == {ids['player_id'], second_player_id}
+    assert start_payload['rules_hint']['turn_control']['source'] == 'ai'
+    assert set(start_payload['rules_hint']['turn_control']['participantPlayerIds']) == {ids['player_id'], second_player_id}
+    assert provider.requests
+    assert 'TURN_CONDUCTOR_INPUT' in provider.requests[0].prompt
+
+    with app.app_context():
+        turn = DmTurn.query.filter_by(session_id=ids['session_id'], player_id=second_player_id).order_by(DmTurn.turn_id.desc()).first()
+        assert turn is not None
+        rules_hint = safe_json_loads(turn.rules_hint, {})
+        assert set(rules_hint['turn_control']['participantPlayerIds']) == {ids['player_id'], second_player_id}
+
+
+def test_ai_conductor_switches_spotlight_interrupt_to_structured(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        yield 'The sudden attack snaps the scene into strict timing.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    ids = seed_world_campaign_player_session(app)
+    second_player_id = _seed_second_player(app, ids['campaign_id'])
+    provider = FakeConductorProvider(
+        json.dumps(
+            {
+                'decision': 'switch_to_structured',
+                'mode': 'structured',
+                'activePlayerId': second_player_id,
+                'participantPlayerIds': [ids['player_id'], second_player_id],
+                'focusType': 'interrupt',
+                'reason': 'A violent interrupt makes timing matter.',
+                'confidence': 0.94,
+            }
+        )
+    )
+    app.config['AIDM_TURN_CONDUCTOR_HELPER_IN_TESTS'] = True
+    monkeypatch.setattr(turn_control_module, 'get_helper_provider', lambda: provider)
+
+    first_client = socketio.test_client(app, flask_test_client=app.test_client())
+    second_client = socketio.test_client(app, flask_test_client=app.test_client())
+    first_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    second_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': second_player_id})
+    first_client.get_received()
+    second_client.get_received()
+
+    first_client.emit(
+        'set_turn_control',
+        {
+            'session_id': ids['session_id'],
+            'player_id': ids['player_id'],
+            'mode': 'spotlight',
+            'active_player_id': ids['player_id'],
+        },
+    )
+    first_client.get_received()
+    second_client.get_received()
+
+    second_client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': second_player_id,
+            'message': 'While Ember talks, I stab the guard.',
+        },
+    )
+    received = second_client.get_received()
+    updated_payload = _event_payload(received, 'turn_control_updated')
+    start_payload = _event_payload(received, 'dm_response_start')
+
+    assert updated_payload is not None
+    assert updated_payload['turn_control']['mode'] == 'structured'
+    assert updated_payload['turn_control']['source'] == 'ai'
+    assert updated_payload['turn_control']['activePlayerId'] == second_player_id
+    assert set(updated_payload['turn_control']['participantPlayerIds']) == {ids['player_id'], second_player_id}
+    assert start_payload['rules_hint']['turn_control']['mode'] == 'structured'
+    assert start_payload['rules_hint']['turn_control']['activePlayerId'] == second_player_id
+
+
+def test_ai_conductor_cannot_bypass_existing_structured_turn_lock(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', lambda *args, **kwargs: iter(['Should not run.']))
+    ids = seed_world_campaign_player_session(app)
+    second_player_id = _seed_second_player(app, ids['campaign_id'])
+    provider = FakeConductorProvider(
+        json.dumps(
+            {
+                'decision': 'allow',
+                'mode': 'structured',
+                'activePlayerId': second_player_id,
+                'participantPlayerIds': [ids['player_id'], second_player_id],
+                'reason': 'Unsafe fake allow.',
+                'confidence': 1,
+            }
+        )
+    )
+    app.config['AIDM_TURN_CONDUCTOR_HELPER_IN_TESTS'] = True
+    monkeypatch.setattr(turn_control_module, 'get_helper_provider', lambda: provider)
+
+    first_client = socketio.test_client(app, flask_test_client=app.test_client())
+    second_client = socketio.test_client(app, flask_test_client=app.test_client())
+    first_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    second_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': second_player_id})
+    first_client.get_received()
+    second_client.get_received()
+
+    first_client.emit(
+        'set_turn_control',
+        {
+            'session_id': ids['session_id'],
+            'player_id': ids['player_id'],
+            'mode': 'structured',
+            'active_player_id': ids['player_id'],
+        },
+    )
+    first_client.get_received()
+    second_client.get_received()
+
+    second_client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': second_player_id,
+            'message': 'I try to cut ahead anyway.',
+        },
+    )
+    error_payload = _event_payload(second_client.get_received(), 'error')
+
+    assert error_payload['error_code'] == 'turn_out_of_order'
+    assert error_payload['details']['turn_control']['activePlayerId'] == ids['player_id']
+    with app.app_context():
+        assert DmTurn.query.filter_by(session_id=ids['session_id'], player_id=second_player_id).count() == 0
+
+
 def test_structured_turn_control_advances_after_completed_turn(app, socketio, app_runtime, monkeypatch):
     from aidm_server.rules import RuleHint
 
@@ -507,6 +756,110 @@ def test_turn_pipeline_missing_item_does_not_reach_dm_as_valid(app, socketio, ap
         assert validation['validatedActions'][0]['status'] == 'invalid'
 
 
+def test_dm_context_uses_active_session_characters_not_inactive_profile_names(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+    captured = {}
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        del user_input, rules_hint
+        captured['context'] = json.loads(context)
+        captured['speaking_player'] = speaking_player
+        yield 'Orin keeps the conversation moving.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        orin = db.session.get(Player, ids['player_id'])
+        orin.name = 'Daniel Reichner'
+        orin.character_name = 'Orin'
+        orin.race = 'Gnome'
+        larin = Player(
+            campaign_id=ids['campaign_id'],
+            name='Danny Admin',
+            character_name='Larin',
+            race='Elf',
+            class_='Fighter - Archer',
+            level=1,
+        )
+        stale = Player(
+            campaign_id=ids['campaign_id'],
+            name='Daniel Reichner',
+            character_name='Danny',
+            race='Dwarf',
+            level=1,
+        )
+        db.session.add_all([larin, stale])
+        db.session.commit()
+        larin_id = larin.player_id
+
+    orin_client = socketio.test_client(app, flask_test_client=app.test_client())
+    larin_client = socketio.test_client(app, flask_test_client=app.test_client())
+    assert orin_client.is_connected()
+    assert larin_client.is_connected()
+    orin_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    orin_client.get_received()
+    larin_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': larin_id})
+    larin_client.get_received()
+
+    orin_client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'I answer the guard as Orin.',
+        },
+    )
+    received = orin_client.get_received()
+
+    assert _event_payload(received, 'dm_response_start') is not None
+    active_names = {player['character_name'] for player in captured['context']['active_players']}
+    assert active_names == {'Orin', 'Larin'}
+    assert captured['speaking_player']['character_name'] == 'Orin'
+    assert all(player['character_name'] != 'Danny' for player in captured['context']['active_players'])
+
+
+def test_implied_stab_without_blade_reaches_dm_as_invalid(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+    captured = {}
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        del user_input, context, speaking_player
+        captured['rules_hint'] = rules_hint
+        yield 'Larin reaches for a blade, but has no blade to stab with.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        player.character_name = 'Larin'
+        player.inventory = safe_json_dumps([], [])
+        db.session.commit()
+
+    client = socketio.test_client(app, flask_test_client=app.test_client())
+    client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    client.get_received()
+    client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'I stab the guard.',
+        },
+    )
+    received = client.get_received()
+
+    assert _event_payload(received, 'dm_response_start') is not None
+    state_packet = captured['rules_hint']['state_pipeline']
+    assert state_packet['validatedActions'][0]['status'] == 'invalid'
+    assert 'blade' in state_packet['validatedActions'][0]['summary'].lower()
+
+
 def test_turn_pipeline_consumes_potion_and_applies_healing(app, socketio, app_runtime, monkeypatch):
     socketio_module = app_runtime['modules']['socketio_events']
 
@@ -561,6 +914,59 @@ def test_turn_pipeline_consumes_potion_and_applies_healing(app, socketio, app_ru
         assert state_log_entry is not None
         assert 'Minor Healing Potion' in state_log_entry.message
         assert 'Restored 7 HP' in state_log_entry.message
+
+
+def test_turn_pipeline_equips_two_handed_weapon_and_clears_hand_conflicts(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        del user_input, context, speaking_player, rules_hint
+        yield 'You settle the greatsword into both hands.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        player.inventory = safe_json_dumps(
+            [
+                {'id': 'great', 'name': 'Greatsword', 'quantity': 1, 'type': 'weapon', 'subtype': 'greatsword'},
+                {'id': 'long', 'name': 'Longsword', 'quantity': 1, 'type': 'weapon', 'subtype': 'sword', 'equipped': True, 'slot': 'main_hand'},
+                {'id': 'dagger', 'name': 'Dagger', 'quantity': 1, 'type': 'weapon', 'subtype': 'dagger', 'equipped': True, 'slot': 'off_hand'},
+                {'id': 'hood', 'name': 'Travel Hood', 'quantity': 1, 'type': 'clothing', 'subtype': 'hood', 'equipped': True, 'slot': 'hood'},
+                {'id': 'helmet', 'name': 'Iron Helmet', 'quantity': 1, 'type': 'armor', 'subtype': 'helmet', 'equipped': True, 'slot': 'helmet'},
+            ],
+            [],
+        )
+        db.session.commit()
+
+    client = socketio.test_client(app, flask_test_client=app.test_client())
+    client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    client.get_received()
+    client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'I equip my greatsword.',
+        },
+    )
+    received = client.get_received()
+
+    state_payload = _assert_realtime_state_applied(received, item_name='Greatsword', action='equip')
+    assert state_payload['details']['inventory_changes_applied'][0]['conflict_item_names'] == ['Longsword', 'Dagger']
+
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        inventory = {item['id']: item for item in safe_json_loads(player.inventory, [])}
+        assert inventory['great']['equipped'] is True
+        assert inventory['great']['slot'] == 'two_hands'
+        assert inventory['long'].get('equipped', False) is False
+        assert inventory['dagger'].get('equipped', False) is False
+        assert inventory['hood']['equipped'] is True
+        assert inventory['helmet']['equipped'] is True
 
 
 def test_turn_pipeline_does_not_consume_potion_when_dm_generation_fails(app, socketio, app_runtime, monkeypatch):
@@ -930,7 +1336,7 @@ def test_player_interaction_intent_clarifies_target_for_dm(
     assert captured['user_input'].startswith('PLAYER-TO-PLAYER INTERACTION:')
     assert 'Acting character: Seraphina' in captured['user_input']
     assert 'Target character: Borin' in captured['user_input']
-    assert 'Target player profile: Maya' in captured['user_input']
+    assert 'Target account/profile label (not a character): Maya' in captured['user_input']
     assert 'even if they have not spoken in the current chat log yet' in captured['user_input']
 
     with app.app_context():
@@ -1105,15 +1511,26 @@ def test_segment_trigger_activates_and_emits_event(app, socketio, app_runtime, m
         assert segment.is_triggered is True
 
 
-def test_state_segment_triggers_on_same_turn_after_projection_updates(app, socketio, app_runtime, monkeypatch):
+def test_state_segment_triggers_on_same_turn_after_snapshot_updates(app, socketio, app_runtime, monkeypatch):
     socketio_module = app_runtime['modules']['socketio_events']
+    helper_text = (
+        '{"proposedChanges":['
+        '{"id":"post_move_chapel","type":"scene.move_location","locationId":"soot_stained_chapel","name":"Soot-Stained Chapel"}'
+        '],"uncertainChanges":[]}'
+    )
 
     def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
         yield 'You enter the chapel and the soot-stained bells settle around you.'
 
+    class FakeProvider:
+        def generate(self, _request):
+            return ProviderResponse(text=helper_text, provider='fake', model='fake-world-helper')
+
     monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    monkeypatch.setattr(post_extractor_module, 'get_helper_provider', lambda: FakeProvider())
 
     ids = seed_world_campaign_player_session(app)
+    app.config['AIDM_STATE_PIPELINE_HELPER_IN_TESTS'] = True
     seed_segment(
         app,
         campaign_id=ids['campaign_id'],
@@ -2715,6 +3132,117 @@ def test_group_roll_gate_waits_for_all_required_players(app, socketio, app_runti
     second_start = _event_payload(two_roll_events, 'dm_response_start')
     assert second_start is not None
     assert second_start['rules_hint']['resolved_turn_id'] == pending_turn_id
+
+    with app.app_context():
+        pending_turn = db.session.get(DmTurn, pending_turn_id)
+        assert pending_turn.outcome_status == 'resolved'
+
+
+def test_dm_requested_initiative_waits_for_all_active_players(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        del user_input, context, speaking_player
+        if rules_hint and rules_hint.get('resolved_turn_id'):
+            yield 'With both initiative rolls in, the fight order locks into place.'
+            return
+        yield 'The bandits draw steel. Everyone roll initiative.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        other_player = Player(
+            campaign_id=ids['campaign_id'],
+            name='Danny Admin',
+            character_name='Larin',
+            race='Elf',
+            class_='Fighter - Archer',
+            level=1,
+        )
+        db.session.add(other_player)
+        db.session.commit()
+        other_player_id = other_player.player_id
+
+    client_one = socketio.test_client(app, flask_test_client=app.test_client())
+    client_two = socketio.test_client(app, flask_test_client=app.test_client())
+    assert client_one.is_connected()
+    assert client_two.is_connected()
+
+    client_one.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    client_one.get_received()
+    client_two.emit('join_session', {'session_id': ids['session_id'], 'player_id': other_player_id})
+    client_two.get_received()
+
+    client_one.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'I push open the warehouse door.',
+        },
+    )
+    first_events = client_one.get_received()
+    first_start = _event_payload(first_events, 'dm_response_start')
+    assert first_start is not None
+    pending_turn_id = first_start['turn_id']
+
+    with app.app_context():
+        pending_turn = db.session.get(DmTurn, pending_turn_id)
+        assert pending_turn.requires_roll is True
+        assert pending_turn.rule_type == 'initiative'
+        assert pending_turn.outcome_status == 'deferred'
+        metadata = safe_json_loads(pending_turn.metadata_json, {})
+        gate = metadata['roll_gate']
+        assert gate['scope'] == 'group'
+        assert gate['rule_type'] == 'initiative'
+        assert set(gate['required_player_ids']) == {ids['player_id'], other_player_id}
+        assert set(gate['remaining_player_ids']) == {ids['player_id'], other_player_id}
+    client_two.get_received()
+
+    client_one.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'I roll initiative: 12',
+        },
+    )
+    one_roll_events = client_one.get_received()
+    assert _event_payload(one_roll_events, 'dm_response_start') is None
+    waiting_payload = _turn_status_payloads(one_roll_events, 'saved')[-1]
+    assert waiting_payload['details']['stage'] == 'roll_gate_waiting'
+    assert waiting_payload['details']['remaining_player_ids'] == [other_player_id]
+    with app.app_context():
+        from aidm_server.turn_rules import latest_pending_turn
+
+        pending_turn = db.session.get(DmTurn, pending_turn_id)
+        metadata = safe_json_loads(pending_turn.metadata_json, {})
+        assert pending_turn.outcome_status == 'deferred'
+        assert metadata['roll_gate']['resolved_player_ids'] == [ids['player_id']]
+        assert metadata['roll_gate']['remaining_player_ids'] == [other_player_id]
+        assert latest_pending_turn(ids['session_id'], other_player_id).turn_id == pending_turn_id
+    client_two.get_received()
+
+    client_two.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': other_player_id,
+            'message': 'I roll initiative: 18',
+        },
+    )
+    two_roll_events = client_two.get_received()
+    second_start = _event_payload(two_roll_events, 'dm_response_start')
+    assert second_start is not None
+    assert second_start['rules_hint']['resolved_turn_id'] == pending_turn_id
+    assert second_start['rules_hint']['roll_type'] == 'initiative'
 
     with app.app_context():
         pending_turn = db.session.get(DmTurn, pending_turn_id)

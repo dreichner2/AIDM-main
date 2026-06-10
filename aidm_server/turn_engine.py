@@ -18,8 +18,9 @@ from aidm_server.character_state import (
 )
 from aidm_server.canon_inventory import OWNED_ITEM_ACTIONS
 from aidm_server.database import db
-from aidm_server.emergent_memory import apply_immediate_state_changes, refresh_session_projection
+from aidm_server.emergent_memory import apply_immediate_state_changes
 from aidm_server.game_state import STATE_PIPELINE_METADATA_KEY
+from aidm_server.game_state.change_types import WORLD_STATE_CHANGE_TYPES
 from aidm_server.game_state.orchestration.turn_pipeline import (
     augment_rules_hint_with_state_packet,
     post_dm_pipeline,
@@ -30,6 +31,7 @@ from aidm_server.logging_context import set_logging_context
 from aidm_server.models import Campaign, CampaignSegment, DmTurn, Player, Session, safe_json_dumps, safe_json_loads
 from aidm_server.rules import RuleHint, classify_player_action
 from aidm_server.segment_triggers import evaluate_segment_trigger, parse_trigger_spec
+from aidm_server.segment_state import build_segment_state_payload
 from aidm_server.socket_contracts import (
     dm_chunk_payload,
     dm_response_end_payload,
@@ -45,7 +47,7 @@ from aidm_server.socket_contracts import (
 from aidm_server.telemetry import telemetry_event, telemetry_metric, telemetry_timing
 from aidm_server.text_sanitization import ReasoningBlockFilter, strip_reasoning_blocks
 from aidm_server.time_utils import utc_now
-from aidm_server.turn_control import advance_structured_turn, turn_control_update_payload
+from aidm_server.turn_control import advance_structured_turn, turn_control_from_session, turn_control_update_payload
 from aidm_server.turn_coordinator import session_turn_coordinator
 from aidm_server.turn_events import (
     DM_RESPONSE_EVENT,
@@ -76,25 +78,6 @@ _HARMFUL_PVP_RE = re.compile(
     re.IGNORECASE,
 )
 _GENERIC_PLAYER_RACE_LABELS = {'human', 'elf', 'dwarf', 'gnome', 'halfling'}
-WORLD_STATE_CHANGE_TYPES = {
-    'scene.update',
-    'scene.move_location',
-    'location.discover',
-    'location.update',
-    'location.connect',
-    'quest.add',
-    'quest.update',
-    'quest.objective.add',
-    'quest.objective.update',
-    'quest.complete',
-    'quest.fail',
-    'npc.discover',
-    'npc.update',
-    'npc.move',
-    'npc.relationship.update',
-    'flag.set',
-    'flag.unset',
-}
 
 
 def _coerce_player_id(value) -> int | None:
@@ -231,7 +214,7 @@ class TurnEngine:
             'take_from': 'try to take something from the target',
         }
         clean_input = str(user_input or '').strip()
-        target_player_line = f'\nTarget player profile: {target_player}' if target_player else ''
+        target_player_line = f'\nTarget account/profile label (not a character): {target_player}' if target_player else ''
         if target_kind == 'npc':
             return (
                 'PLAYER-TO-NPC INTERACTION:\n'
@@ -275,6 +258,8 @@ class TurnEngine:
             'drop': 'drop',
             'give': 'give',
             'sell': 'sell',
+            'equip': 'equip',
+            'unequip': 'unequip',
         }
         return (
             'PLAYER INVENTORY INTENT:\n'
@@ -286,7 +271,7 @@ class TurnEngine:
             f'{str(user_input or "").strip()}\n\n'
             'DM handling: Treat this as an attempted inventory action, not an automatic state change. '
             'Narrate whether it actually succeeds. If it succeeds, explicitly say the character picks up, buys, '
-            'drops, gives, sells, consumes, or uses up the named item so the canon job can update inventory. '
+            'drops, gives, sells, consumes, uses up, equips, or unequips the named item so the state pipeline can update inventory. '
             'If it fails, explicitly say why it fails.'
         )
 
@@ -421,6 +406,28 @@ class TurnEngine:
             return False
         return 'roll' in candidate or 'check' in candidate or 'saving throw' in candidate
 
+    def _dm_response_requests_roll(self, text: str) -> bool:
+        return self.response_mentions_roll_request(text) or self._dm_response_requests_group_roll(text)
+
+    @staticmethod
+    def _roll_type_from_dm_response(text: str, fallback: str | None = None) -> str:
+        candidate = (text or '').lower()
+        if re.search(r'\binitiative\b', candidate):
+            return 'initiative'
+        if re.search(r'\battack\b|\bweapon\b', candidate):
+            return 'attack'
+        if re.search(r'\bstealth\b|\bsneak\b|\bhide\b', candidate):
+            return 'stealth'
+        if re.search(r'\bpersuasion\b|\bdeception\b|\bintimidation\b|\bcharisma\b', candidate):
+            return 'social'
+        if re.search(r'\binvestigation\b|\barcana\b|\bhistory\b|\bintelligence\b', candidate):
+            return 'lore'
+        if re.search(r'\bathletics\b|\bstrength\b', candidate):
+            return 'athletics'
+        if re.search(r'\bacrobatics\b|\bdexterity\b', candidate):
+            return 'mobility'
+        return fallback or 'check'
+
     def _candidate_roll_gate_player_ids(self, session_id: int, campaign: Campaign, fallback_player_id: int | None) -> list[int]:
         active_ids = []
         if self.active_player_ids:
@@ -436,8 +443,12 @@ class TurnEngine:
         return [fallback_player_id] if fallback_player_id else []
 
     def _roll_gate_for_turn(self, turn: DmTurn, campaign: Campaign, dm_response_text: str) -> dict | None:
-        if not turn.requires_roll or turn.outcome_status != 'deferred':
+        dm_requested_roll = self._dm_response_requests_roll(dm_response_text)
+        if not ((turn.requires_roll and turn.outcome_status == 'deferred') or dm_requested_roll):
             return None
+        if turn.roll_value is not None:
+            return None
+        roll_type = self._roll_type_from_dm_response(dm_response_text, turn.rule_type)
         rules_hint = safe_json_loads(turn.rules_hint, {})
         rules_hint = rules_hint if isinstance(rules_hint, dict) else {}
         pvp_payload = rules_hint.get('pvp') if isinstance(rules_hint.get('pvp'), dict) else {}
@@ -448,13 +459,12 @@ class TurnEngine:
             remaining_player_ids = [player_id for player_id in required_player_ids if player_id not in set(resolved_player_ids)]
             return {
                 'scope': 'pvp_contest',
+                'rule_type': roll_type,
                 'required_player_ids': required_player_ids,
                 'resolved_player_ids': resolved_player_ids,
                 'remaining_player_ids': remaining_player_ids,
                 'target_player_id': pvp_target_player_id,
             }
-        if turn.roll_value is not None:
-            return None
         required_player_ids = [turn.player_id] if turn.player_id else []
         scope = 'single_player'
         if self._dm_response_requests_group_roll(dm_response_text):
@@ -466,6 +476,7 @@ class TurnEngine:
             return None
         return {
             'scope': scope,
+            'rule_type': roll_type,
             'required_player_ids': required_player_ids,
             'resolved_player_ids': [],
             'remaining_player_ids': required_player_ids,
@@ -977,6 +988,7 @@ class TurnEngine:
         )
         resolved_clarification_turn_id = self._clarification_resume_turn_id(command)
         session_turn_number = self._session_turn_number(command.session_id)
+        turn_control_payload = turn_control_from_session(session_obj)
         rules_hint_payload = {
             'requires_roll': rule_hint.requires_roll,
             'roll_type': rule_hint.roll_type,
@@ -989,6 +1001,7 @@ class TurnEngine:
             'target_pending_turn_id': roll_target_pending_turn_id,
             'resolved_clarification_turn_id': resolved_clarification_turn_id,
             'turn_number': session_turn_number,
+            'turn_control': turn_control_payload,
         }
         if pvp_payload:
             rules_hint_payload['pvp'] = pvp_payload
@@ -1018,6 +1031,7 @@ class TurnEngine:
                     'turn_number': session_turn_number,
                     'action_intent': command.action_intent,
                     'client_message_id': command.client_message_id,
+                    'turn_control': turn_control_payload,
                     'pvp': pvp_payload,
                     'resolved_clarification_turn_id': resolved_clarification_turn_id,
                     'clarification_resume': (
@@ -1459,16 +1473,7 @@ class TurnEngine:
             return {'ok': False}
 
     def _segment_state_payload(self, session_id: int, campaign: Campaign) -> tuple[dict, dict]:
-        session_state = refresh_session_projection(session_id, campaign)
-        session_state_payload = {
-            'current_location': session_state.current_location,
-            'current_quest': session_state.current_quest,
-        }
-        campaign_state = {
-            'location': campaign.location,
-            'current_quest': campaign.current_quest,
-        }
-        return session_state_payload, campaign_state
+        return build_segment_state_payload(session_id, campaign)
 
     def _activate_segments(
         self,
@@ -1595,7 +1600,17 @@ class TurnEngine:
         resolved_turn_id: int | None,
     ) -> tuple[str, str | None]:
         context_started = time.perf_counter()
-        context = build_dm_context(world_id, campaign.campaign_id, turn.session_id, query_text=user_input)
+        active_player_ids = []
+        if self.active_player_ids:
+            active_player_ids = [player_id for player_id in self.active_player_ids(turn.session_id) if player_id]
+        context = build_dm_context(
+            world_id,
+            campaign.campaign_id,
+            turn.session_id,
+            query_text=user_input,
+            active_player_ids=active_player_ids,
+            current_player_id=turn.player_id,
+        )
         self._record_phase_timing(
             'context_build',
             context_started,
@@ -1846,16 +1861,29 @@ class TurnEngine:
 
                 roll_gate_payload = self._roll_gate_for_turn(turn_obj, campaign, dm_response_text)
                 if roll_gate_payload:
+                    rule_type = roll_gate_payload.get('rule_type') or turn_obj.rule_type or 'check'
+                    turn_obj.requires_roll = True
+                    turn_obj.rule_type = rule_type
+                    turn_obj.outcome_status = 'deferred'
+                    turn.requires_roll = True
+                    turn.rule_type = rule_type
+                    turn.outcome_status = 'deferred'
                     metadata_payload = safe_json_loads(turn_obj.metadata_json, {})
                     metadata_payload = metadata_payload if isinstance(metadata_payload, dict) else {}
                     metadata_payload['roll_gate'] = roll_gate_payload
                     turn_obj.metadata_json = safe_json_dumps(metadata_payload, {})
+                    rules_hint_payload['requires_roll'] = True
+                    rules_hint_payload['roll_type'] = rule_type
+                    rules_hint_payload['outcome_deferred'] = True
                     rules_hint_payload['roll_gate'] = roll_gate_payload
                     rules_hint_payload['remaining_player_ids'] = roll_gate_payload.get('remaining_player_ids', [])
                     rules_hint = safe_json_loads(turn_obj.rules_hint, {})
                     rules_hint = rules_hint if isinstance(rules_hint, dict) else {}
                     rules_hint.update(
                         {
+                            'requires_roll': True,
+                            'roll_type': rule_type,
+                            'outcome_deferred': True,
                             'roll_gate': roll_gate_payload,
                             'remaining_player_ids': roll_gate_payload.get('remaining_player_ids', []),
                         }

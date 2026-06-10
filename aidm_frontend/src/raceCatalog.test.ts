@@ -5,6 +5,7 @@ describe('race catalog', () => {
   it('uses the playable profile-icon race list for matching saved values', () => {
     expect(playableRaceFromValue('Half-Elf')?.name).toBe('Elf')
     expect(playableRaceFromValue('robot warrior')?.name).toBe('Warforged')
+    expect(playableRaceFromValue('African American')?.name).toBe('Afro-Diasporic Human')
     expect(playableRaceFromValue('custom shadow person')).toBeNull()
   })
 
@@ -20,6 +21,9 @@ describe('race catalog', () => {
 
     const languageResults = filterPlayableRaces({ query: 'sylvan', category: 'All' }).map((race) => race.name)
     expect(languageResults).toEqual(expect.arrayContaining(['Fairy', 'Satyr']))
+
+    const heritageResults = filterPlayableRaces({ query: 'diaspora', category: 'All' }).map((race) => race.name)
+    expect(heritageResults).toContain('Afro-Diasporic Human')
   })
 
   it('filters races by category', () => {

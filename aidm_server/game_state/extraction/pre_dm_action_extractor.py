@@ -15,7 +15,17 @@ from aidm_server.telemetry import telemetry_event, telemetry_metric
 
 HELPER_RAW_PREVIEW_LIMIT = 2000
 ACTIONABLE_PATTERN = re.compile(
-    r'\b(?:use|drink|consume|quaff|swallow|eat|attack|shoot|strike|swing|slash|stab|cast|move|go to|take|pick|grab|collect|gather|retrieve|pocket|loot|buy|sell|give|pay|spend|equip|drop|heal)\b',
+    r'\b(?:use|drink|consume|quaff|swallow|eat|attack|shoot|strike|swing|slash|stab|cast|move|go to|take|pick|grab|collect|gather|retrieve|pocket|loot|buy|sell|give|pay|spend|equip|unequip|wield|wear|don|doff|stow|sheathe|drop|heal)\b',
+    re.IGNORECASE,
+)
+EQUIP_PATTERN = re.compile(
+    r'\b(?:equip|wield|ready|wear|don|put\s+on|strap\s+on|draw)\s+'
+    r'(?:my|the|a|an|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|then|while|before|after|in|on)\b|[.!?,;]|$)',
+    re.IGNORECASE,
+)
+UNEQUIP_PATTERN = re.compile(
+    r'\b(?:unequip|doff|stow|sheathe|put\s+away|take\s+off|remove)\s+'
+    r'(?:my|the|a|an|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|then|while|before|after|from)\b|[.!?,;]|$)',
     re.IGNORECASE,
 )
 CONSUME_PATTERN = re.compile(
@@ -26,6 +36,10 @@ CONSUME_PATTERN = re.compile(
 ATTACK_WITH_PATTERN = re.compile(
     r'\b(?P<verb>shoot|fire|loose|attack|strike|swing|slash|stab)\b'
     r'(?P<body>[^.!?]{0,120}?)\bwith\s+(?:my|the|a|an)?\s*(?P<weapon>[a-z][a-z0-9\' -]{1,40}?)(?=\s+(?:and|then)\b|[.!?,;]|$)',
+    re.IGNORECASE,
+)
+IMPLIED_WEAPON_ATTACK_PATTERN = re.compile(
+    r'\b(?P<verb>stab|slash|slice|cut|shoot|fire|loose)\b(?P<body>[^.!?]{0,120})',
     re.IGNORECASE,
 )
 USE_WEAPON_PATTERN = re.compile(
@@ -119,8 +133,32 @@ def _target_from_attack_body(body: str) -> str | None:
     return match.group('target').strip() if match else None
 
 
+def _implied_weapon_for_attack(verb: str) -> str:
+    normalized = normalize_item_name(verb)
+    if normalized in {'shoot', 'fire', 'loose'}:
+        return 'ranged weapon'
+    return 'blade'
+
+
 def _heuristic_extract(player_message: str, *, actor_id: str) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
+    for pattern, action_type in ((EQUIP_PATTERN, 'inventory.equip'), (UNEQUIP_PATTERN, 'inventory.unequip')):
+        for match in pattern.finditer(player_message or ''):
+            item_name = _clean_item_phrase(match.group('item'))
+            if not item_name:
+                continue
+            actions.append(
+                {
+                    'id': _next_id(actions),
+                    'type': action_type,
+                    'actorId': actor_id,
+                    'confidence': 0.86,
+                    'sourceText': match.group(0).strip(),
+                    'requiresDMResolution': False,
+                    'itemName': item_name,
+                }
+            )
+
     for match in CONSUME_PATTERN.finditer(player_message or ''):
         item_name = _clean_item_phrase(match.group('item'))
         if not item_name:
@@ -175,6 +213,29 @@ def _heuristic_extract(player_message: str, *, actor_id: str) -> dict[str, Any]:
                 'targetName': _target_from_attack_body(match.group('body')),
                 'weaponName': weapon_name,
                 'attackStyle': 'ranged' if verb in {'shoot', 'fire', 'loose'} else 'melee',
+            }
+        )
+
+    for match in IMPLIED_WEAPON_ATTACK_PATTERN.finditer(player_message or ''):
+        source_text = match.group(0).strip()
+        body = match.group('body') or ''
+        if re.search(r'\bwith\b', body, re.IGNORECASE):
+            continue
+        if any(action.get('sourceText') == source_text for action in actions):
+            continue
+        verb = match.group('verb').lower()
+        actions.append(
+            {
+                'id': _next_id(actions),
+                'type': 'combat.attack',
+                'actorId': actor_id,
+                'confidence': 0.8,
+                'sourceText': source_text,
+                'requiresDMResolution': True,
+                'targetName': _target_from_attack_body(body),
+                'weaponName': _implied_weapon_for_attack(verb),
+                'attackStyle': 'ranged' if verb in {'shoot', 'fire', 'loose'} else 'melee',
+                'summary': f"Player attempts to {verb} using an implied {_implied_weapon_for_attack(verb)}.",
             }
         )
 
@@ -263,6 +324,23 @@ def _extract_from_action_intent(action_intent: dict[str, Any] | None, *, actor_i
             ],
             'notes': ['action_intent_pre_dm'],
         }
+    if inventory_action in {'equip', 'unequip'}:
+        action_type = f'inventory.{inventory_action}'
+        return {
+            'declaredActions': [
+                {
+                    'id': 'act_001',
+                    'type': action_type,
+                    'actorId': actor_id,
+                    'confidence': 0.96,
+                    'sourceText': player_message,
+                    'requiresDMResolution': False,
+                    'itemName': item_name,
+                }
+            ],
+            'notes': ['action_intent_pre_dm'],
+        }
+
     action_type = 'inventory.consume' if inventory_action == 'use' and 'potion' in normalize_item_name(item_name) else 'inventory.use'
     return {
         'declaredActions': [

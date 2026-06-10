@@ -289,7 +289,15 @@ def _recent_actions_by_player(player_ids: list[int], limit_per_player: int = 3) 
     return recent_actions
 
 
-def build_dm_context(world_id, campaign_id, session_id=None, max_turns: int = 8, query_text: str | None = None):
+def build_dm_context(
+    world_id,
+    campaign_id,
+    session_id=None,
+    max_turns: int = 8,
+    query_text: str | None = None,
+    active_player_ids: list[int] | None = None,
+    current_player_id: int | None = None,
+):
     """Build deterministic bounded context for DM responses."""
     world = db.session.get(World, world_id)
     campaign = db.session.get(Campaign, campaign_id)
@@ -315,9 +323,14 @@ def build_dm_context(world_id, campaign_id, session_id=None, max_turns: int = 8,
         if campaign
         else []
     )
-    recent_actions_map = _recent_actions_by_player([player.player_id for player in players])
+    active_id_set = {int(player_id) for player_id in active_player_ids or [] if player_id}
+    if current_player_id:
+        active_id_set.add(int(current_player_id))
+    context_players = [player for player in players if not active_id_set or player.player_id in active_id_set]
+
+    recent_actions_map = _recent_actions_by_player([player.player_id for player in context_players])
     active_players = []
-    for player in players:
+    for player in context_players:
         active_players.append(
             {
                 'player_id': player.player_id,
@@ -445,6 +458,11 @@ def build_dm_context(world_id, campaign_id, session_id=None, max_turns: int = 8,
         'campaign': campaign_summary,
         'session_state': session_state_payload,
         'live_world_state': live_world_state,
+        'player_identity_rules': [
+            'character_name is the in-world player character identity.',
+            'Account/profile names are out-of-character labels and are not characters in the scene.',
+            'Only active_players are currently active in this session unless recent narration explicitly says otherwise.',
+        ],
         'active_players': active_players,
         'triggered_segments': triggered_segments,
         'authored_segments': triggered_segments,

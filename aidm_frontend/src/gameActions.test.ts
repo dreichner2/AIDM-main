@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  INITIATIVE_ROLL_REASON,
   abilityActionText,
   buildActionIntent,
   composerTextForMode,
@@ -20,6 +21,13 @@ const strength: AbilityOption = {
   modifier: '+3',
 }
 
+const initiative: AbilityOption = {
+  key: 'dexterity',
+  label: 'Initiative',
+  score: '12',
+  modifier: '+1',
+}
+
 const potion: ItemOption = {
   name: 'Healing Potion',
   quantity: '2',
@@ -36,6 +44,12 @@ describe('game action helpers', () => {
     )
     expect(composerTextForMode('roll', '[OOC] lift the gate', 'Ember', 'd20', strength)).toBe(
       'I roll a d20+3 for STR check: lift the gate',
+    )
+    expect(composerTextForMode('roll', 'brace for combat', 'Ember', 'd20', initiative)).toBe(
+      'I roll for initiative: brace for combat',
+    )
+    expect(composerTextForMode('ooc', 'I roll for initiative: brace for combat', 'Ember', 'd20')).toBe(
+      '[OOC] brace for combat',
     )
     expect(composerTextForMode('ability', '[OOC] lift the gate', 'Ember', 'd20', strength)).toBe(
       'Ember attempts a STR check (+3): lift the gate',
@@ -85,6 +99,22 @@ describe('game action helpers', () => {
     expect(roll.kept).toBe(18)
     expect(roll.total).toBe(20)
     expect(diceRollMessage(roll)).toBe('I roll a d20+2 for ward: 18 (advantage; rolls 7, 18) = 20')
+  })
+
+  it('formats initiative rolls with the dexterity total first', () => {
+    const roll = resolveRoll(
+      {
+        die: 'd20',
+        mode: 'normal',
+        modifier: parseRollModifier(initiative.modifier),
+        reason: INITIATIVE_ROLL_REASON,
+        resultVisibility: 'hidden_until_landed',
+      },
+      () => 14,
+    )
+
+    expect(roll.total).toBe(15)
+    expect(diceRollMessage(roll)).toBe('I roll for initiative: 15 (d20 14 +1 DEX)')
   })
 
   it('builds typed action metadata for backend persistence', () => {

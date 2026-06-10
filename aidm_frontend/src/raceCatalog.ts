@@ -365,6 +365,23 @@ const BASE_PLAYABLE_RACES: BasePlayableRace[] = [
     aliases: ['humanoid', 'mortal'],
   }),
   race({
+    key: 'afro-diasporic-human',
+    name: 'Afro-Diasporic Human',
+    tagline: 'Human heroes with diaspora-inspired heritage and player-defined culture.',
+    shortDescription: 'Afro-Diasporic Humans are a human heritage option for Black human heroes in fantasy worlds.',
+    longDescription:
+      'Afro-Diasporic Humans keep the flexibility of Human characters while giving players explicit portraits, names, families, and cultural cues inspired by African diaspora fantasy.',
+    traits: ['Adaptable', 'Versatile', 'Diaspora Ties'],
+    mechanicalEffects: ['Uses standard Human flexibility.', 'Choose culture, background, and class freely.', 'Keep heritage, family, and personality player-defined.'],
+    narrativeFlavor: 'Describe a human character whose community, style, family, craft, faith, homeland, or migration story belongs to the player, not a stereotype.',
+    recommendedClasses: ['Fighter', 'Wizard', 'Bard'],
+    recommendedStyles: ['Any style', 'Flexible build', 'Story-first'],
+    difficulty: 'Easy',
+    warnings: [],
+    categories: ['Beginner Friendly', 'Face/Social', 'Frontline', 'Magic'],
+    aliases: ['afro diasporic', 'african american', 'african diaspora human', 'black human', 'diaspora human'],
+  }),
+  race({
     key: 'kenku',
     name: 'Kenku',
     tagline: 'Corvid mimics with sharp memory and stranger voices.',
@@ -826,6 +843,20 @@ const RACE_METADATA_UPDATES = {
     waryOf: ['ancient grudges they inherited without understanding', 'powers that see them as short-lived tools'],
     categories: ['Beginner Friendly', 'Face/Social', 'Frontline', 'Magic'],
   },
+  'afro-diasporic-human': {
+    shortDescription: 'A human heritage option for Black human heroes with diaspora-inspired style, family, and culture.',
+    longDescription:
+      'Afro-Diasporic Humans are ordinary humans, not a separate species: their identity comes through portrait choice, names, communities, clothing, faith, craft, family history, and the homeland details the player defines.',
+    originStory:
+      'An Afro-Diasporic Human adventurer might be a city-born duelist, shrine scholar, caravan guard, court musician, village defender, sailor, mage, or anything else a Human could be. The option exists to make that representation easy to choose without prescribing a single origin.',
+    averageHeight: 'Varies by person',
+    averageWeight: 'Varies by person',
+    languages: ['Common', 'one regional or cultural language'],
+    commonProficiencies: ['Any one skill', 'Any one tool', 'local culture knowledge'],
+    friendlyWith: ['Human communities', 'Halflings', 'Dwarves', 'Elves', 'Tieflings'],
+    waryOf: ['Yuan-ti infiltrators', 'Bugbear raiders', 'Hobgoblin armies', 'Changeling impostors', 'Minotaur pirates'],
+    categories: ['Beginner Friendly', 'Face/Social', 'Frontline', 'Magic'],
+  },
   kenku: {
     shortDescription: 'Kenku are corvid mimics with perfect ears, borrowed voices, and a gift for shadowed work.',
     longDescription:
@@ -1113,6 +1144,12 @@ const RACE_COPY_POLISH = {
     originStory:
       'A Human character does not need ancient blood or obvious magic to matter. They can come from a fishing village, noble court, failed apprenticeship, army camp, crime family, temple school, or farm at the edge of a haunted wood. The heart of a Human story is choice under time pressure: what will they become with one short life and too many possible roads?',
   },
+  'afro-diasporic-human': {
+    longDescription:
+      'Afro-Diasporic Humans are human characters whose appearance and cultural cues draw from African diaspora fantasy imagery while leaving homeland, family, personality, class, and social role open. They are here for representation, not as a different species or a fixed set of traits. In play, they work like Humans: adaptable, culturally varied, and able to fit nearly any class or campaign premise.',
+    originStory:
+      'An Afro-Diasporic Human story should start with the same freedom as any other Human story. They might inherit a family oath, train in a temple school, guard a market district, study old magic, cross the sea with a caravan, or leave a quiet village because danger came too close. The DM should ask what culture, community, and history the player wants rather than assuming one.',
+  },
   kenku: {
     longDescription:
       'Kenku are corvid-like people known for mimicry, precise memory, stealth, and voices made from echoes. They often live on city roofs, in messenger guilds, criminal crews, monasteries, docks, theaters, or anywhere sound and secrecy have value. A Kenku character is not only a talks funny gimmick; they are someone who records the world through sound and may understand truth by replaying what others missed.',
@@ -1260,6 +1297,10 @@ const RACE_RELATIONSHIP_POLISH = {
   },
   human: {
     friendlyWith: ['Halfling', 'Dwarf', 'Elf', 'Gnome', 'Tiefling'],
+    waryOf: ['Yuan-ti infiltrators', 'Bugbear raiders', 'Hobgoblin armies', 'Changeling impostors', 'Minotaur pirates'],
+  },
+  'afro-diasporic-human': {
+    friendlyWith: ['Human communities', 'Halfling neighbors', 'Dwarf guilds', 'Elf scholars', 'Tiefling outcasts'],
     waryOf: ['Yuan-ti infiltrators', 'Bugbear raiders', 'Hobgoblin armies', 'Changeling impostors', 'Minotaur pirates'],
   },
   kenku: {

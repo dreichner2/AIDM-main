@@ -5,6 +5,8 @@ PHASE_1_STATE_CHANGE_TYPES = {
     'inventory.add',
     'inventory.remove',
     'inventory.transfer',
+    'inventory.equip',
+    'inventory.unequip',
     'inventory.mark_used',
     'currency.add',
     'currency.remove',

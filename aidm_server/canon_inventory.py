@@ -134,8 +134,8 @@ NON_ITEM_TOKENS = {
     'under',
     'within',
 }
-INVENTORY_ACTIONS = {'pick_up', 'buy', 'use', 'drop', 'give', 'sell'}
-OWNED_ITEM_ACTIONS = {'use', 'drop', 'give', 'sell'}
+INVENTORY_ACTIONS = {'pick_up', 'buy', 'use', 'drop', 'give', 'sell', 'equip', 'unequip'}
+OWNED_ITEM_ACTIONS = {'use', 'drop', 'give', 'sell', 'equip', 'unequip'}
 
 INVENTORY_GAIN_PATTERNS = [
     re.compile(
@@ -304,7 +304,7 @@ def item_weight_for_name(item_name: str | None) -> float | int | None:
     return 1
 
 
-def _normalized_inventory_item(name: str, quantity: int = 1, weight=None) -> dict:
+def _normalized_inventory_item(name: str, quantity: int = 1, weight=None, extra: dict | None = None) -> dict:
     item = {
         'name': name,
         'quantity': positive_int(quantity),
@@ -314,6 +314,22 @@ def _normalized_inventory_item(name: str, quantity: int = 1, weight=None) -> dic
         item_weight = item_weight_for_name(name)
     if item_weight is not None:
         item['weight'] = item_weight
+    for key in (
+        'id',
+        'type',
+        'subtype',
+        'equipped',
+        'slot',
+        'equipmentSlot',
+        'aliases',
+        'tags',
+        'lastUsedAtTurn',
+        'lastEquippedAtTurn',
+        'favorite',
+        'metadata',
+    ):
+        if extra and key in extra and extra[key] not in (None, '', [], {}):
+            item[key] = extra[key]
     return item
 
 
@@ -722,6 +738,7 @@ def load_inventory(raw_value: str | None) -> list[dict]:
                         name,
                         quantity=positive_int(item.get('quantity', 1)),
                         weight=item.get('weight'),
+                        extra=item,
                     )
                 )
             elif isinstance(item, str):
@@ -738,11 +755,12 @@ def load_inventory(raw_value: str | None) -> list[dict]:
 
 def dump_inventory(items: list[dict]) -> str:
     compacted = [
-        _normalized_inventory_item(
-            clean_inventory_item_name(item.get('name')) or item['name'],
-            quantity=positive_int(item.get('quantity', 1)),
-            weight=item.get('weight'),
-        )
+            _normalized_inventory_item(
+                clean_inventory_item_name(item.get('name')) or item['name'],
+                quantity=positive_int(item.get('quantity', 1)),
+                weight=item.get('weight'),
+                extra=item,
+            )
         for item in items
         if item.get('name') and int_or_default(item.get('quantity', 1), default=1) > 0
     ]

@@ -8,6 +8,21 @@ from aidm_server.contracts import SegmentTriggerSpec
 from aidm_server.models import safe_json_loads
 
 
+def _search_values(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).lower() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).lower() for item in value if str(item).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text.lower()] if text else []
+
+
+def _contains_value(needle: str, values: list[str]) -> bool:
+    return any(needle in value for value in values)
+
+
 def parse_trigger_spec(trigger_condition: str | None) -> SegmentTriggerSpec:
     raw_text = (trigger_condition or "").strip()
     if not raw_text:
@@ -54,11 +69,30 @@ def evaluate_segment_trigger(
         location_contains = str(spec.raw.get("location_contains", "")).lower().strip()
         quest_contains = str(spec.raw.get("quest_contains", "")).lower().strip()
 
-        location = str(session_state.get("current_location") or campaign_state.get("location") or "").lower()
-        quest = str(session_state.get("current_quest") or campaign_state.get("current_quest") or "").lower()
+        location_values = [
+            *_search_values(session_state.get("current_location")),
+            *_search_values(session_state.get("current_location_id")),
+        ]
+        if not location_values:
+            location_values = _search_values(campaign_state.get("location"))
 
-        location_ok = True if not location_contains else (location_contains in location)
-        quest_ok = True if not quest_contains else (quest_contains in quest)
+        active_quest_values = [
+            *_search_values(session_state.get("active_quest_texts")),
+            *_search_values(session_state.get("active_quest_ids")),
+            *_search_values(session_state.get("active_quest_titles")),
+            *_search_values(session_state.get("active_quest_stages")),
+            *_search_values(session_state.get("active_quest_summaries")),
+            *_search_values(session_state.get("active_quest_objectives")),
+        ]
+        quest_values = active_quest_values
+        if not quest_values:
+            quest_values = [
+                *_search_values(session_state.get("current_quest")),
+                *_search_values(campaign_state.get("current_quest")),
+            ]
+
+        location_ok = True if not location_contains else _contains_value(location_contains, location_values)
+        quest_ok = True if not quest_contains else _contains_value(quest_contains, quest_values)
 
         matched = location_ok and quest_ok
         reason = f"state:location={location_contains or '*'};quest={quest_contains or '*'}"
