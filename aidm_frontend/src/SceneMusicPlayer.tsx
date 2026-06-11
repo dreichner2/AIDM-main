@@ -59,6 +59,7 @@ type SceneMusicPlayerProps = {
 
 const MUSIC_PREFS_STORAGE_KEY = 'aidm:sceneMusicPreferences'
 const MUSIC_LAYOUT_STORAGE_KEY = 'aidm:sceneMusicLayout'
+const MOBILE_MUSIC_LAYOUT_QUERY = '(max-width: 760px)'
 const REWIND_SECONDS = 15
 const MUSIC_SYNC_HEARTBEAT_MS = 10000
 const MUSIC_MAX_POSITION_SECONDS = 24 * 60 * 60
@@ -116,6 +117,11 @@ function viewportSize() {
     width: window.innerWidth || 1280,
     height: window.innerHeight || 800,
   }
+}
+
+function isMobileMusicLayout() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false
+  return window.matchMedia(MOBILE_MUSIC_LAYOUT_QUERY).matches
 }
 
 function clampNumber(value: number, min: number, max: number) {
@@ -235,6 +241,7 @@ export function SceneMusicPlayer({
   const lastAppliedSyncRef = useRef<number | null>(null)
   const [storedPreferences] = useState(() => initialMusicState())
   const [panelLayout, setPanelLayout] = useState(() => loadMusicLayout())
+  const [mobileStaticLayout, setMobileStaticLayout] = useState(() => isMobileMusicLayout())
   const [isMovingPanel, setIsMovingPanel] = useState(false)
   const [selectedTag, setSelectedTag] = useState<MusicFilter>(storedPreferences.selectedTag)
   const [currentTrackId, setCurrentTrackId] = useState(storedPreferences.trackId)
@@ -255,8 +262,18 @@ export function SceneMusicPlayer({
   }, [currentTrackId, selectedTag, volume])
 
   useEffect(() => {
+    if (mobileStaticLayout) return
     saveMusicLayout(panelLayout)
-  }, [panelLayout])
+  }, [mobileStaticLayout, panelLayout])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const mediaQuery = window.matchMedia(MOBILE_MUSIC_LAYOUT_QUERY)
+    const handleLayoutChange = () => setMobileStaticLayout(mediaQuery.matches)
+    handleLayoutChange()
+    mediaQuery.addEventListener('change', handleLayoutChange)
+    return () => mediaQuery.removeEventListener('change', handleLayoutChange)
+  }, [])
 
   useEffect(() => {
     const handleWindowResize = () => {
@@ -570,15 +587,18 @@ export function SceneMusicPlayer({
   const trackProgress = Math.min(currentTime, progressMax)
   const syncStatusLabel = syncEnabled ? 'Session synced' : 'Local player'
   const panelMode = musicPanelMode(panelLayout)
-  const playerClassName = `scene-music-player is-${panelMode}${isMovingPanel ? ' is-moving' : ''}`
-  const panelStyle = {
-    left: `${panelLayout.left}px`,
-    top: `${panelLayout.top}px`,
-    width: `${panelLayout.width}px`,
-    height: `${panelLayout.height}px`,
-  }
+  const effectivePanelMode: MusicPanelMode = mobileStaticLayout ? 'full' : panelMode
+  const playerClassName = `scene-music-player is-${effectivePanelMode}${mobileStaticLayout ? ' is-mobile-static' : ''}${isMovingPanel ? ' is-moving' : ''}`
+  const panelStyle = mobileStaticLayout
+    ? undefined
+    : {
+        left: `${panelLayout.left}px`,
+        top: `${panelLayout.top}px`,
+        width: `${panelLayout.width}px`,
+        height: `${panelLayout.height}px`,
+      }
   const moveMicroPanel = (event: ReactPointerEvent<HTMLElement>) => {
-    if (panelMode !== 'micro' || event.target !== event.currentTarget) return
+    if (mobileStaticLayout || effectivePanelMode !== 'micro' || event.target !== event.currentTarget) return
     startPanelDrag('move', event)
   }
 
@@ -597,7 +617,7 @@ export function SceneMusicPlayer({
         onLoadedMetadata={updateTrackDuration}
         onTimeUpdate={updateTrackTime}
       />
-      {panelMode !== 'micro' ? (
+      {!mobileStaticLayout && effectivePanelMode !== 'micro' ? (
         <button
           type="button"
           className="scene-music-drag-handle"
@@ -608,7 +628,7 @@ export function SceneMusicPlayer({
           <Grip size={15} />
         </button>
       ) : null}
-      {panelMode === 'full' ? (
+      {effectivePanelMode === 'full' ? (
         <div className="scene-music-now" aria-live="polite">
           <Music size={17} />
           <div>
@@ -621,12 +641,12 @@ export function SceneMusicPlayer({
         </div>
       ) : null}
       <div className="scene-music-controls" aria-label="Music transport controls">
-        {panelMode === 'full' ? (
+        {effectivePanelMode === 'full' ? (
           <button type="button" aria-label="Previous music track" title="Previous track" onClick={() => skipBy(-1)}>
             <SkipBack size={16} />
           </button>
         ) : null}
-        {panelMode !== 'micro' ? (
+        {effectivePanelMode !== 'micro' ? (
           <button type="button" aria-label="Rewind music 15 seconds" title="Rewind 15 seconds" onClick={rewindCurrentTrack}>
             <Rewind size={16} />
           </button>
@@ -641,13 +661,13 @@ export function SceneMusicPlayer({
         >
           {isPlaying ? <Pause size={17} /> : <Play size={17} />}
         </button>
-        {panelMode !== 'micro' ? (
+        {effectivePanelMode !== 'micro' ? (
           <button type="button" aria-label="Next music track" title="Next track" onClick={() => skipBy(1)}>
             <SkipForward size={16} />
           </button>
         ) : null}
       </div>
-      {panelMode === 'full' ? (
+      {effectivePanelMode === 'full' ? (
         <>
           <div className="scene-music-progress">
             <span>{formatSeconds(trackProgress)}</span>
@@ -716,7 +736,7 @@ export function SceneMusicPlayer({
           </div>
         </>
       ) : null}
-      {panelMode === 'full' && playbackError ? (
+      {effectivePanelMode === 'full' && playbackError ? (
         <div className="scene-music-error" role="alert">
           <span>{playbackError}</span>
           {isPlaying ? (
@@ -726,15 +746,17 @@ export function SceneMusicPlayer({
           ) : null}
         </div>
       ) : null}
-      <button
-        type="button"
-        className="scene-music-resize-handle"
-        aria-label="Resize music player"
-        title="Resize music player"
-        onPointerDown={(event) => startPanelDrag('resize', event)}
-      >
-        <Maximize2 size={13} />
-      </button>
+      {!mobileStaticLayout ? (
+        <button
+          type="button"
+          className="scene-music-resize-handle"
+          aria-label="Resize music player"
+          title="Resize music player"
+          onPointerDown={(event) => startPanelDrag('resize', event)}
+        >
+          <Maximize2 size={13} />
+        </button>
+      ) : null}
     </section>
   )
 }

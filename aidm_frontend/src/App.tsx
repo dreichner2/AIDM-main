@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type SetStateAction,
 } from 'react'
 import type { Socket } from 'socket.io-client'
 import {
@@ -17,6 +18,7 @@ import {
   Maximize2,
   Menu,
   Minimize2,
+  PanelRightOpen,
   Radio,
   Settings,
   Sun,
@@ -102,12 +104,21 @@ import { useWorkspaceQueries, type CampaignSessionMeta } from './useWorkspaceQue
 import { useWorkspaceStore } from './useWorkspaceStore'
 
 const DEFAULT_BASE_URL = import.meta.env.VITE_AIDM_API_BASE_URL ?? ''
+const PHONE_LAYOUT_MEDIA_QUERY = '(max-width: 760px)'
 
 const loadDiceRollDialog = () => import('./DiceRollDialog')
 const DiceRollDialog = lazy(loadDiceRollDialog)
 
 function preloadDiceRollDialog() {
   void loadDiceRollDialog()
+}
+
+function isPhoneLayoutViewport() {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia(PHONE_LAYOUT_MEDIA_QUERY).matches
+  )
 }
 
 type ThemeMode = 'dark' | 'light'
@@ -402,6 +413,9 @@ function App() {
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [railCollapsed, setRailCollapsed] = useState(false)
+  const [mobileViewport, setMobileViewport] = useState(isPhoneLayoutViewport)
+  const [mobileRailOpen, setMobileRailOpen] = useState(false)
+  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [fullscreenFallback, setFullscreenFallback] = useState(false)
   const [theme, setTheme] = useState<ThemeMode>(() =>
@@ -489,6 +503,24 @@ function App() {
   const playerRequestRef = useRef(0)
   const sessionActionDialogRef = useRef<SessionActionDialogState>(null)
   const campaignActionDialogRef = useRef<CampaignActionDialogState>(null)
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+
+    const mediaQuery = window.matchMedia(PHONE_LAYOUT_MEDIA_QUERY)
+    const syncMobileViewport = () => {
+      const isMobile = mediaQuery.matches
+      setMobileViewport(isMobile)
+      if (!isMobile) {
+        setMobileRailOpen(false)
+        setMobileInspectorOpen(false)
+      }
+    }
+
+    syncMobileViewport()
+    mediaQuery.addEventListener('change', syncMobileViewport)
+    return () => mediaQuery.removeEventListener('change', syncMobileViewport)
+  }, [])
 
   const auth = runtimeAccount?.requiresPasswordSetup ? '' : authToken.trim()
   const storedSelectionScope = selectionStorageScope(auth)
@@ -2434,14 +2466,65 @@ function App() {
     model: configuredModel || 'Unknown',
     temperature: '0.7',
   }
+  const closeMobilePanels = useCallback(() => {
+    setMobileRailOpen(false)
+    setMobileInspectorOpen(false)
+  }, [])
+  const toggleCampaignRail = useCallback(() => {
+    if (mobileViewport) {
+      setMobileInspectorOpen(false)
+      setMobileRailOpen((current) => !current)
+      return
+    }
+    setRailCollapsed((current) => !current)
+  }, [mobileViewport])
+  const toggleMobileInspector = useCallback(() => {
+    setMobileRailOpen(false)
+    setMobileInspectorOpen((current) => !current)
+  }, [])
+  const setMainTabFromRail = useCallback((nextTab: SetStateAction<MainTab>) => {
+    setMainTab((current) =>
+      typeof nextTab === 'function'
+        ? (nextTab as (currentTab: MainTab) => MainTab)(current)
+        : nextTab,
+    )
+    if (mobileViewport) {
+      closeMobilePanels()
+    }
+  }, [closeMobilePanels, mobileViewport])
+  const setInspectorTabFromRail = useCallback((nextTab: SetStateAction<InspectorTab>) => {
+    setInspectorTab((current) =>
+      typeof nextTab === 'function'
+        ? (nextTab as (currentTab: InspectorTab) => InspectorTab)(current)
+        : nextTab,
+    )
+    if (mobileViewport) {
+      setMobileRailOpen(false)
+      setMobileInspectorOpen(true)
+    }
+  }, [mobileViewport])
   const fullscreenActive = isFullscreen || fullscreenFallback
+  const campaignRailToggleLabel = mobileViewport
+    ? mobileRailOpen ? 'Close campaign menu' : 'Open campaign menu'
+    : railCollapsed ? 'Show campaign rail' : 'Hide campaign rail'
+  const campaignRailTogglePressed = mobileViewport ? mobileRailOpen : railCollapsed
+  const mobileInspectorToggleLabel = mobileInspectorOpen
+    ? 'Close character panel'
+    : 'Open character panel'
+  const shellClassName = [
+    `prototype-shell theme-${theme}`,
+    railCollapsed ? 'rail-collapsed' : '',
+    fullscreenActive ? 'fullscreen-active' : '',
+    mobileRailOpen ? 'mobile-rail-open' : '',
+    mobileInspectorOpen ? 'mobile-inspector-open' : '',
+  ].filter(Boolean).join(' ')
   const playerDialogPointBuySpent = playerEditDialog ? pointBuySpent(playerEditDialog.abilityScores) : 0
   const playerDialogPointBuyRemaining = POINT_BUY_BUDGET - playerDialogPointBuySpent
 
   return (
     <div
       ref={rootRef}
-      className={`prototype-shell theme-${theme} ${railCollapsed ? 'rail-collapsed' : ''} ${fullscreenActive ? 'fullscreen-active' : ''}`}
+      className={shellClassName}
     >
       <header className="ops-bar">
         <div className="ops-brand">
@@ -2451,9 +2534,9 @@ function App() {
         <button
           type="button"
           className="top-icon"
-          aria-label={railCollapsed ? 'Show campaign rail' : 'Hide campaign rail'}
-          aria-pressed={railCollapsed}
-          onClick={() => setRailCollapsed((current) => !current)}
+          aria-label={campaignRailToggleLabel}
+          aria-pressed={campaignRailTogglePressed}
+          onClick={toggleCampaignRail}
         >
           <Menu size={21} />
         </button>
@@ -2581,9 +2664,35 @@ function App() {
           >
             {ttsEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
           </button>
+          {mobileViewport ? (
+            <>
+              <button
+                type="button"
+                className="top-icon mobile-inspector-toggle"
+                aria-label={mobileInspectorToggleLabel}
+                aria-pressed={mobileInspectorOpen}
+                title={mobileInspectorToggleLabel}
+                onClick={toggleMobileInspector}
+              >
+                <PanelRightOpen size={18} />
+              </button>
+              <button
+                type="button"
+                className="top-icon mobile-table-settings-toggle"
+                aria-label="Open table settings"
+                title="Open table settings"
+                onClick={() => {
+                  closeMobilePanels()
+                  openWorkspaceAuthDialog()
+                }}
+              >
+                <Settings size={18} />
+              </button>
+            </>
+          ) : null}
           <button
             type="button"
-            className="top-icon"
+            className="top-icon mobile-optional"
             aria-label={fullscreenActive ? 'Exit fullscreen' : 'Enter fullscreen'}
             aria-pressed={fullscreenActive}
             onClick={() => void toggleFullscreen()}
@@ -2592,7 +2701,7 @@ function App() {
           </button>
           <button
             type="button"
-            className="top-icon"
+            className="top-icon mobile-optional"
             aria-label="Toggle theme"
             aria-pressed={theme === 'light'}
             onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
@@ -2612,7 +2721,7 @@ function App() {
             </button>
             <button
               type="button"
-              className="top-icon small"
+              className="top-icon small mobile-optional"
               aria-label="More account options"
               aria-expanded={accountMenuOpen}
               aria-controls="account-menu"
@@ -2663,6 +2772,13 @@ function App() {
         </div>
       </header>
 
+      <button
+        type="button"
+        className="mobile-panel-scrim"
+        aria-label="Close mobile side panel"
+        onClick={closeMobilePanels}
+      />
+
       <CampaignRail
         backendStatus={health?.status ?? null}
         campaignTitle={campaign?.title ? truncateText(campaign.title, 12) : null}
@@ -2676,9 +2792,9 @@ function App() {
         sessionLoading={sessionLoading}
         workspaceLoading={workspaceLoading}
         mainTab={mainTab}
-        setMainTab={setMainTab}
+        setMainTab={setMainTabFromRail}
         inspectorTab={inspectorTab}
-        setInspectorTab={setInspectorTab}
+        setInspectorTab={setInspectorTabFromRail}
         canManageCampaign={Boolean(campaign)}
         canManageSession={Boolean(activeSession)}
         canOpenCampaignArchive={health?.status === 'ok'}
@@ -2697,6 +2813,7 @@ function App() {
             setSelectedCampaignId(campaignId)
           }
           setMainTab('turns')
+          closeMobilePanels()
         }}
         onSelectSession={(sessionId) => {
           if (sessionId !== selectedSessionId) {
@@ -2706,6 +2823,7 @@ function App() {
             setSendPending(false)
           }
           setMainTab('turns')
+          closeMobilePanels()
         }}
         lastSyncLabel={formatShortAge(lastSync)}
         onRefreshWorkspace={() => void refreshCurrentWorkspace()}
@@ -2725,6 +2843,8 @@ function App() {
         sessionLoading={sessionLoading}
         mainTab={mainTab}
         setMainTab={setMainTab}
+        showMobilePresenceStrip={mobileViewport}
+        activePlayers={activePlayers}
         downloadSessionJson={downloadSessionJson}
         sessionImportPending={sessionImportPending}
         sessionImportInputRef={sessionImportInputRef}

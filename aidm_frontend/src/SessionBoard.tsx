@@ -17,9 +17,10 @@ import {
   turnNumber,
   turnPersistenceLabel,
 } from './gameSelectors'
+import { profileIconSrcForCharacter } from './profileIcons'
 import { SceneMusicPlayer } from './SceneMusicPlayer'
 import type { SceneMusicControlPayload, SceneMusicSyncState } from './SceneMusicPlayer'
-import type { Campaign, ClarificationRequest, Player, SessionState, SessionSummary, TimelineEntry } from './types'
+import type { ActivePlayer, Campaign, ClarificationRequest, Player, SessionState, SessionSummary, TimelineEntry } from './types'
 
 export type MainTab = 'turns' | 'dm' | 'notes'
 
@@ -89,6 +90,8 @@ type SessionBoardProps = {
   sessionLoading: boolean
   mainTab: MainTab
   setMainTab: Dispatch<SetStateAction<MainTab>>
+  showMobilePresenceStrip: boolean
+  activePlayers: ActivePlayer[]
   downloadSessionJson: () => Promise<void>
   sessionImportPending: boolean
   sessionImportInputRef: RefObject<HTMLInputElement | null>
@@ -173,6 +176,76 @@ function RollWaitBanner({ notice }: { notice: PendingRollNotice }) {
   )
 }
 
+function activePlayerAvatarSrc(player: ActivePlayer) {
+  return (
+    player.profile_image ||
+    profileIconSrcForCharacter({ race: player.race, sex: player.sex }) ||
+    '/profile-icons/human_male.png'
+  )
+}
+
+function activePlayerInitial(player: ActivePlayer) {
+  return (player.character_name || player.name || '?').slice(0, 1).toUpperCase()
+}
+
+function MobilePresenceStrip({
+  activePlayers,
+  selectedPlayerId,
+  selectedPlayerHasTurn,
+  turnControlStatusLabel,
+}: {
+  activePlayers: ActivePlayer[]
+  selectedPlayerId: number | null
+  selectedPlayerHasTurn: boolean
+  turnControlStatusLabel: string
+}) {
+  const typingPlayers = activePlayers.filter(
+    (player) => player.id !== selectedPlayerId && player.is_typing,
+  )
+  const typingLabel = typingPlayers.length
+    ? `${typingPlayers.slice(0, 2).map((player) => player.character_name).join(', ')}${typingPlayers.length > 2 ? ` +${typingPlayers.length - 2}` : ''} typing`
+    : activePlayers.length ? 'Watching table' : 'No friends online'
+
+  return (
+    <section className="mobile-presence-strip" aria-label="Mobile active players">
+      <div className={`mobile-presence-summary ${selectedPlayerHasTurn ? 'open' : 'locked'}`}>
+        <span>{activePlayers.length ? `${activePlayers.length} online` : 'Solo'}</span>
+        <strong>{typingLabel}</strong>
+      </div>
+      {activePlayers.length ? (
+        <ul className="mobile-presence-list" aria-label="Active players on mobile">
+          {activePlayers.map((player) => {
+            const isSelectedPlayer = player.id === selectedPlayerId
+            const isOtherPlayerTyping = !isSelectedPlayer && player.is_typing
+            return (
+              <li
+                key={player.id}
+                className={`${isSelectedPlayer ? 'selected' : ''} ${isOtherPlayerTyping ? 'typing' : ''}`}
+              >
+                <span className="mobile-presence-avatar" aria-hidden="true">
+                  <img src={activePlayerAvatarSrc(player)} alt="" />
+                  <span>{activePlayerInitial(player)}</span>
+                </span>
+                <span className="mobile-presence-copy">
+                  <strong>{player.character_name}</strong>
+                  <small>{isSelectedPlayer ? 'You' : player.name}</small>
+                </span>
+                {isOtherPlayerTyping ? (
+                  <span className="mobile-typing-badge" aria-label={`${player.character_name} is typing`}>
+                    Typing
+                  </span>
+                ) : null}
+              </li>
+            )
+          })}
+        </ul>
+      ) : (
+        <div className="mobile-presence-empty">{turnControlStatusLabel}</div>
+      )}
+    </section>
+  )
+}
+
 export function SessionBoard({
   activeSessionTitle,
   campaignTitle,
@@ -186,6 +259,8 @@ export function SessionBoard({
   sessionLoading,
   mainTab,
   setMainTab,
+  showMobilePresenceStrip,
+  activePlayers,
   downloadSessionJson,
   sessionImportPending,
   sessionImportInputRef,
@@ -360,6 +435,15 @@ export function SessionBoard({
           Notes ({notesCount})
         </button>
       </div>
+
+      {showMobilePresenceStrip ? (
+        <MobilePresenceStrip
+          activePlayers={activePlayers}
+          selectedPlayerId={actionComposerProps.selectedPlayerId}
+          selectedPlayerHasTurn={actionComposerProps.selectedPlayerHasTurn}
+          turnControlStatusLabel={actionComposerProps.turnControlStatusLabel}
+        />
+      ) : null}
 
       {showSceneMusicPlayer ? (
         <SceneMusicPlayer

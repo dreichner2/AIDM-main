@@ -164,6 +164,22 @@ function installStorageMocks() {
   vi.stubGlobal('sessionStorage', createStorageMock())
 }
 
+function installMatchMediaMock(matches: boolean) {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({
+      matches,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  )
+}
+
 function resetApiData() {
   const campaign: Campaign = {
     campaign_id: 10,
@@ -1652,6 +1668,76 @@ describe('App user workflow regressions', () => {
 
     expect(screen.getByText('Active Players (0)')).toBeInTheDocument()
     expect(screen.getByText('No active players connected.')).toBeInTheDocument()
+  })
+
+  it('shows a compact active-player presence strip on mobile', async () => {
+    installMatchMediaMock(true)
+    await renderLoadedApp()
+
+    await act(async () => {
+      socketHandler<
+        Array<{
+          id: number
+          character_name: string
+          name: string
+          race?: string
+          sex?: string
+          profile_image?: string
+          class_?: string
+          char_class?: string
+          is_typing?: boolean
+        }>
+      >('active_players')([
+        {
+          id: 30,
+          character_name: 'Ember',
+          name: 'Danny',
+          race: 'Human',
+          sex: 'female',
+          profile_image: '/profile-icons/human_female.png',
+          class_: 'Wizard',
+          char_class: 'Wizard',
+          is_typing: true,
+        },
+        {
+          id: 31,
+          character_name: 'Borin',
+          name: 'Maya',
+          race: 'Dwarf',
+          sex: 'male',
+          profile_image: '/profile-icons/dwarf_male.png',
+          class_: 'Fighter',
+          char_class: 'Fighter',
+          is_typing: true,
+        },
+      ])
+    })
+
+    const mobilePresence = screen.getByLabelText('Mobile active players')
+    expect(within(mobilePresence).getByText('2 online')).toBeInTheDocument()
+    expect(within(mobilePresence).getByText('Borin typing')).toBeInTheDocument()
+    expect(within(mobilePresence).getByText('Ember')).toBeInTheDocument()
+    expect(within(mobilePresence).getByText('You')).toBeInTheDocument()
+    expect(within(mobilePresence).getByLabelText('Borin is typing')).toHaveTextContent('Typing')
+    expect(within(mobilePresence).queryByLabelText('Ember is typing')).not.toBeInTheDocument()
+  })
+
+  it('opens table settings from the mobile top bar gear', async () => {
+    installMatchMediaMock(true)
+    await renderLoadedApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open table settings' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Log In' })
+    expect(within(dialog).getByText('Access')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Open table settings' })).toBeInTheDocument()
+  })
+
+  it('does not show the mobile table settings gear on desktop', async () => {
+    await renderLoadedApp()
+
+    expect(screen.queryByRole('button', { name: 'Open table settings' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Change table access' })).toBeInTheDocument()
   })
 
   it('equips an inventory item from the sidebar', async () => {

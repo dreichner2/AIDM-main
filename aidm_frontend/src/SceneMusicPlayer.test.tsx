@@ -34,6 +34,22 @@ function storeMusicLayout(width: number, height: number) {
   )
 }
 
+function installMatchMediaMock(matches: boolean) {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({
+      matches,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  )
+}
+
 describe('SceneMusicPlayer', () => {
   let playMock: ReturnType<typeof vi.spyOn>
   let pauseMock: ReturnType<typeof vi.spyOn>
@@ -60,6 +76,7 @@ describe('SceneMusicPlayer', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
     localStorage.clear()
   })
 
@@ -188,6 +205,25 @@ describe('SceneMusicPlayer', () => {
     expect(screen.getByRole('button', { name: 'Play music' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Next music track' })).not.toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: 'Music track' })).not.toBeInTheDocument()
+  })
+
+  it('uses a static full transport on mobile without floating handles', () => {
+    installMatchMediaMock(true)
+    storeMusicLayout(96, 60)
+    render(<SceneMusicPlayer />)
+
+    const player = screen.getByLabelText('Scene music player')
+    expect(player).toHaveClass('is-mobile-static')
+    expect(player).toHaveClass('is-full')
+    expect(player).not.toHaveClass('is-micro')
+    expect(player.style.left).toBe('')
+    expect(player.style.top).toBe('')
+    expect(player.style.width).toBe('')
+    expect(player.style.height).toBe('')
+    expect(screen.getByText('Scene music')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Previous music track' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Move music player' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Resize music player' })).not.toBeInTheDocument()
   })
 
   it('applies remote session music state while keeping local volume independent', async () => {
