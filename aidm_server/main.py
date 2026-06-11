@@ -12,6 +12,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from aidm_server.auth import (
     DEFAULT_WORKSPACE_ID,
+    account_requires_password_setup,
     claim_legacy_players_for_account,
     ensure_account_workspace_membership,
     request_account,
@@ -206,6 +207,12 @@ def create_app() -> Flask:
 
         account_token = request_account_token()
         account = request_account()
+        if account_requires_password_setup(account):
+            return error_response(
+                code='legacy_password_setup_required',
+                message='Passwords are required now. Please set one now.',
+                status=401,
+            )
         workspace_id = request_workspace_id()
         if app.config.get('AIDM_AUTH_REQUIRED') and not workspace_id:
             telemetry_event(

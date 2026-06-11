@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any
 
 from aidm_server.canon_text import int_or_default
@@ -898,6 +899,14 @@ def _bounded_danger(value: Any) -> int | None:
     return max(0, min(10, parsed))
 
 
+def _valid_location_label(value: Any) -> bool:
+    label = _text(value)
+    if not label:
+        return True
+    words = re.findall(r'[A-Za-z0-9]+', label)
+    return len(label) <= 90 and len(words) <= 10
+
+
 def _turn_value(change: dict[str, Any]) -> int | None:
     if change.get('turnId') is None and change.get('turn_id') is None:
         return None
@@ -937,6 +946,8 @@ def _normalize_world_change(change: dict[str, Any], state: dict[str, Any]) -> tu
         return 'accepted', 'Scene update is valid.', normalized
 
     if change_type == 'scene.move_location':
+        if not _valid_location_label(normalized.get('name') or normalized.get('locationName') or normalized.get('locationId')):
+            return 'rejected', 'Scene movement location must be a short place name.', None
         location_id = _stable_id(normalized.get('locationId'), normalized.get('name') or normalized.get('locationName'))
         if not location_id:
             return 'rejected', 'Scene movement requires a location id or name.', None
@@ -955,6 +966,8 @@ def _normalize_world_change(change: dict[str, Any], state: dict[str, Any]) -> tu
         return 'accepted', 'Scene movement is valid.', normalized
 
     if change_type in {'location.discover', 'location.update'}:
+        if not _valid_location_label(normalized.get('name') or normalized.get('locationName') or normalized.get('locationId')):
+            return 'rejected', 'Location name must be a short place name.', None
         location_id = _stable_id(normalized.get('locationId'), normalized.get('name') or normalized.get('locationName'))
         if not location_id:
             return 'rejected', 'Location change requires a location id or name.', None
@@ -1087,6 +1100,60 @@ def _combat_participant_ids(state: dict[str, Any]) -> set[str]:
     }
 
 
+def _combat_reference_keys(value: Any) -> set[str]:
+    text = _text(value)
+    if not text:
+        return set()
+    normalized = normalize_item_name(text)
+    cleaned = re.sub(r'[^a-z0-9]+', ' ', normalized).strip()
+    candidates = {normalized, cleaned, stable_slug(text)}
+    for candidate in list(candidates):
+        if not candidate:
+            continue
+        for article in ('the ', 'a ', 'an '):
+            if candidate.startswith(article):
+                candidates.add(candidate[len(article) :].strip())
+        for marker in (' the ', ' a ', ' an '):
+            if marker in candidate:
+                candidates.add(candidate.rsplit(marker, 1)[-1].strip())
+    return {candidate for candidate in candidates if candidate}
+
+
+def _combat_participant_reference_keys(participant: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for value in (
+        participant.get('id'),
+        participant.get('name'),
+        participant.get('definitionId'),
+        participant.get('creatureType'),
+    ):
+        keys.update(_combat_reference_keys(value))
+    for alias in participant.get('aliases') or []:
+        keys.update(_combat_reference_keys(alias))
+    return keys
+
+
+def _resolve_combat_participant_id(state: dict[str, Any], participant_id: str) -> str | None:
+    combat = normalize_combat_state(state.get('combat'), state.get('currentScene') if isinstance(state.get('currentScene'), dict) else {})
+    requested = _text(participant_id)
+    if not requested:
+        return None
+    for participant in combat.get('participants') or []:
+        if isinstance(participant, dict) and _text(participant.get('id')) == requested:
+            return requested
+    requested_keys = _combat_reference_keys(requested)
+    matches = []
+    for participant in combat.get('participants') or []:
+        if not isinstance(participant, dict):
+            continue
+        if requested_keys.intersection(_combat_participant_reference_keys(participant)):
+            matches.append(_text(participant.get('id')))
+    unique_matches = {match for match in matches if match}
+    if len(unique_matches) == 1:
+        return next(iter(unique_matches))
+    return None
+
+
 def _combat_participant(state: dict[str, Any], participant_id: str) -> dict[str, Any] | None:
     combat = normalize_combat_state(state.get('combat'), state.get('currentScene') if isinstance(state.get('currentScene'), dict) else {})
     for participant in combat.get('participants') or []:
@@ -1186,9 +1253,10 @@ def _normalize_combat_change(change: dict[str, Any], state: dict[str, Any]) -> t
     participant_id = _text(normalized.get('participantId') or normalized.get('participant_id') or normalized.get('enemyId') or normalized.get('enemy_id'))
     if not participant_id:
         return 'rejected', 'Combat participant change requires participantId.', None
-    if participant_id not in _combat_participant_ids(state):
+    resolved_participant_id = _resolve_combat_participant_id(state, participant_id)
+    if not resolved_participant_id:
         return 'rejected', f"Combat participant '{participant_id}' was not found.", None
-    normalized['participantId'] = participant_id
+    normalized['participantId'] = resolved_participant_id
 
     if change_type == 'combat.participant.update':
         if normalized.get('hp') is not None and not isinstance(normalized.get('hp'), dict):

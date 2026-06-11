@@ -67,9 +67,11 @@ def _client_session_id(payload: dict | None) -> tuple[str | None, str | None]:
     raw_value = payload.get('client_session_id') or payload.get('idempotency_key')
     if raw_value in (None, ''):
         return None, None
-    client_session_id = str(raw_value).strip()[:SESSION_IDEMPOTENCY_KEY_MAX_LENGTH]
+    client_session_id = str(raw_value).strip()
     if not client_session_id:
         return None, None
+    if len(client_session_id) > SESSION_IDEMPOTENCY_KEY_MAX_LENGTH:
+        return None, f'client_session_id must be {SESSION_IDEMPOTENCY_KEY_MAX_LENGTH} characters or fewer.'
     if not ACTION_ID_RE.fullmatch(client_session_id):
         return None, 'client_session_id contains unsupported characters.'
     return client_session_id, None

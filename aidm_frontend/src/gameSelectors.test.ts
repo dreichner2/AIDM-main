@@ -14,6 +14,7 @@ import {
   normalizeSpellbook,
   normalizeStats,
   normalizeXp,
+  pendingRollNoticeFromTimeline,
   pendingRollOptionsFromTimeline,
   speakerDetail,
   truncateText,
@@ -282,6 +283,7 @@ describe('game selector helpers', () => {
           debugCombat: true,
           combatStartedBy: 'post_dm_adjudicator',
           initiativeRequired: true,
+          enemyGroups: [{ count: 2, name: 'Ash Goblin' }],
           combatDifficultyAI: { tacticalLevel: 'smart' },
         },
         participants: [
@@ -338,6 +340,7 @@ describe('game selector helpers', () => {
     expect(panel.combat.creatureSource).toBe('generated variant')
     expect(panel.combat.tacticalLevel).toBe('smart')
     expect(panel.combat.combatStartedBy).toBe('post dm adjudicator')
+    expect(panel.combat.enemyGroupSummary).toBe('2 x Ash Goblin')
     expect(panel.combat.initiativeRequired).toBe(true)
     expect(panel.combat.telegraphs).toEqual(['The goblin looks toward the treeline.'])
   })
@@ -416,6 +419,108 @@ describe('game selector helpers', () => {
         detail: 'The lock resists your tools.',
       },
     ])
+  })
+
+  it('derives a party-visible pending roll notice from remaining player metadata', () => {
+    const players: Player[] = [
+      {
+        player_id: 1,
+        workspace_id: 'owner',
+        account_id: null,
+        username: null,
+        campaign_id: 1,
+        name: 'Danny',
+        character_name: 'Ember',
+        race: 'Human',
+        sex: 'female',
+        profile_image: '',
+        class_: 'Wizard',
+        char_class: 'Wizard',
+        level: 2,
+        created_at: null,
+        updated_at: null,
+      },
+      {
+        player_id: 2,
+        workspace_id: 'owner',
+        account_id: null,
+        username: null,
+        campaign_id: 1,
+        name: 'Maya',
+        character_name: 'Borin',
+        race: 'Dwarf',
+        sex: 'male',
+        profile_image: '',
+        class_: 'Fighter',
+        char_class: 'Fighter',
+        level: 2,
+        created_at: null,
+        updated_at: null,
+      },
+    ]
+    const timeline: TimelineEntry[] = [
+      {
+        id: 'dm-20',
+        role: 'dm',
+        speaker: 'DM',
+        text: 'Everyone roll initiative before the blast lands.',
+        timestamp: null,
+        metadata: {
+          turn_id: 20,
+          turn_number: 3,
+          requires_roll: true,
+          outcome_status: 'deferred',
+          rule_type: 'initiative',
+          remaining_player_ids: [1, 2],
+        },
+      },
+      {
+        id: 'roll-20-partial',
+        role: 'system',
+        speaker: 'System',
+        text: 'Check resolved.',
+        timestamp: null,
+        metadata: {
+          turn_id: 21,
+          resolved_turn_id: 20,
+          remaining_player_ids: [2],
+        },
+      },
+    ]
+
+    expect(pendingRollNoticeFromTimeline(timeline, players, 1)).toMatchObject({
+      turnId: 20,
+      waitingOnLabel: 'Borin',
+      waitingPlayerIds: [2],
+      waitingPlayerNames: ['Borin'],
+      turnLabel: 'Turn 3',
+      ruleLabel: 'initiative',
+      detail: 'Everyone roll initiative before the blast lands.',
+      pendingCount: 1,
+      isWaitingOnSelectedPlayer: false,
+    })
+
+    expect(
+      pendingRollNoticeFromTimeline(
+        [
+          ...timeline,
+          {
+            id: 'roll-20-final',
+            role: 'system',
+            speaker: 'System',
+            text: 'Check resolved.',
+            timestamp: null,
+            metadata: {
+              turn_id: 22,
+              resolved_turn_id: 20,
+              remaining_player_ids: [],
+            },
+          },
+        ],
+        players,
+        2,
+      ),
+    ).toBeNull()
   })
 
   it('derives speaker detail, canon facts, truncation, and map meta', () => {
@@ -564,6 +669,7 @@ describe('game selector helpers', () => {
         combatStartedBy: '',
         initiativeRequired: false,
         debugEnabled: false,
+        enemyGroupSummary: '',
         enemies: [],
         allies: [],
         telegraphs: [],

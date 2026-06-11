@@ -20,6 +20,8 @@ SENTIENT_ENEMY_BRAIN_SYSTEM_MESSAGE = (
 )
 NON_SENTIENT_INTELLIGENCE = {'mindless', 'animal'}
 NON_SENTIENT_TYPES = {'beast', 'ooze', 'swarm', 'plant'}
+INTELLIGENT_INTELLIGENCE = {'low_cunning', 'average', 'trained', 'tactical', 'genius', 'alien'}
+HUMANLIKE_CREATURE_TYPES = {'humanoid', 'fey', 'fiend', 'celestial', 'dragon', 'giant', 'aberration', 'monstrosity', 'custom'}
 
 
 def _config_value(name: str) -> str:
@@ -66,13 +68,13 @@ def is_sentient_enemy(enemy: dict[str, Any]) -> bool:
     creature_type = str(enemy.get('creatureType') or enemy.get('creature_type') or '').strip().lower()
     if intelligence in NON_SENTIENT_INTELLIGENCE:
         return False
-    if creature_type in NON_SENTIENT_TYPES and intelligence not in {'low_cunning', 'average', 'trained', 'tactical', 'genius', 'alien'}:
+    if creature_type in NON_SENTIENT_TYPES and intelligence not in INTELLIGENT_INTELLIGENCE:
         return False
-    if enemy.get('kind') == 'boss' or enemy.get('challengeTier') == 'boss':
+    if enemy.get('kind') == 'boss' or enemy.get('challengeTier') == 'boss' or behavior.get('combatRole') == 'boss':
         return True
-    if creature_type in {'humanoid', 'fey', 'fiend', 'celestial', 'dragon', 'giant', 'aberration', 'monstrosity', 'custom'}:
+    if creature_type in HUMANLIKE_CREATURE_TYPES:
         return True
-    return intelligence in {'low_cunning', 'average', 'trained', 'tactical', 'genius', 'alien'}
+    return intelligence in INTELLIGENT_INTELLIGENCE
 
 
 def should_use_sentient_enemy_brain(enemy: dict[str, Any], settings: dict[str, Any]) -> bool:

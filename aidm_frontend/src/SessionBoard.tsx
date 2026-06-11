@@ -11,6 +11,7 @@ import {
 import { ActionComposer, type ActionComposerProps } from './ActionComposer'
 import { ThinIcon, ToolbarButton } from './AppChrome'
 import {
+  type PendingRollNotice,
   speakerDetail,
   truncateText,
   turnNumber,
@@ -114,6 +115,7 @@ type SessionBoardProps = {
   latestDmText: string
   sendPending: boolean
   streamingTurnActive: boolean
+  pendingRollNotice: PendingRollNotice | null
   dmExecutionStats: DmExecutionStats
   welcomeText: string
   showJumpToLatest: boolean
@@ -144,6 +146,31 @@ function formatClock(value: string | null) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+function RollWaitBanner({ notice }: { notice: PendingRollNotice }) {
+  return (
+    <section
+      className={`roll-wait-banner ${notice.isWaitingOnSelectedPlayer ? 'current-player' : ''}`}
+      role="status"
+      aria-label="Pending roll"
+    >
+      <div className="roll-wait-icon" aria-hidden="true">
+        <ThinIcon name="dice" size={18} />
+      </div>
+      <div className="roll-wait-copy">
+        <strong>Waiting on {notice.waitingOnLabel} to roll</strong>
+        <span>
+          {notice.turnLabel}: {notice.ruleLabel}
+          {notice.isWaitingOnSelectedPlayer ? ' - your character is up' : ''}
+        </span>
+        <small>{notice.detail}</small>
+      </div>
+      <div className="roll-wait-meta">
+        {notice.pendingCount > 1 ? `${notice.pendingCount} pending checks` : 'Roll needed'}
+      </div>
+    </section>
+  )
 }
 
 export function SessionBoard({
@@ -185,6 +212,7 @@ export function SessionBoard({
   latestDmText,
   sendPending,
   streamingTurnActive,
+  pendingRollNotice,
   dmExecutionStats,
   welcomeText,
   showJumpToLatest,
@@ -205,6 +233,7 @@ export function SessionBoard({
       ? turnPersistenceLabel(currentResponseEntry)
       : sendPending || streamingTurnActive ? 'Streaming...' : 'Ready'
   const chatTextClassName = `chat-text-size-${chatTextSettings.size} chat-text-font-${chatTextSettings.font}`
+  const rollWaitBanner = pendingRollNotice ? <RollWaitBanner notice={pendingRollNotice} /> : null
 
   const updateChatTextSettings = (nextSettings: ChatTextSettings) => {
     setChatTextSettings(nextSettings)
@@ -401,6 +430,7 @@ export function SessionBoard({
             ref={turnFeedRef}
             onScroll={updateJumpToLatestVisibility}
           >
+            {rollWaitBanner}
             {loading ? (
               <div className="panel-loading-strip" role="status">
                 {sessionLoading ? 'Loading session history...' : 'Loading campaign workspace...'}
@@ -492,6 +522,7 @@ export function SessionBoard({
 
       {mainTab === 'dm' ? (
         <section className={`turn-feed single-panel ${chatTextClassName}`}>
+          {rollWaitBanner}
           {loading ? (
             <div className="panel-loading-strip" role="status">
               {sessionLoading ? 'Loading session response...' : 'Loading campaign workspace...'}
@@ -525,6 +556,7 @@ export function SessionBoard({
 
       {mainTab === 'notes' ? (
         <section className="turn-feed notes-panel">
+          {rollWaitBanner}
           <div className="notes-card">
             <h2>Session State</h2>
             <dl>

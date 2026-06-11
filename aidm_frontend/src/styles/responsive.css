@@ -468,6 +468,26 @@
     -webkit-overflow-scrolling: touch;
   }
 
+  .roll-wait-banner {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+
+  .roll-wait-copy {
+    flex: 1 1 calc(100% - 48px);
+  }
+
+  .roll-wait-copy strong,
+  .roll-wait-copy span,
+  .roll-wait-copy small {
+    white-space: normal;
+  }
+
+  .roll-wait-meta {
+    margin-left: 46px;
+  }
+
   .jump-latest-button {
     position: fixed;
     bottom: 18px;

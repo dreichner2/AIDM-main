@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any
 
 from aidm_server.canon_text import int_or_default
@@ -8,7 +9,6 @@ from aidm_server.combat.state import ensure_combat_state, normalize_battlefield,
 from aidm_server.game_state.equipment import conflict_items, equipment_slot_label, infer_equipment_slot
 from aidm_server.game_state.models import (
     CURRENCY_CODES,
-    CURRENCY_STAT_KEYS,
     actor_currency,
     actor_items,
     append_change_ledger,
@@ -20,9 +20,11 @@ from aidm_server.game_state.models import (
     stable_item_id,
     stats_with_currency,
 )
+from aidm_server.game_state.leveling import sync_actor_level_for_xp, sync_stats_for_level
 from aidm_server.models import Player, Session, safe_json_dumps, safe_json_loads
 from aidm_server.spellbook import (
     character_sheet_record,
+    ensure_character_sheet_spellbook,
     known_spell_names,
     merge_spellbooks,
     normalize_spellbook,
@@ -179,8 +181,10 @@ def _apply_xp(actor: dict[str, Any], change: dict[str, Any], direction: int) -> 
     if direction < 0:
         actual = min(current, amount)
         xp['current'] = current - actual
+        sync_actor_level_for_xp(actor)
         return actual
     xp['current'] = current + amount
+    sync_actor_level_for_xp(actor)
     return amount
 
 
@@ -689,7 +693,51 @@ def _combat_participant(combat: dict[str, Any], participant_id: Any) -> dict[str
     for participant in combat.get('participants') or []:
         if isinstance(participant, dict) and _text(participant.get('id')) == requested:
             return participant
+    requested_keys = _combat_reference_keys(requested)
+    matches = [
+        participant
+        for participant in combat.get('participants') or []
+        if isinstance(participant, dict)
+        and requested_keys.intersection(_combat_participant_reference_keys(participant))
+    ]
+    unique_ids = {_text(participant.get('id')) for participant in matches if _text(participant.get('id'))}
+    if len(unique_ids) == 1:
+        resolved_id = next(iter(unique_ids))
+        return next(participant for participant in matches if _text(participant.get('id')) == resolved_id)
     return None
+
+
+def _combat_reference_keys(value: Any) -> set[str]:
+    text = _text(value)
+    if not text:
+        return set()
+    normalized = normalize_item_name(text)
+    cleaned = re.sub(r'[^a-z0-9]+', ' ', normalized).strip()
+    candidates = {normalized, cleaned, stable_slug(text)}
+    for candidate in list(candidates):
+        if not candidate:
+            continue
+        for article in ('the ', 'a ', 'an '):
+            if candidate.startswith(article):
+                candidates.add(candidate[len(article) :].strip())
+        for marker in (' the ', ' a ', ' an '):
+            if marker in candidate:
+                candidates.add(candidate.rsplit(marker, 1)[-1].strip())
+    return {candidate for candidate in candidates if candidate}
+
+
+def _combat_participant_reference_keys(participant: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for value in (
+        participant.get('id'),
+        participant.get('name'),
+        participant.get('definitionId'),
+        participant.get('creatureType'),
+    ):
+        keys.update(_combat_reference_keys(value))
+    for alias in participant.get('aliases') or []:
+        keys.update(_combat_reference_keys(alias))
+    return keys
 
 
 def _sync_actor_health_to_combat_participant(state: dict[str, Any], actor: dict[str, Any]) -> None:
@@ -709,6 +757,15 @@ def _sync_actor_health_to_combat_participant(state: dict[str, Any], actor: dict[
     if participant.get('team') == 'player':
         participant['isAlive'] = participant.get('isAlive', True)
         participant['isConscious'] = current > 0
+
+
+def _sync_actor_level_to_combat_participant(state: dict[str, Any], actor: dict[str, Any]) -> None:
+    combat = state.get('combat') if isinstance(state.get('combat'), dict) else None
+    if not combat:
+        return
+    participant = _combat_participant(combat, actor.get('id'))
+    if participant:
+        participant['level'] = actor.get('level')
 
 
 def _sync_scene_combat_state(state: dict[str, Any], combat: dict[str, Any]) -> None:
@@ -959,8 +1016,10 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
             applied_change['actualAmount'] = result['amount']
         elif change_type == 'xp.add' and actor:
             applied_change['actualAmount'] = _apply_xp(actor, change, 1)
+            _sync_actor_level_to_combat_participant(next_state, actor)
         elif change_type == 'xp.remove' and actor:
             applied_change['actualAmount'] = _apply_xp(actor, change, -1)
+            _sync_actor_level_to_combat_participant(next_state, actor)
         elif change_type == 'spell.learn' and actor:
             result = _apply_spell_learn(actor, change)
             if not result:
@@ -1218,13 +1277,44 @@ def persist_state_to_database(
             current_xp = max(0, int_or_default(xp.get('current'), default=0))
             stats['xp'] = current_xp
             stats['experience'] = current_xp
+            sync_actor_level_for_xp(actor)
+        if int_or_default(actor.get('level'), default=0) > int_or_default(player.level, default=1):
+            player.level = int(actor['level'])
+        sync_stats_for_level(stats, player.level or 1)
+        health = actor.setdefault('health', {})
+        current_hp = max(0, int_or_default(stats.get('current_hp', stats.get('hp_current')), default=0))
+        max_hp = max(current_hp, int_or_default(stats.get('max_hp', stats.get('hp_max')), default=current_hp))
+        if max_hp:
+            health['currentHp'] = current_hp
+            health['maxHp'] = max_hp
+            health['tempHp'] = max(0, int_or_default(stats.get('temp_hp', stats.get('tempHp')), default=0))
+            _sync_actor_health_to_combat_participant(state, actor)
+        actor['level'] = int_or_default(player.level, default=1)
+        actor_xp = actor.setdefault('xp', {})
+        actor_xp['current'] = max(0, int_or_default(stats.get('xp', stats.get('experience')), default=0))
+        sync_actor_level_for_xp(actor)
+        _sync_actor_level_to_combat_participant(state, actor)
         player.stats = safe_json_dumps(stats, {})
         spellbook = actor.get('spellbook') if isinstance(actor.get('spellbook'), dict) else {}
+        sheet_source = player.character_sheet
         if spellbook.get('knownSpells'):
-            sheet = character_sheet_record(player.character_sheet)
+            sheet = character_sheet_record(sheet_source)
             sheet['spellbook'] = normalize_spellbook(spellbook)
             sheet['spells'] = known_spell_names(sheet['spellbook'])
+            sheet_source = safe_json_dumps(sheet, {})
+        sheet, changed = ensure_character_sheet_spellbook(
+            sheet_source,
+            class_name=player.class_,
+            race_name=player.race,
+            race_selection=player.race_selection,
+            level=player.level or 1,
+        )
+        if changed or spellbook.get('knownSpells'):
             player.character_sheet = safe_json_dumps(sheet, {})
+            synced_spellbook = normalize_spellbook(sheet.get('spellbook'))
+            if synced_spellbook.get('knownSpells'):
+                actor['spellbook'] = synced_spellbook
+                actor['spells'] = known_spell_names(synced_spellbook)
 
     session_obj.state_snapshot = safe_json_dumps(state, {})
 

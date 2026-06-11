@@ -20,8 +20,12 @@ from typing import Iterable
 
 from sqlalchemy import inspect
 
-from aidm_server.config import SUPPORTED_TURN_COORDINATOR_STORES, TURN_COORDINATOR_STORE_MEMORY
-from aidm_server.rate_limiter import RATE_LIMIT_STORE_MEMORY, SUPPORTED_RATE_LIMIT_STORES
+from aidm_server.config import (
+    SUPPORTED_TURN_COORDINATOR_STORES,
+    TURN_COORDINATOR_STORE_DATABASE,
+    TURN_COORDINATOR_STORE_MEMORY,
+)
+from aidm_server.rate_limiter import RATE_LIMIT_STORE_DATABASE, RATE_LIMIT_STORE_MEMORY, SUPPORTED_RATE_LIMIT_STORES
 
 
 @dataclass
@@ -150,6 +154,10 @@ def _validate_rate_limits(app):
     if turn_store not in SUPPORTED_TURN_COORDINATOR_STORES:
         expected = ', '.join(sorted(SUPPORTED_TURN_COORDINATOR_STORES))
         raise BootstrapError(f'Invalid AIDM_TURN_COORDINATOR_STORE; expected one of: {expected}.')
+    if app.config.get('AIDM_ENV') == 'production' and store != RATE_LIMIT_STORE_DATABASE:
+        raise BootstrapError('AIDM_ENV=production requires AIDM_RATE_LIMIT_STORE=database.')
+    if app.config.get('AIDM_ENV') == 'production' and turn_store != TURN_COORDINATOR_STORE_DATABASE:
+        raise BootstrapError('AIDM_ENV=production requires AIDM_TURN_COORDINATOR_STORE=database.')
     if not isinstance(turn_lock_ttl, int) or turn_lock_ttl < 30:
         raise BootstrapError('Invalid AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS; expected integer >= 30.')
     if not isinstance(turn_poll_interval_ms, int) or turn_poll_interval_ms < 10:
@@ -289,6 +297,14 @@ def _build_runtime():
     return build_runtime(ensure_schema_created=False)
 
 
+def _validate_server_start_allowed(app):
+    if app.config.get('AIDM_ENV') == 'production':
+        raise BootstrapError(
+            'Do not start the production server with deploy_bootstrap/Werkzeug. '
+            'Run deploy_bootstrap --check-only, then start AIDM with a production Socket.IO server.'
+        )
+
+
 def bootstrap(check_only: bool, host: str, port: int):
     repo_root = _repo_root()
     report = BootstrapReport(warnings=[])
@@ -322,6 +338,7 @@ def bootstrap(check_only: bool, host: str, port: int):
     # Build a fresh runtime after preflight checks so test probes do not affect
     # the long-running server state.
     app, socketio = _build_runtime()
+    _validate_server_start_allowed(app)
     print(f'[bootstrap] Starting server on {host}:{port}...')
     socketio.run(
         app,

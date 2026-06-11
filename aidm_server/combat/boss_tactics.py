@@ -63,7 +63,12 @@ def should_use_boss_tactics_helper(enemy: dict[str, Any], combat: dict[str, Any]
     if behavior.get('intelligenceProfile') in COMPLEX_INTELLIGENCE and len(enemy.get('abilities') or []) >= 3:
         return True
     battlefield = combat.get('battlefield') if isinstance(combat.get('battlefield'), dict) else {}
-    return bool(behavior.get('primaryGoal') in {'complete_ritual', 'protect_location'} and (battlefield.get('hazards') or battlefield.get('interactables')))
+    return bool(
+        behavior.get('primaryGoal') in {'complete_ritual', 'protect_location'}
+        and behavior.get('intelligenceProfile') in COMPLEX_INTELLIGENCE
+        and len(enemy.get('abilities') or []) >= 3
+        and (battlefield.get('hazards') or battlefield.get('interactables'))
+    )
 
 
 def _players_summary(combat: dict[str, Any]) -> list[str]:

@@ -51,9 +51,13 @@ def password_hash_for(value: str | None) -> str | None:
 def password_matches(account, password: str | None) -> bool:
     password_hash = str(getattr(account, "password_hash", "") or "")
     if not password_hash:
-        return True
+        return False
     supplied = str(password or "")
     return bool(supplied) and check_password_hash(password_hash, supplied)
+
+
+def account_requires_password_setup(account) -> bool:
+    return bool(account) and not bool(str(getattr(account, "password_hash", "") or "").strip())
 
 
 def account_for_token(token: str | None):

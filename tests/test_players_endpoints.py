@@ -156,13 +156,27 @@ def test_create_player_respects_explicit_empty_inventory_over_class_starter(clie
     assert player_response.get_json()['inventory'] == []
 
 
-def test_get_player_backfills_starting_inventory_for_existing_blank_player(client, app):
+def test_get_player_does_not_backfill_starting_inventory_for_existing_blank_player(client, app):
     ids = seed_world_campaign_player_session(app)
 
     response = client.get(f"/api/players/{ids['player_id']}")
     assert response.status_code == 200
-    inventory = {item['name']: item for item in response.get_json()['inventory']}
+    assert response.get_json()['inventory'] == []
 
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        assert not player.inventory
+
+
+def test_repair_starting_loadout_backfills_inventory_for_existing_blank_player(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    response = client.post(f"/api/players/{ids['player_id']}/repair-starting-loadout")
+    assert response.status_code == 200
+    payload = response.get_json()
+    inventory = {item['name']: item for item in payload['inventory']}
+
+    assert payload['repaired'] == {'inventory': True, 'spells': True}
     assert inventory['Longbow']['equipped'] is True
     assert inventory['Longbow']['slot'] == 'two_hands'
     assert inventory['Leather Armor']['slot'] == 'body_armor'
@@ -173,7 +187,7 @@ def test_get_player_backfills_starting_inventory_for_existing_blank_player(clien
         assert player.inventory
 
 
-def test_get_player_backfills_starting_spells_for_existing_blank_player(client, app):
+def test_get_player_does_not_backfill_starting_spells_for_existing_blank_player(client, app):
     ids = seed_world_campaign_player_session(app)
     with app.app_context():
         player = db.session.get(Player, ids['player_id'])
@@ -185,9 +199,31 @@ def test_get_player_backfills_starting_spells_for_existing_blank_player(client, 
 
     response = client.get(f"/api/players/{ids['player_id']}")
     assert response.status_code == 200
-    sheet = response.get_json()['character_sheet']
+    assert response.get_json()['character_sheet'] is None
+
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        assert player.character_sheet is None
+
+
+def test_repair_starting_loadout_backfills_spells_for_existing_blank_player(client, app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        player.inventory = safe_json_dumps([], [])
+        player.class_ = 'Shapeshifter'
+        player.race = 'Changeling'
+        player.race_selection = None
+        player.character_sheet = None
+        db.session.commit()
+
+    response = client.post(f"/api/players/{ids['player_id']}/repair-starting-loadout")
+    assert response.status_code == 200
+    payload = response.get_json()
+    sheet = payload['character_sheet']
     known = {spell['name'] for spell in sheet['spellbook']['knownSpells']}
 
+    assert payload['repaired'] == {'inventory': False, 'spells': True}
     assert 'Primal Shift' in known
     assert 'Disguise Self' in known
 
@@ -379,6 +415,36 @@ def test_manual_equipment_endpoint_infers_sparse_axe_items(client, app):
     assert inventory['handaxe']['subtype'] == 'handaxe'
     assert inventory['handaxe']['equipped'] is True
     assert inventory['handaxe']['slot'] == 'main_hand'
+
+
+def test_manual_equipment_endpoint_rolls_back_on_apply_error(client, app, monkeypatch):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        player.inventory = safe_json_dumps(
+            [{'id': 'long', 'name': 'Longsword', 'quantity': 1, 'type': 'weapon', 'subtype': 'sword'}],
+            [],
+        )
+        db.session.commit()
+        original_inventory = player.inventory
+
+    from aidm_server.blueprints import players as players_module
+
+    def fail_apply_state_changes(*_args, **_kwargs):
+        raise RuntimeError('simulated equipment failure')
+
+    monkeypatch.setattr(players_module, 'apply_state_changes', fail_apply_state_changes)
+
+    response = client.patch(
+        f"/api/players/{ids['player_id']}/inventory/equipment",
+        json={'action': 'equip', 'item_id': 'long'},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()['error_code'] == 'equipment_update_failed'
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        assert player.inventory == original_inventory
 
 
 def test_update_player_rejects_invalid_payloads(client, app):

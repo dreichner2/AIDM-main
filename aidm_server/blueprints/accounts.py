@@ -8,6 +8,7 @@ from aidm_server.auth import (
     WORKSPACE_ID_HEADER,
     account_display_name,
     account_for_token,
+    account_requires_password_setup,
     account_workspace_membership,
     claim_legacy_players_for_account,
     ensure_account_workspace_membership,
@@ -30,6 +31,11 @@ from aidm_server.validation import optional_text as _optional_text, parse_json_b
 
 logger = logging.getLogger(__name__)
 accounts_bp = Blueprint('accounts', __name__)
+LEGACY_PASSWORD_SETUP_MESSAGE = 'Passwords are required now. Please set one now.'
+
+
+def _legacy_password_setup_required_response():
+    return error_response('legacy_password_setup_required', LEGACY_PASSWORD_SETUP_MESSAGE, 401)
 
 
 def workspace_membership_payload(membership: AccountWorkspaceMembership) -> dict:
@@ -64,6 +70,7 @@ def account_payload(account: Account, *, workspace_id: str | None = None, role: 
         'workspace_id': workspace_id,
         'workspace_role': role,
         'is_workspace_admin': workspace_role_is_admin(role),
+        'requires_password_setup': account_requires_password_setup(account),
         'workspaces': account_workspaces_payload(account),
     }
 
@@ -71,6 +78,44 @@ def account_payload(account: Account, *, workspace_id: str | None = None, role: 
 def _workspace_token_from_payload(payload: dict) -> str | None:
     token = payload.get('workspace_token') or payload.get('workspaceToken')
     return str(token).strip() if token else None
+
+
+def _truthy_payload_flag(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _legacy_claim_requested(payload: dict) -> bool:
+    return _truthy_payload_flag(payload.get('legacy_claim') or payload.get('legacyClaim'))
+
+
+def _legacy_claim_identity_matches(account: Account, first_name: str | None, last_name: str | None) -> bool:
+    existing_first = str(account.first_name or '').strip().casefold()
+    existing_last = str(account.last_name or '').strip().casefold()
+    supplied_first = str(first_name or '').strip().casefold()
+    supplied_last = str(last_name or '').strip().casefold()
+    if not supplied_first and not supplied_last:
+        return True
+    return bool(existing_first and existing_last and supplied_first and supplied_last) and (
+        existing_first,
+        existing_last,
+    ) == (
+        supplied_first,
+        supplied_last,
+    )
+
+
+def _account_intent_from_payload(payload: dict) -> tuple[str | None, str | None]:
+    raw_intent = payload.get('intent') or payload.get('account_intent') or payload.get('accountIntent')
+    if raw_intent is None or str(raw_intent).strip() == '':
+        return None, None
+    intent = str(raw_intent).strip().casefold()
+    if intent in {'login', 'sign_in', 'signin'}:
+        return 'login', None
+    if intent in {'signup', 'sign_up', 'register'}:
+        return 'signup', None
+    return None, 'intent must be login or signup.'
 
 
 def _validate_workspace_token(payload: dict) -> str | None:
@@ -108,6 +153,9 @@ def login_or_create_account():
     username = normalize_username(raw_username)
     if not username:
         return error_response('validation_error', 'username is required.', 400)
+    account_intent, account_intent_error = _account_intent_from_payload(payload)
+    if account_intent_error:
+        return error_response('validation_error', account_intent_error, 400)
 
     workspace_token = _workspace_token_from_payload(payload)
     workspace_id = _validate_workspace_token(payload) if workspace_token else None
@@ -129,6 +177,8 @@ def login_or_create_account():
 
         created = False
         if account is None:
+            if account_intent == 'login':
+                return error_response('username_not_found', 'Username not found. Please sign up.', 404)
             if not first_name or not last_name:
                 return error_response(
                     'validation_error',
@@ -136,6 +186,8 @@ def login_or_create_account():
                     400,
                     {'missing_fields': [field for field, value in {'first_name': first_name, 'last_name': last_name}.items() if not value]},
                 )
+            if not password.strip():
+                return error_response('validation_error', 'Password is required.', 400)
             token = generate_account_token()
             account = Account(
                 username=username,
@@ -148,19 +200,36 @@ def login_or_create_account():
             db.session.flush()
             created = True
         else:
+            if account_intent == 'signup':
+                return error_response('username_taken', 'Username is already taken. Please sign in.', 409)
             token_is_valid_for_account = bool(token_account and token_account.account_id == account.account_id)
             password_is_valid = password_matches(account, password)
-            if not token_is_valid_for_account and not password_is_valid:
-                return error_response('unauthorized', 'Invalid account password.', 401)
-            if not token_is_valid_for_account:
-                token = generate_account_token()
-                account.account_token_hash = hash_secret(token)
+            account_has_password = bool(account.password_hash)
+            if not account_has_password:
+                password_setup_allowed = bool(password) and (
+                    token_is_valid_for_account
+                    or (
+                        _legacy_claim_requested(payload)
+                        and _legacy_claim_identity_matches(account, first_name, last_name)
+                    )
+                )
+                if password_setup_allowed:
+                    if not token_is_valid_for_account:
+                        token = generate_account_token()
+                    account.account_token_hash = hash_secret(token)
+                    account.password_hash = password_hash_for(password)
+                else:
+                    return _legacy_password_setup_required_response()
+            else:
+                if not token_is_valid_for_account and not password_is_valid:
+                    return error_response('unauthorized', 'Invalid account password.', 401)
+                if not token_is_valid_for_account:
+                    token = generate_account_token()
+                    account.account_token_hash = hash_secret(token)
             if first_name:
                 account.first_name = first_name
             if last_name:
                 account.last_name = last_name
-            if password and not account.password_hash:
-                account.password_hash = password_hash_for(password)
 
         membership = ensure_account_workspace_membership(account, workspace_id) if workspace_id else None
         claimed_player_ids = claim_legacy_players_for_account(account, workspace_id) if workspace_id else []
@@ -185,6 +254,8 @@ def join_account_workspace():
     account = account_for_token(account_token)
     if not account:
         return error_response('unauthorized', 'Missing or invalid account session.', 401)
+    if account_requires_password_setup(account):
+        return _legacy_password_setup_required_response()
 
     payload = parse_json_body(request)
     if payload is None:
@@ -217,6 +288,8 @@ def select_account_workspace():
     account = account_for_token(account_token)
     if not account:
         return error_response('unauthorized', 'Missing or invalid account session.', 401)
+    if account_requires_password_setup(account):
+        return _legacy_password_setup_required_response()
 
     payload = parse_json_body(request)
     if payload is None:

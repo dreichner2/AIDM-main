@@ -6,6 +6,7 @@ from aidm_server.database import db
 from aidm_server.models import (
     Campaign,
     CampaignSegment,
+    BestiaryEntry,
     CanonJob,
     DmCoherenceFeedback,
     DmTurn,
@@ -42,8 +43,10 @@ def test_create_campaign_accepts_numeric_world_id_string(client, app):
     )
 
     assert response.status_code == 201
-    campaign_id = response.get_json()['campaign_id']
-    assert response.get_json()['world_name'] == 'Campaign World'
+    payload = response.get_json()
+    campaign_id = payload['campaign_id']
+    assert payload['world_name'] == 'Campaign World'
+    assert payload['bestiary_seeded_count'] == 8
 
     with app.app_context():
         campaign = db.session.get(Campaign, campaign_id)
@@ -51,6 +54,30 @@ def test_create_campaign_accepts_numeric_world_id_string(client, app):
         assert campaign.title == 'Gate of Ash'
         assert campaign.world_id == world_id
         assert campaign.status == 'active'
+        assert BestiaryEntry.query.filter_by(campaign_id=campaign_id, source='campaign_pack').count() == 8
+
+
+def test_create_campaign_can_opt_out_of_bestiary_seed(client, app):
+    with app.app_context():
+        world = World(name='Empty Campaign World', description='For opt out')
+        db.session.add(world)
+        db.session.commit()
+        world_id = world.world_id
+
+    response = client.post(
+        '/api/campaigns',
+        json={
+            'title': 'Quiet Table',
+            'world_id': world_id,
+            'seed_bestiary': False,
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload['bestiary_seeded_count'] == 0
+    with app.app_context():
+        assert BestiaryEntry.query.filter_by(campaign_id=payload['campaign_id']).count() == 0
 
 
 def test_create_campaign_rejects_invalid_world_id(client):

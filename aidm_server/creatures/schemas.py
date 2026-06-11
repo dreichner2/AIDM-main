@@ -92,6 +92,27 @@ PRIMARY_GOALS = {
     'unknown',
     'custom',
 }
+TARGET_PRIORITY_ALIASES = {
+    'nearest_target': 'nearest',
+    'nearest': 'nearest',
+    'highest_damage_dealer': 'highest_damage_dealer',
+    'lowest_hp': 'wounded',
+    'wounded': 'wounded',
+    'lowest_armor': 'lowest_armor',
+    'spellcaster': 'spellcaster',
+    'healer': 'healer',
+    'isolated_target': 'isolated',
+    'isolated': 'isolated',
+    'restrained_target': 'restrained',
+    'restrained': 'restrained',
+    'leader': 'leader',
+    'last_attacker': 'last_damaged_by',
+    'last_damaged_by': 'last_damaged_by',
+    'carrying_desired_item': 'carrying_desired_item',
+    'blocking_escape': 'blocking_escape',
+    'personal_grudge_target': 'personal_grudge_target',
+    'random': 'random',
+}
 
 
 def _text(value: Any, default: str = '') -> str:
@@ -203,13 +224,42 @@ def normalize_survival_rules(value: Any, *, behavior: dict[str, Any]) -> dict[st
             minimum=0,
             maximum=100,
         ),
+        'surrenderBelowHpPercent': _bounded_int(
+            raw.get('surrenderBelowHpPercent', raw.get('surrender_below_hp_percent', 0)),
+            default=0,
+            minimum=0,
+            maximum=100,
+        ),
         'negotiateBelowMorale': _bounded_int(
             raw.get('negotiateBelowMorale', raw.get('negotiate_below_morale', surrender_threshold + 10)),
             default=surrender_threshold + 10,
             minimum=0,
             maximum=100,
         ),
+        'negotiateBelowHpPercent': _bounded_int(
+            raw.get('negotiateBelowHpPercent', raw.get('negotiate_below_hp_percent', 0)),
+            default=0,
+            minimum=0,
+            maximum=100,
+        ),
+        'fleeIfLeaderDies': bool(raw.get('fleeIfLeaderDies', raw.get('flee_if_leader_dies', intelligence != 'mindless' and self_preservation >= 35))),
         'fleeIfOutnumbered': bool(raw.get('fleeIfOutnumbered', raw.get('flee_if_outnumbered', intelligence != 'mindless' and self_preservation >= 45))),
+        'fleeIfAlone': bool(raw.get('fleeIfAlone', raw.get('flee_if_alone', intelligence != 'mindless' and self_preservation >= 65))),
+        'fleeIfMoraleBelow': _bounded_int(
+            raw.get('fleeIfMoraleBelow', raw.get('flee_if_morale_below', 0)),
+            default=0,
+            minimum=0,
+            maximum=100,
+        ),
+        'callForHelpBelowHpPercent': _bounded_int(
+            raw.get('callForHelpBelowHpPercent', raw.get('call_for_help_below_hp_percent', 0)),
+            default=0,
+            minimum=0,
+            maximum=100,
+        ),
+        'protectSelfIfBloodied': bool(raw.get('protectSelfIfBloodied', raw.get('protect_self_if_bloodied', self_preservation >= 55))),
+        'ignorePain': bool(raw.get('ignorePain', raw.get('ignore_pain', intelligence == 'mindless'))),
+        'mindlessNoRetreat': bool(raw.get('mindlessNoRetreat', raw.get('mindless_no_retreat', intelligence == 'mindless'))),
         'notes': notes,
     }
 
@@ -262,6 +312,16 @@ def normalize_ability(value: Any, *, creature_id: str, index: int) -> dict[str, 
     return ability
 
 
+def normalize_target_priority(value: Any) -> list[str]:
+    priorities: list[str] = []
+    for item in _string_list(value, limit=12):
+        normalized = item.strip().lower().replace(' ', '_').replace('-', '_')
+        mapped = TARGET_PRIORITY_ALIASES.get(normalized, normalized)
+        if mapped and mapped not in priorities:
+            priorities.append(mapped)
+    return priorities[:8]
+
+
 def normalize_behavior(value: Any, *, creature_type: str, challenge_tier: str) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     intelligence_default = 'animal' if creature_type == 'beast' else 'mindless' if creature_type in {'undead', 'ooze', 'construct'} else 'average'
@@ -280,7 +340,7 @@ def normalize_behavior(value: Any, *, creature_type: str, challenge_tier: str) -
         'loyalty': _bounded_int(raw.get('loyalty'), default=40, minimum=0, maximum=100),
         'fleeThreshold': _bounded_int(raw.get('fleeThreshold', raw.get('flee_threshold')), default=25, minimum=0, maximum=100),
         'surrenderThreshold': _bounded_int(raw.get('surrenderThreshold', raw.get('surrender_threshold')), default=15, minimum=0, maximum=100),
-        'targetPriority': _string_list(raw.get('targetPriority', raw.get('target_priority')), limit=8),
+        'targetPriority': normalize_target_priority(raw.get('targetPriority', raw.get('target_priority'))),
         'tactics': _string_list(raw.get('tactics'), limit=10),
         'personalityTags': _string_list(raw.get('personalityTags', raw.get('personality_tags')), limit=8),
         'speechStyle': _text(raw.get('speechStyle', raw.get('speech_style')))[:160],

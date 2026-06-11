@@ -186,6 +186,7 @@ export type Account = {
   workspace_id: string | null
   workspace_role: string | null
   is_workspace_admin: boolean
+  requires_password_setup: boolean
   workspaces: AccountWorkspace[]
 }
 

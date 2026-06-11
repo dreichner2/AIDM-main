@@ -22,11 +22,18 @@ export type RuntimeAccount = {
   workspaceId: string | null
   workspaceRole: string | null
   isWorkspaceAdmin: boolean
+  requiresPasswordSetup: boolean
   workspaces: AccountWorkspace[]
 } | null
 
+type RuntimeApiError = Error & {
+  errorCode?: string
+}
+
 const ACCOUNT_TOKEN_COOKIE = 'aidm_account_token'
 const ACCOUNT_TOKEN_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
+const LEGACY_PASSWORD_SETUP_ERROR_CODE = 'legacy_password_setup_required'
+export const LEGACY_PASSWORD_SETUP_MESSAGE = 'Passwords are required now. Please set one now.'
 
 function readCookie(name: string) {
   const prefix = `${encodeURIComponent(name)}=`
@@ -126,6 +133,7 @@ function loadSessionAccount(): RuntimeAccount {
       workspaceId: typeof parsed.workspaceId === 'string' ? parsed.workspaceId : null,
       workspaceRole: typeof parsed.workspaceRole === 'string' ? parsed.workspaceRole : null,
       isWorkspaceAdmin: parsed.isWorkspaceAdmin === true,
+      requiresPasswordSetup: parsed.requiresPasswordSetup === true,
       workspaces,
     }
   } catch {
@@ -177,6 +185,7 @@ function accountFromSession(session: AccountSession): NonNullable<RuntimeAccount
     workspaceId: session.workspace_id,
     workspaceRole: session.workspace_role,
     isWorkspaceAdmin: session.is_workspace_admin,
+    requiresPasswordSetup: session.account.requires_password_setup,
     workspaces: session.workspaces ?? session.account.workspaces ?? [],
   }
 }
@@ -189,6 +198,7 @@ function accountFromPayload(account: Account): NonNullable<RuntimeAccount> {
     workspaceId: account.workspace_id,
     workspaceRole: account.workspace_role,
     isWorkspaceAdmin: account.is_workspace_admin,
+    requiresPasswordSetup: account.requires_password_setup,
     workspaces: account.workspaces ?? [],
   }
 }
@@ -223,7 +233,23 @@ function responseErrorMessage(payload: unknown, fallback: string) {
   return fallback
 }
 
-async function submitAccountSession(baseUrl: string, form: RuntimeSettingsForm, accountToken: string) {
+function responseError(payload: unknown, fallback: string): RuntimeApiError {
+  const error = new Error(responseErrorMessage(payload, fallback)) as RuntimeApiError
+  if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>
+    if (typeof record.error_code === 'string') {
+      error.errorCode = record.error_code
+    }
+  }
+  return error
+}
+
+async function submitAccountSession(
+  baseUrl: string,
+  form: RuntimeSettingsForm,
+  accountToken: string,
+  options: { intent: RuntimeAuthIntent; legacyClaim?: boolean },
+) {
   const headers = new Headers({ 'Content-Type': 'application/json' })
   if (accountToken.trim()) {
     headers.set('Authorization', `Bearer ${accountToken.trim()}`)
@@ -238,12 +264,14 @@ async function submitAccountSession(baseUrl: string, form: RuntimeSettingsForm, 
       first_name: form.firstName.trim(),
       last_name: form.lastName.trim(),
       password: form.password,
+      intent: options.intent,
+      ...(options.legacyClaim ? { legacy_claim: true } : {}),
     }),
   })
   const text = await response.text()
   const payload = text ? JSON.parse(text) as unknown : null
   if (!response.ok) {
-    throw new Error(responseErrorMessage(payload, `Account request failed with status ${response.status}`))
+    throw responseError(payload, `Account request failed with status ${response.status}`)
   }
   return payload as AccountSession
 }
@@ -287,7 +315,7 @@ async function submitWorkspaceSession(baseUrl: string, workspaceToken: string, a
   const text = await response.text()
   const payload = text ? JSON.parse(text) as unknown : null
   if (!response.ok) {
-    throw new Error(responseErrorMessage(payload, `Workspace request failed with status ${response.status}`))
+    throw responseError(payload, `Workspace request failed with status ${response.status}`)
   }
   return payload as AccountSession
 }
@@ -309,7 +337,7 @@ async function selectWorkspaceSession(baseUrl: string, workspaceId: string, acco
   const text = await response.text()
   const payload = text ? JSON.parse(text) as unknown : null
   if (!response.ok) {
-    throw new Error(responseErrorMessage(payload, `Workspace request failed with status ${response.status}`))
+    throw responseError(payload, `Workspace request failed with status ${response.status}`)
   }
   return payload as AccountSession
 }
@@ -336,6 +364,7 @@ export function useRuntimeSettings({
   const [runtimeAuthIntent, setRuntimeAuthIntent] = useState<RuntimeAuthIntent>('login')
   const [runtimeAuthStep, setRuntimeAuthStep] = useState<RuntimeAuthStep>(() => (loadSessionAuthToken() ? 'workspace' : 'account'))
   const [runtimeSettingsError, setRuntimeSettingsError] = useState('')
+  const [legacyPasswordSetupRequired, setLegacyPasswordSetupRequired] = useState(false)
   const accountRefreshTokenRef = useRef('')
   const [runtimeSettingsForm, setRuntimeSettingsForm] = useState<RuntimeSettingsForm>(() => ({
     baseUrl: loadInitialBaseUrl(defaultBaseUrl),
@@ -345,6 +374,20 @@ export function useRuntimeSettings({
     lastName: '',
     password: '',
   }))
+
+  const promptForLegacyPasswordSetup = useCallback((account?: NonNullable<RuntimeAccount>) => {
+    setRuntimeSettingsForm((current) => ({
+      ...current,
+      username: account?.username || current.username,
+      password: '',
+    }))
+    setRuntimeAuthIntent('login')
+    setRuntimeAuthStep('account')
+    setRuntimeSettingsMode('auth')
+    setRuntimeSettingsOpen(true)
+    setLegacyPasswordSetupRequired(true)
+    setRuntimeSettingsError(LEGACY_PASSWORD_SETUP_MESSAGE)
+  }, [])
 
   const refreshRuntimeAccount = useCallback(
     async (options: { reportError?: boolean } = {}) => {
@@ -362,6 +405,14 @@ export function useRuntimeSettings({
           ...current,
           username: account.username || current.username,
         }))
+        if (account.requiresPasswordSetup) {
+          storeSessionWorkspaceToken('')
+          storeWorkspaceId('')
+          setWorkspaceToken('')
+          setWorkspaceId('')
+          promptForLegacyPasswordSetup(account)
+          return account
+        }
         if (account.workspaceId) {
           storeWorkspaceId(account.workspaceId)
           setWorkspaceId(account.workspaceId)
@@ -378,6 +429,7 @@ export function useRuntimeSettings({
       authToken,
       baseUrl,
       pendingAuthToken,
+      promptForLegacyPasswordSetup,
       runtimeAccount,
       runtimeSettingsForm.baseUrl,
       workspaceId,
@@ -398,6 +450,7 @@ export function useRuntimeSettings({
   }, [authToken, refreshRuntimeAccount])
 
   const openRuntimeSettings = useCallback((mode: RuntimeSettingsMode = 'settings') => {
+    const needsPasswordSetup = runtimeAccount?.requiresPasswordSetup === true
     setRuntimeSettingsForm((current) => ({
       baseUrl,
       workspaceToken,
@@ -406,14 +459,30 @@ export function useRuntimeSettings({
       lastName: current.lastName,
       password: '',
     }))
-    setRuntimeAuthStep(mode === 'auth' && (authToken.trim() || pendingAuthToken.trim()) ? 'workspace' : 'account')
+    setRuntimeAuthStep(
+      needsPasswordSetup || !(mode === 'auth' && (authToken.trim() || pendingAuthToken.trim()))
+        ? 'account'
+        : 'workspace',
+    )
+    if (needsPasswordSetup) {
+      setRuntimeAuthIntent('login')
+    }
     setRuntimeSettingsMode(mode)
-    setRuntimeSettingsError('')
+    setRuntimeSettingsError(needsPasswordSetup ? LEGACY_PASSWORD_SETUP_MESSAGE : '')
+    setLegacyPasswordSetupRequired(needsPasswordSetup)
     setRuntimeSettingsOpen(true)
     if (mode === 'auth' && (authToken.trim() || pendingAuthToken.trim())) {
       void refreshRuntimeAccount({ reportError: true })
     }
-  }, [authToken, baseUrl, pendingAuthToken, refreshRuntimeAccount, runtimeAccount?.username, workspaceToken])
+  }, [
+    authToken,
+    baseUrl,
+    pendingAuthToken,
+    refreshRuntimeAccount,
+    runtimeAccount?.requiresPasswordSetup,
+    runtimeAccount?.username,
+    workspaceToken,
+  ])
 
   const openAuthTokenPrompt = useCallback(() => {
     openRuntimeSettings('auth')
@@ -423,6 +492,7 @@ export function useRuntimeSettings({
     setRuntimeSettingsOpen(false)
     setRuntimeSettingsMode('settings')
     setRuntimeSettingsError('')
+    setLegacyPasswordSetupRequired(false)
   }, [])
 
   const submitRuntimeSettings = useCallback(
@@ -442,12 +512,26 @@ export function useRuntimeSettings({
           setRuntimeSettingsError('Username is required.')
           return
         }
+        const legacyPasswordSetupAttempt = runtimeAuthIntent === 'login' && legacyPasswordSetupRequired
+        if (legacyPasswordSetupAttempt && !runtimeSettingsForm.password.trim()) {
+          setRuntimeSettingsError(LEGACY_PASSWORD_SETUP_MESSAGE)
+          return
+        }
         if (runtimeAuthIntent === 'signup' && (!runtimeSettingsForm.firstName.trim() || !runtimeSettingsForm.lastName.trim())) {
           setRuntimeSettingsError('First and last name are required.')
           return
         }
+        if (runtimeAuthIntent === 'signup' && !runtimeSettingsForm.password.trim()) {
+          setRuntimeSettingsError('Password is required.')
+          return
+        }
         try {
-          const accountSession = await submitAccountSession(nextBaseUrl, runtimeSettingsForm, nextAuthToken)
+          const accountSession = await submitAccountSession(
+            nextBaseUrl,
+            runtimeSettingsForm,
+            nextAuthToken,
+            { intent: runtimeAuthIntent, legacyClaim: legacyPasswordSetupAttempt },
+          )
           const accountToken = accountSession.account_token.trim()
           const account = accountFromSession(accountSession)
           if (nextBaseUrl) {
@@ -466,9 +550,16 @@ export function useRuntimeSettings({
           setRuntimeAccount(account)
           setRuntimeSettingsForm((current) => ({ ...current, workspaceToken: '' }))
           setRuntimeAuthStep('workspace')
+          setLegacyPasswordSetupRequired(false)
           setRuntimeSettingsError('')
           return
         } catch (error) {
+          const runtimeError = error as RuntimeApiError
+          if (runtimeAuthIntent === 'login' && runtimeError.errorCode === LEGACY_PASSWORD_SETUP_ERROR_CODE) {
+            setLegacyPasswordSetupRequired(true)
+            setRuntimeSettingsError(LEGACY_PASSWORD_SETUP_MESSAGE)
+            return
+          }
           setRuntimeSettingsError(error instanceof Error ? error.message : String(error))
           return
         }
@@ -509,9 +600,15 @@ export function useRuntimeSettings({
           setRuntimeSettingsOpen(false)
           setRuntimeSettingsMode('settings')
           setRuntimeAuthStep('account')
+          setLegacyPasswordSetupRequired(false)
           setRuntimeSettingsError('')
           return
         } catch (error) {
+          const runtimeError = error as RuntimeApiError
+          if (runtimeError.errorCode === LEGACY_PASSWORD_SETUP_ERROR_CODE) {
+            promptForLegacyPasswordSetup(runtimeAccount ?? undefined)
+            return
+          }
           setRuntimeSettingsError(error instanceof Error ? error.message : String(error))
           return
         }
@@ -526,6 +623,7 @@ export function useRuntimeSettings({
         setRuntimeSettingsOpen(false)
         setRuntimeSettingsMode('settings')
         setRuntimeSettingsError('')
+        setLegacyPasswordSetupRequired(false)
         return
       }
 
@@ -542,6 +640,7 @@ export function useRuntimeSettings({
       setRuntimeSettingsOpen(false)
       setRuntimeSettingsMode('settings')
       setRuntimeSettingsError('')
+      setLegacyPasswordSetupRequired(false)
     },
     [
       authToken,
@@ -552,6 +651,9 @@ export function useRuntimeSettings({
       runtimeSettingsMode,
       runtimeAuthIntent,
       runtimeAuthStep,
+      legacyPasswordSetupRequired,
+      promptForLegacyPasswordSetup,
+      runtimeAccount,
     ],
   )
 
@@ -568,6 +670,7 @@ export function useRuntimeSettings({
     setRuntimeAccount(null)
     setRuntimeAuthIntent('login')
     setRuntimeAuthStep('account')
+    setLegacyPasswordSetupRequired(false)
     setRuntimeSettingsForm((current) => ({ ...current, workspaceToken: '', password: '' }))
     reconnectSocket()
   }, [reconnectSocket])
@@ -614,16 +717,24 @@ export function useRuntimeSettings({
         setRuntimeSettingsOpen(false)
         setRuntimeSettingsMode('settings')
         setRuntimeAuthStep('account')
+        setLegacyPasswordSetupRequired(false)
         setRuntimeSettingsError('')
       } catch (error) {
+        const runtimeError = error as RuntimeApiError
+        if (runtimeError.errorCode === LEGACY_PASSWORD_SETUP_ERROR_CODE) {
+          promptForLegacyPasswordSetup(runtimeAccount ?? undefined)
+          return
+        }
         setRuntimeSettingsError(error instanceof Error ? error.message : String(error))
       }
     },
     [
       authToken,
       pendingAuthToken,
+      promptForLegacyPasswordSetup,
       reconnectSocket,
       resetRuntimeState,
+      runtimeAccount,
       runtimeSettingsForm.baseUrl,
     ],
   )
@@ -638,12 +749,14 @@ export function useRuntimeSettings({
     runtimeAuthIntent,
     runtimeAuthStep,
     runtimeAccount,
+    legacyPasswordSetupRequired,
     runtimeSettingsError,
     runtimeSettingsForm,
     runtimeSettingsMode,
     runtimeSettingsOpen,
     setRuntimeAuthIntent,
     setRuntimeAuthStep,
+    setLegacyPasswordSetupRequired,
     setRuntimeSettingsError,
     setRuntimeSettingsForm,
     submitRuntimeSettings,

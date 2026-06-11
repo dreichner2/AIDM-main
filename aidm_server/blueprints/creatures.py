@@ -18,7 +18,7 @@ from aidm_server.creatures.repository import (
     record_combat_debug_event,
     save_bestiary_entry,
 )
-from aidm_server.creatures.resolver import resolve_creature_for_encounter
+from aidm_server.creatures.resolver import resolve_creature_for_encounter, resolve_creatures_for_encounter
 from aidm_server.creatures.schemas import normalize_creature_definition
 from aidm_server.creatures.variants import create_creature_variant
 from aidm_server.database import db
@@ -55,6 +55,47 @@ def _persist_session_state(session_obj: Session, state: dict[str, Any]) -> None:
         state=state,
         players_by_id={player.player_id: player for player in players},
     )
+
+
+def _encounter_flag_summary(encounter_resolution: dict[str, Any]) -> dict[str, Any]:
+    groups = [
+        {
+            'label': group.get('label'),
+            'count': group.get('count'),
+            'creatureId': (group.get('creature') or {}).get('id') if isinstance(group.get('creature'), dict) else None,
+            'name': (group.get('creature') or {}).get('name') if isinstance(group.get('creature'), dict) else None,
+            'source': group.get('source'),
+            'resolutionMethod': group.get('resolutionMethod'),
+        }
+        for group in (encounter_resolution.get('groups') or [])
+        if isinstance(group, dict)
+    ]
+    return {
+        'resolverMethod': encounter_resolution.get('resolutionMethod'),
+        'creatureSource': ', '.join(encounter_resolution.get('sources') or []),
+        'enemyCount': encounter_resolution.get('totalEnemies'),
+        'enemyGroups': groups,
+    }
+
+
+def _instantiate_groups_for_api(encounter_resolution: dict[str, Any]) -> list[dict[str, Any]]:
+    participants: list[dict[str, Any]] = []
+    sequence = 1
+    for group in encounter_resolution.get('groups') or []:
+        if not isinstance(group, dict) or not isinstance(group.get('creature'), dict):
+            continue
+        count = max(1, int(group.get('count') or 1))
+        creature = group['creature']
+        for _index in range(count):
+            participants.append(
+                instantiate_creature(
+                    creature,
+                    instance_id=f"enemy_{creature['id']}_{sequence}",
+                    team='enemy',
+                )
+            )
+            sequence += 1
+    return participants
 
 
 @creatures_bp.get('/bestiary/core')
@@ -274,7 +315,32 @@ def start_session_combat(session_id: int):
     campaign = session_obj.campaign
     if isinstance(payload.get('creature'), dict):
         creature = normalize_creature_definition(payload['creature'], source=payload['creature'].get('source') or 'user_custom')
-        resolution = {'creature': creature, 'resolutionMethod': 'encounter_defined', 'source': creature['source'], 'debug': {}}
+        enemy_count = max(1, int(payload.get('enemyCount') or payload.get('enemy_count') or 1))
+        encounter_resolution = {
+            'groups': [
+                {
+                    'id': 'manual_creature',
+                    'label': creature['name'],
+                    'count': enemy_count,
+                    'creature': creature,
+                    'source': creature['source'],
+                    'resolutionMethod': 'encounter_defined',
+                    'matchScore': 1.0,
+                    'generated': False,
+                    'savedToBestiary': False,
+                    'notes': ['Manual combat start supplied a creature.'],
+                }
+            ],
+            'totalEnemies': enemy_count,
+            'resolutionMethod': 'encounter_defined' if enemy_count == 1 else 'encounter_composed',
+            'resolutionMethods': ['encounter_defined'],
+            'sources': [creature['source']],
+            'generated': False,
+            'savedToBestiary': False,
+            'encounterGoal': payload.get('encounterGoal') if isinstance(payload.get('encounterGoal'), dict) else None,
+            'notes': ['Manual combat start supplied a creature.'],
+            'debug': {'manualCreature': creature['id'], 'totalEnemies': enemy_count},
+        }
     else:
         request_payload = {
             'campaignId': campaign.campaign_id,
@@ -289,33 +355,27 @@ def start_session_combat(session_id: int):
             'descriptionHint': payload.get('descriptionHint') or 'Manual combat start.',
             'allowGeneration': payload.get('allowGeneration', True),
             'allowVariants': payload.get('allowVariants', True),
+            'enemyCount': payload.get('enemyCount') or payload.get('enemy_count') or 1,
+            'enemyGroups': payload.get('enemyGroups') or payload.get('enemy_groups') or [],
         }
-        resolution = resolve_creature_for_encounter(request_payload, workspace_id=campaign.workspace_id)
-        creature = resolution['creature']
-    enemy_count = max(1, int(payload.get('enemyCount') or payload.get('enemy_count') or 1))
+        encounter_resolution = resolve_creatures_for_encounter(request_payload, workspace_id=campaign.workspace_id)
     participants = [player_combat_participant(actor) for actor in (state.get('playerCharacters') or []) if isinstance(actor, dict)]
-    for index in range(enemy_count):
-        participants.append(
-            instantiate_creature(
-                creature,
-                instance_id=f"enemy_{creature['id']}_{index + 1}",
-                team='enemy',
-            )
-        )
+    participants.extend(_instantiate_groups_for_api(encounter_resolution))
+    encounter_flags = _encounter_flag_summary(encounter_resolution)
     combat = {
         'status': 'active',
         'round': 1,
         'turnIndex': 0,
         'participants': participants,
         'battlefield': payload.get('battlefield') if isinstance(payload.get('battlefield'), dict) else default_battlefield(state.get('currentScene')),
-        'encounterGoal': payload.get('encounterGoal') if isinstance(payload.get('encounterGoal'), dict) else None,
+        'encounterGoal': payload.get('encounterGoal') if isinstance(payload.get('encounterGoal'), dict) else encounter_resolution.get('encounterGoal'),
         'initiative': [],
-        'flags': {'resolverMethod': resolution.get('resolutionMethod'), 'creatureSource': resolution.get('source')},
+        'flags': encounter_flags,
     }
     intent_plan = plan_enemy_intents(combat)
     combat = attach_intents_to_combat(combat, intent_plan)
     change = {
-        'id': stable_change_id(session_id, 'api.combat.start', creature['id'], enemy_count),
+        'id': stable_change_id(session_id, 'api.combat.start', encounter_flags.get('resolverMethod'), encounter_flags.get('enemyCount')),
         'type': 'combat.start',
         'combat': combat,
         'reason': 'Combat started from API.',
@@ -329,7 +389,7 @@ def start_session_combat(session_id: int):
         session_id=session_id,
         campaign_id=campaign.campaign_id,
         event_type='api_combat_start',
-        payload={'resolution': resolution, 'intentPlan': intent_plan},
+        payload={'resolution': encounter_resolution, 'intentPlan': intent_plan},
     )
     db.session.commit()
     return jsonify({'combat': apply_result['nextState'].get('combat'), 'validation': validation})

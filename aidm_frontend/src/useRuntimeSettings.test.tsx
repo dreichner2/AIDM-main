@@ -2,7 +2,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import type { FormEvent } from 'react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { useRuntimeSettings } from './useRuntimeSettings'
+import { LEGACY_PASSWORD_SETUP_MESSAGE, useRuntimeSettings } from './useRuntimeSettings'
 
 function submitEvent() {
   return {
@@ -123,10 +123,15 @@ describe('useRuntimeSettings', () => {
   })
 
   it('opens a focused account prompt that saves same-origin credentials', async () => {
+    const accountRequestBodies: Array<Record<string, unknown>> = []
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = new URL(String(input), 'http://localhost').pathname
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null
+        if (path === '/api/accounts/login' && body) {
+          accountRequestBodies.push(body)
+        }
         const workspacePayload = path === '/api/accounts/workspace'
         const workspaces = workspacePayload
           ? [
@@ -214,7 +219,7 @@ describe('useRuntimeSettings', () => {
         username: 'Danny',
         firstName: 'Danny',
         lastName: 'Reichner',
-        password: '',
+        password: 'secret',
       })
     })
     await act(async () => {
@@ -230,6 +235,11 @@ describe('useRuntimeSettings', () => {
     expect(result.current.runtimeSettingsOpen).toBe(true)
     expect(result.current.runtimeAuthStep).toBe('workspace')
     expect(result.current.runtimeSettingsForm.workspaceToken).toBe('')
+    expect(accountRequestBodies[0]).toMatchObject({
+      username: 'Danny',
+      password: 'secret',
+      intent: 'signup',
+    })
     expect(resetRuntimeState).not.toHaveBeenCalled()
     expect(reconnectSocket).not.toHaveBeenCalled()
 
@@ -250,6 +260,234 @@ describe('useRuntimeSettings', () => {
     expect(result.current.runtimeSettingsMode).toBe('settings')
     expect(resetRuntimeState).toHaveBeenCalledOnce()
     expect(reconnectSocket).toHaveBeenCalledOnce()
+  })
+
+  it('sends the selected auth intent and displays username intent errors', async () => {
+    const requestBodies: Array<Record<string, unknown>> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(input), 'http://localhost').pathname
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}
+        requestBodies.push(body)
+        if (path === '/api/accounts/login' && body.intent === 'login') {
+          return new Response(
+            JSON.stringify({
+              error_code: 'username_not_found',
+              error: 'Username not found. Please sign up.',
+            }),
+            { status: 404, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        return new Response(
+          JSON.stringify({
+            error_code: 'username_taken',
+            error: 'Username is already taken. Please sign in.',
+          }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        )
+      }),
+    )
+
+    const { result } = renderHook(() =>
+      useRuntimeSettings({
+        defaultBaseUrl: '',
+        resetRuntimeState: vi.fn(),
+        reconnectSocket: vi.fn(),
+      }),
+    )
+
+    act(() => {
+      result.current.openAuthTokenPrompt()
+      result.current.setRuntimeSettingsForm({
+        baseUrl: '',
+        workspaceToken: '',
+        username: 'Missing',
+        firstName: '',
+        lastName: '',
+        password: 'secret',
+      })
+    })
+    await act(async () => {
+      await result.current.submitRuntimeSettings(submitEvent())
+    })
+
+    expect(requestBodies[0]).toMatchObject({
+      username: 'Missing',
+      intent: 'login',
+    })
+    expect(result.current.runtimeSettingsError).toBe('Username not found. Please sign up.')
+
+    act(() => {
+      result.current.setRuntimeAuthIntent('signup')
+      result.current.setRuntimeSettingsForm({
+        baseUrl: '',
+        workspaceToken: '',
+        username: 'Danny',
+        firstName: 'Danny',
+        lastName: 'Reichner',
+        password: 'secret',
+      })
+    })
+    await act(async () => {
+      await result.current.submitRuntimeSettings(submitEvent())
+    })
+
+    expect(requestBodies[1]).toMatchObject({
+      username: 'Danny',
+      intent: 'signup',
+    })
+    expect(result.current.runtimeSettingsError).toBe('Username is already taken. Please sign in.')
+  })
+
+  it('prompts legacy passwordless accounts to set and save a password', async () => {
+    const requestBodies: Array<Record<string, unknown>> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(input), 'http://localhost').pathname
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}
+        requestBodies.push(body)
+        if (path === '/api/accounts/login' && !body.legacy_claim) {
+          return new Response(
+            JSON.stringify({
+              error_code: 'legacy_password_setup_required',
+              error: LEGACY_PASSWORD_SETUP_MESSAGE,
+            }),
+            { status: 401, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        return new Response(
+          JSON.stringify({
+            account: {
+              account_id: 1,
+              username: 'danny',
+              first_name: 'Danny',
+              last_name: 'Reichner',
+              display_name: 'Danny Reichner',
+              workspace_id: null,
+              workspace_role: null,
+              is_workspace_admin: false,
+              workspaces: [],
+            },
+            account_token: 'upgraded-account-token',
+            workspace_id: null,
+            workspace_role: null,
+            is_workspace_admin: false,
+            claimed_player_ids: [],
+            workspaces: [],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }),
+    )
+
+    const { result } = renderHook(() =>
+      useRuntimeSettings({
+        defaultBaseUrl: '',
+        resetRuntimeState: vi.fn(),
+        reconnectSocket: vi.fn(),
+      }),
+    )
+
+    act(() => {
+      result.current.openAuthTokenPrompt()
+      result.current.setRuntimeSettingsForm({
+        baseUrl: '',
+        workspaceToken: '',
+        username: 'Danny',
+        firstName: '',
+        lastName: '',
+        password: '',
+      })
+    })
+
+    await act(async () => {
+      await result.current.submitRuntimeSettings(submitEvent())
+    })
+
+    expect(result.current.runtimeSettingsError).toBe(LEGACY_PASSWORD_SETUP_MESSAGE)
+    expect(result.current.legacyPasswordSetupRequired).toBe(true)
+    expect(result.current.runtimeAuthStep).toBe('account')
+    expect(requestBodies[0]).toMatchObject({
+      username: 'Danny',
+      password: '',
+    })
+    expect(requestBodies[0]).not.toHaveProperty('legacy_claim')
+
+    act(() => {
+      result.current.setRuntimeSettingsForm((current) => ({ ...current, password: 'new-secret' }))
+    })
+    await act(async () => {
+      await result.current.submitRuntimeSettings(submitEvent())
+    })
+
+    expect(requestBodies[1]).toMatchObject({
+      username: 'Danny',
+      password: 'new-secret',
+      legacy_claim: true,
+    })
+    expect(sessionStorage.getItem('aidm:authToken')).toBe('upgraded-account-token')
+    expect(result.current.legacyPasswordSetupRequired).toBe(false)
+    expect(result.current.runtimeSettingsError).toBe('')
+    expect(result.current.runtimeAuthStep).toBe('workspace')
+  })
+
+  it('prompts saved passwordless account sessions before workspace access', async () => {
+    sessionStorage.setItem('aidm:authToken', 'legacy-account-token')
+    sessionStorage.setItem('aidm:workspaceToken', 'owner-token')
+    localStorage.setItem('aidm:workspaceId', 'owner')
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            account_id: 5,
+            username: 'aidan',
+            first_name: 'Aidan',
+            last_name: 'Fernandez',
+            display_name: 'Aidan Fernandez',
+            workspace_id: 'owner',
+            workspace_role: 'player',
+            is_workspace_admin: false,
+            requires_password_setup: true,
+            workspaces: [
+              {
+                workspace_id: 'owner',
+                workspace_role: 'player',
+                is_workspace_admin: false,
+                created_at: null,
+                updated_at: null,
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    )
+
+    const { result } = renderHook(() =>
+      useRuntimeSettings({
+        defaultBaseUrl: '',
+        resetRuntimeState: vi.fn(),
+        reconnectSocket: vi.fn(),
+      }),
+    )
+
+    await waitFor(() => expect(result.current.legacyPasswordSetupRequired).toBe(true))
+
+    expect(result.current.runtimeSettingsOpen).toBe(true)
+    expect(result.current.runtimeSettingsMode).toBe('auth')
+    expect(result.current.runtimeAuthIntent).toBe('login')
+    expect(result.current.runtimeAuthStep).toBe('account')
+    expect(result.current.runtimeSettingsError).toBe(LEGACY_PASSWORD_SETUP_MESSAGE)
+    expect(result.current.runtimeSettingsForm.username).toBe('aidan')
+    expect(result.current.runtimeAccount?.requiresPasswordSetup).toBe(true)
+    expect(result.current.workspaceToken).toBe('')
+    expect(result.current.workspaceId).toBe('')
+    expect(sessionStorage.getItem('aidm:workspaceToken')).toBeNull()
+    expect(localStorage.getItem('aidm:workspaceId')).toBeNull()
   })
 
   it('selects a saved account workspace without re-entering its token', async () => {

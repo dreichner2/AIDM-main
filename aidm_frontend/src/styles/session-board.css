@@ -128,6 +128,90 @@
   background: rgba(255, 107, 44, 0.1);
 }
 
+.roll-wait-banner {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 54px;
+  margin: 0 0 12px 48px;
+  padding: 9px 12px;
+  border: 1px solid rgba(255, 176, 103, 0.38);
+  border-radius: 6px;
+  color: var(--heading);
+  background:
+    linear-gradient(90deg, rgba(255, 176, 103, 0.12), rgba(255, 176, 103, 0.035)),
+    #101819;
+  box-shadow:
+    0 12px 24px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.roll-wait-banner.current-player {
+  border-color: rgba(255, 107, 37, 0.66);
+  background:
+    linear-gradient(90deg, rgba(255, 107, 37, 0.16), rgba(255, 176, 103, 0.045)),
+    #11191a;
+}
+
+.roll-wait-icon {
+  display: grid;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(255, 176, 103, 0.42);
+  border-radius: 50%;
+  color: #ffd2a4;
+  background: rgba(255, 176, 103, 0.1);
+}
+
+.roll-wait-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.roll-wait-copy strong,
+.roll-wait-copy span,
+.roll-wait-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roll-wait-copy strong {
+  color: var(--heading);
+  font-size: 0.86rem;
+  font-weight: 660;
+}
+
+.roll-wait-copy span {
+  color: #ffd2a4;
+  font-size: 0.76rem;
+  font-weight: 560;
+}
+
+.roll-wait-copy small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.roll-wait-meta {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 176, 103, 0.26);
+  border-radius: 999px;
+  color: #ffd2a4;
+  background: rgba(255, 176, 103, 0.08);
+  font-size: 0.68rem;
+  font-weight: 640;
+  white-space: nowrap;
+}
+
 .content-tabs {
   display: flex;
   align-items: end;

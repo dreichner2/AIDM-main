@@ -59,6 +59,7 @@ import {
   normalizeSpellbook,
   normalizeStats,
   normalizeXp,
+  pendingRollNoticeFromTimeline,
   pendingRollOptionsFromTimeline,
   stringValue,
   truncateText,
@@ -93,7 +94,7 @@ import { useComposerActions } from './useComposerActions'
 import { usePlayerProfileActions } from './usePlayerProfileActions'
 import { useSessionActions, type SessionActionDialogState } from './useSessionActions'
 import { useSessionSocket } from './useSessionSocket'
-import { useRuntimeSettings } from './useRuntimeSettings'
+import { LEGACY_PASSWORD_SETUP_MESSAGE, useRuntimeSettings } from './useRuntimeSettings'
 import { useTtsNarration } from './useTtsNarration'
 import { useWorldMapSegmentActions } from './useWorldMapSegmentActions'
 import { useWorkspaceQueries, type CampaignSessionMeta } from './useWorkspaceQueries'
@@ -421,12 +422,14 @@ function App() {
     runtimeAuthIntent,
     runtimeAuthStep,
     runtimeAccount,
+    legacyPasswordSetupRequired,
     runtimeSettingsError,
     runtimeSettingsForm,
     runtimeSettingsMode,
     runtimeSettingsOpen,
     setRuntimeAuthIntent,
     setRuntimeAuthStep,
+    setLegacyPasswordSetupRequired,
     setRuntimeSettingsError,
     setRuntimeSettingsForm,
     selectSavedWorkspace,
@@ -630,6 +633,10 @@ function App() {
     ) ?? null
   const activeSessionId = activeSession?.session_id ?? null
   const selectedPlayerDetailId = selectedPlayer?.player_id ?? null
+  const pendingRollNotice = useMemo(
+    () => pendingRollNoticeFromTimeline(timeline, players, selectedPlayerDetailId),
+    [players, selectedPlayerDetailId, timeline],
+  )
   const sceneMusicWorkspaceReady =
     health?.auth_required === false || Boolean(auth && runtimeAccount?.workspaceId && workspaceId)
   const showSceneMusicPlayer =
@@ -1727,8 +1734,10 @@ function App() {
     ? 'Enter the workspace token for the table you want to join.'
     : runtimeSettingsIsAccountStep
       ? runtimeAuthIntent === 'signup'
-        ? 'Create your player account first. Password is optional for now.'
-        : 'Log in with your username. Use your password if one is set.'
+        ? 'Create your player account first. Password is required.'
+        : legacyPasswordSetupRequired
+          ? LEGACY_PASSWORD_SETUP_MESSAGE
+          : 'Log in with your username. Use your password if one is set.'
       : 'Leave Backend URL blank when the frontend and backend share one origin.'
 
   useEffect(() => {
@@ -2662,6 +2671,7 @@ function App() {
         latestDmText={latestDmText}
         sendPending={sendPending}
         streamingTurnActive={dmResponseBlocking}
+        pendingRollNotice={pendingRollNotice}
         dmExecutionStats={dmExecutionStats}
         welcomeText={welcomeText}
         showJumpToLatest={showJumpToLatest}
@@ -2885,6 +2895,7 @@ function App() {
                       aria-pressed={runtimeAuthIntent === 'login'}
                       onClick={() => {
                         setRuntimeAuthIntent('login')
+                        setLegacyPasswordSetupRequired(false)
                         setRuntimeSettingsError('')
                       }}
                     >
@@ -2895,6 +2906,7 @@ function App() {
                       aria-pressed={runtimeAuthIntent === 'signup'}
                       onClick={() => {
                         setRuntimeAuthIntent('signup')
+                        setLegacyPasswordSetupRequired(false)
                         setRuntimeSettingsError('')
                       }}
                     >
@@ -2908,18 +2920,22 @@ function App() {
                         autoFocus
                         data-autofocus
                         value={runtimeSettingsForm.username}
-                        onChange={(event) =>
+                        onChange={(event) => {
                           setRuntimeSettingsForm((current) => ({
                             ...current,
                             username: event.target.value,
                           }))
-                        }
-                        placeholder="danny"
+                          if (legacyPasswordSetupRequired) {
+                            setLegacyPasswordSetupRequired(false)
+                            setRuntimeSettingsError('')
+                          }
+                        }}
+                        placeholder="Username"
                         autoComplete="username"
                       />
                     </label>
                     <label>
-                      Password
+                      {legacyPasswordSetupRequired ? 'New Password' : 'Password'}
                       <input
                         value={runtimeSettingsForm.password}
                         onChange={(event) =>
@@ -2928,9 +2944,9 @@ function App() {
                             password: event.target.value,
                           }))
                         }
-                        placeholder="Optional for now"
+                        placeholder="Password"
                         type="password"
-                        autoComplete={runtimeAuthIntent === 'signup' ? 'new-password' : 'current-password'}
+                        autoComplete={runtimeAuthIntent === 'signup' || legacyPasswordSetupRequired ? 'new-password' : 'current-password'}
                       />
                     </label>
                   </div>

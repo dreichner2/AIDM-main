@@ -16,7 +16,7 @@ from aidm_server.combat.state import (
     player_combat_participant,
 )
 from aidm_server.creatures.repository import record_combat_debug_event
-from aidm_server.creatures.resolver import default_request_from_session, resolve_creature_for_encounter
+from aidm_server.creatures.resolver import default_request_from_session, resolve_creatures_for_encounter
 from aidm_server.database import db
 from aidm_server.game_state.models import display_actor_id, stable_change_id, stable_slug
 from aidm_server.models import Campaign, CombatEncounter, DmTurn, Session, safe_json_dumps
@@ -30,7 +30,7 @@ COMBAT_TRIGGER_PATTERN = re.compile(
 DIRECT_HOSTILE_ACTION_PATTERN = re.compile(
     r'\b(?:i|we|[A-Z][A-Za-z0-9\'-]{1,40})\s+'
     r'(?:attack|attacks|stab|stabs|strike|strikes|shoot|shoots|slash|slashes|swing|swings|'
-    r'cast|casts|charge|charges|punch|punches|kick|kicks|smite|smites|kill|kills)\b|'
+    r'punch|punches|kick|kicks|smite|smites|kill|kills)\b|'
     r'\b(?:roll initiative|initiative)\b',
     re.IGNORECASE,
 )
@@ -69,7 +69,7 @@ def _should_start_combat(state: dict[str, Any], player_message: str) -> bool:
     scene = state.get('currentScene') if isinstance(state.get('currentScene'), dict) else {}
     combat_state = str(scene.get('combatState') or '').lower()
     if combat_state in {'pending', 'active'}:
-        return True
+        return bool(DIRECT_HOSTILE_ACTION_PATTERN.search(player_message or ''))
     if combat_state in {'resolved', 'ended'}:
         return bool(DIRECT_HOSTILE_ACTION_PATTERN.search(player_message or ''))
     return bool(DIRECT_HOSTILE_ACTION_PATTERN.search(player_message or ''))
@@ -145,6 +145,57 @@ def _player_participants(state: dict[str, Any]) -> list[dict[str, Any]]:
         participant['position'] = existing_positions.get(participant['id']) or _scene_position_for_actor(state, actor)
         participants.append(participant)
     return participants
+
+
+def _instantiate_enemy_groups(
+    encounter_resolution: dict[str, Any],
+    *,
+    turn_id: int,
+    position: dict[str, Any],
+) -> list[dict[str, Any]]:
+    enemies: list[dict[str, Any]] = []
+    sequence = 1
+    for group in encounter_resolution.get('groups') or []:
+        if not isinstance(group, dict) or not isinstance(group.get('creature'), dict):
+            continue
+        creature = group['creature']
+        count = max(1, int(group.get('count') or 1))
+        for group_index in range(count):
+            instance_position = dict(position)
+            if group_index > 0 and not instance_position.get('rangeBand'):
+                instance_position['rangeBand'] = 'near'
+            enemies.append(
+                instantiate_creature(
+                    creature,
+                    instance_id=f"enemy_{stable_slug(creature.get('name'))}_{turn_id}_{sequence}",
+                    team='enemy',
+                    position=instance_position,
+                    current_turn=turn_id,
+                )
+            )
+            sequence += 1
+    return enemies
+
+
+def _encounter_flag_summary(encounter_resolution: dict[str, Any]) -> dict[str, Any]:
+    groups = [
+        {
+            'label': group.get('label'),
+            'count': group.get('count'),
+            'creatureId': (group.get('creature') or {}).get('id') if isinstance(group.get('creature'), dict) else None,
+            'name': (group.get('creature') or {}).get('name') if isinstance(group.get('creature'), dict) else None,
+            'source': group.get('source'),
+            'resolutionMethod': group.get('resolutionMethod'),
+        }
+        for group in (encounter_resolution.get('groups') or [])
+        if isinstance(group, dict)
+    ]
+    return {
+        'resolverMethod': encounter_resolution.get('resolutionMethod'),
+        'creatureSource': ', '.join(encounter_resolution.get('sources') or []),
+        'enemyCount': encounter_resolution.get('totalEnemies'),
+        'enemyGroups': groups,
+    }
 
 
 def _ensure_encounter_record(
@@ -276,9 +327,7 @@ def prepare_combat_for_turn(
         state=working_state,
         player_message=player_message,
     )
-    resolution = resolve_creature_for_encounter(request, workspace_id=workspace_id)
-    creature = resolution['creature']
-    enemy_instance_id = f"enemy_{stable_slug(creature.get('name'))}_{turn.turn_id}"
+    encounter_resolution = resolve_creatures_for_encounter(request, workspace_id=workspace_id)
     actor_record = next(
         (
             actor
@@ -288,33 +337,20 @@ def prepare_combat_for_turn(
         {},
     )
     enemy_position = _scene_position_for_actor(working_state, actor_record) if actor_record else {'rangeBand': 'near'}
-    enemy = instantiate_creature(
-        creature,
-        instance_id=enemy_instance_id,
-        team='enemy',
-        position=enemy_position,
-        current_turn=turn.turn_id,
-    )
-    participants = [*_player_participants(working_state), enemy]
+    enemies = _instantiate_enemy_groups(encounter_resolution, turn_id=turn.turn_id, position=enemy_position)
+    participants = [*_player_participants(working_state), *enemies]
     scene = working_state.get('currentScene') if isinstance(working_state.get('currentScene'), dict) else {}
+    encounter_flags = _encounter_flag_summary(encounter_resolution)
     combat_payload = {
         'status': 'active',
         'round': 1,
         'turnIndex': 0,
         'participants': participants,
         'battlefield': default_battlefield(scene),
-        'encounterGoal': {
-            'type': 'kill_all_enemies' if request.get('encounterPurpose') in {'ambush', 'random_encounter'} else 'custom',
-            'description': resolution['notes'][0] if resolution.get('notes') else 'Survive and resolve the immediate threat.',
-            'enemyObjective': (creature.get('behavior') or {}).get('primaryGoal'),
-            'playerObjective': 'Survive, protect allies, and resolve the threat.',
-            'successConditions': ['Enemies are defeated, flee, surrender, negotiate, or their objective is stopped.'],
-            'failureConditions': ['Enemies achieve their objective or incapacitate the party.'],
-        },
+        'encounterGoal': encounter_resolution.get('encounterGoal'),
         'initiative': [],
         'flags': {
-            'resolverMethod': resolution.get('resolutionMethod'),
-            'creatureSource': resolution.get('source'),
+            **encounter_flags,
             'activeActorId': active_actor_id,
             'combatStartedBy': 'player_hostile_action',
             'initiativeRequired': True,
@@ -326,7 +362,7 @@ def prepare_combat_for_turn(
     encounter = _ensure_encounter_record(session_obj=session_obj, campaign=campaign, combat=combat_payload)
     debug.update(
         {
-            'resolver': resolution,
+            'resolver': encounter_resolution,
             'intentPlan': intent_plan,
             'combatSummary': combat_summary_for_dm(combat_payload),
             'combatEncounterId': encounter.combat_encounter_id,
@@ -334,11 +370,11 @@ def prepare_combat_for_turn(
     )
     changes = [
         {
-            'id': stable_change_id(turn.turn_id, 'combat.start', enemy_instance_id),
+            'id': stable_change_id(turn.turn_id, 'combat.start', encounter_flags.get('enemyCount'), encounter_flags.get('resolverMethod')),
             'turnId': turn.turn_id,
             'type': 'combat.start',
             'combat': combat_payload,
-            'reason': f"Combat started with {creature.get('name')}.",
+            'reason': f"Combat started with {encounter_flags.get('enemyCount') or len(enemies)} enemy participant(s).",
             'visible': False,
         }
     ]
@@ -379,9 +415,7 @@ def prepare_combat_from_dm_response(
         state=working_state,
         player_message=f"{player_message}\n\nDM response: {dm_response}",
     )
-    resolution = resolve_creature_for_encounter(request, workspace_id=workspace_id)
-    creature = resolution['creature']
-    enemy_instance_id = f"enemy_{stable_slug(creature.get('name'))}_{turn.turn_id}"
+    encounter_resolution = resolve_creatures_for_encounter(request, workspace_id=workspace_id)
     actor_record = next(
         (
             actor
@@ -391,33 +425,20 @@ def prepare_combat_from_dm_response(
         {},
     )
     enemy_position = _scene_position_for_actor(working_state, actor_record) if actor_record else {'rangeBand': 'near'}
-    enemy = instantiate_creature(
-        creature,
-        instance_id=enemy_instance_id,
-        team='enemy',
-        position=enemy_position,
-        current_turn=turn.turn_id,
-    )
-    participants = [*_player_participants(working_state), enemy]
+    enemies = _instantiate_enemy_groups(encounter_resolution, turn_id=turn.turn_id, position=enemy_position)
+    participants = [*_player_participants(working_state), *enemies]
     scene = working_state.get('currentScene') if isinstance(working_state.get('currentScene'), dict) else {}
+    encounter_flags = _encounter_flag_summary(encounter_resolution)
     combat_payload = {
         'status': 'active',
         'round': 1,
         'turnIndex': 0,
         'participants': participants,
         'battlefield': default_battlefield(scene),
-        'encounterGoal': {
-            'type': 'custom',
-            'description': 'Resolve the immediate hostile action described by the DM.',
-            'enemyObjective': (creature.get('behavior') or {}).get('primaryGoal'),
-            'playerObjective': 'Survive, protect allies, and resolve the threat.',
-            'successConditions': ['Enemies are defeated, flee, surrender, negotiate, or their objective is stopped.'],
-            'failureConditions': ['Enemies achieve their objective or incapacitate the party.'],
-        },
+        'encounterGoal': encounter_resolution.get('encounterGoal'),
         'initiative': [],
         'flags': {
-            'resolverMethod': resolution.get('resolutionMethod'),
-            'creatureSource': resolution.get('source'),
+            **encounter_flags,
             'activeActorId': active_actor_id,
             'combatStartedBy': 'post_dm_adjudicator',
             'initiativeRequired': bool(re.search(r'\binitiative\b', dm_response or '', re.IGNORECASE)),
@@ -429,7 +450,7 @@ def prepare_combat_from_dm_response(
     encounter = _ensure_encounter_record(session_obj=session_obj, campaign=campaign, combat=combat_payload)
     debug.update(
         {
-            'resolver': resolution,
+            'resolver': encounter_resolution,
             'intentPlan': intent_plan,
             'combatSummary': combat_summary_for_dm(combat_payload),
             'combatEncounterId': encounter.combat_encounter_id,
@@ -437,11 +458,11 @@ def prepare_combat_from_dm_response(
     )
     changes = [
         {
-            'id': stable_change_id(turn.turn_id, 'combat.start.post_dm', enemy_instance_id),
+            'id': stable_change_id(turn.turn_id, 'combat.start.post_dm', encounter_flags.get('enemyCount'), encounter_flags.get('resolverMethod')),
             'turnId': turn.turn_id,
             'type': 'combat.start',
             'combat': combat_payload,
-            'reason': f"Combat started from DM response with {creature.get('name')}.",
+            'reason': f"Combat started from DM response with {encounter_flags.get('enemyCount') or len(enemies)} enemy participant(s).",
             'visible': False,
         }
     ]
@@ -465,4 +486,78 @@ def record_combat_debug_from_prepare(
         combat_encounter_id=debug.get('combatEncounterId'),
         event_type='pre_dm_combat_plan',
         payload=debug,
+    )
+
+
+def _combat_change_debug(change: dict[str, Any]) -> dict[str, Any]:
+    summary = {
+        'id': change.get('id'),
+        'type': change.get('type'),
+        'participantId': change.get('participantId') or change.get('enemyId'),
+        'participantName': change.get('participantName') or change.get('name'),
+        'combatStatus': change.get('combatStatus') or change.get('status'),
+        'reason': change.get('reason'),
+    }
+    for key in ('hp', 'conditions', 'isAlive', 'isConscious', 'condition', 'toRangeBand', 'round'):
+        if key in change:
+            summary[key] = change.get(key)
+    return {key: value for key, value in summary.items() if value not in (None, '', [], {})}
+
+
+def _validation_combat_rejections(validation: dict[str, Any]) -> list[dict[str, Any]]:
+    rejected = []
+    for item in validation.get('rejected') or []:
+        if not isinstance(item, dict):
+            continue
+        change = item.get('change') if isinstance(item.get('change'), dict) else {}
+        if not str(change.get('type') or '').startswith('combat.'):
+            continue
+        rejected.append(
+            {
+                'change': _combat_change_debug(change),
+                'reason': item.get('reason'),
+            }
+        )
+    return rejected
+
+
+def record_combat_debug_from_outcome(
+    *,
+    session_obj: Session,
+    campaign: Campaign,
+    turn: DmTurn,
+    prepare_result: dict[str, Any],
+    post_validation: dict[str, Any],
+    applied_changes: list[dict[str, Any]],
+    state_log: dict[str, Any],
+) -> None:
+    debug = prepare_result.get('debug') if isinstance(prepare_result.get('debug'), dict) else {}
+    applied_combat = [
+        _combat_change_debug(change)
+        for change in applied_changes
+        if isinstance(change, dict) and str(change.get('type') or '').startswith('combat.')
+    ]
+    rejected_combat = _validation_combat_rejections(post_validation)
+    if not debug.get('triggered') and not debug.get('intentPlan') and not applied_combat and not rejected_combat:
+        return
+    payload = {
+        'phase': 'post_dm_outcome',
+        'adjudicationSource': debug.get('adjudicationSource') or 'post_dm_pipeline',
+        'combatDebug': debug,
+        'appliedCombatChanges': applied_combat,
+        'rejectedCombatChanges': rejected_combat,
+        'validationCounts': {
+            'accepted': len(post_validation.get('accepted') or []),
+            'modified': len(post_validation.get('modified') or []),
+            'rejected': len(post_validation.get('rejected') or []),
+        },
+        'stateLog': state_log,
+    }
+    record_combat_debug_event(
+        session_id=session_obj.session_id,
+        campaign_id=campaign.campaign_id,
+        turn_id=turn.turn_id,
+        combat_encounter_id=debug.get('combatEncounterId'),
+        event_type='post_dm_combat_outcome',
+        payload=payload,
     )

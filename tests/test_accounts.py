@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import importlib
 
+from aidm_server.auth import generate_account_token, hash_secret, normalize_username
 from aidm_server.database import db
-from aidm_server.models import AccountWorkspaceMembership, Campaign, Player, World
+from aidm_server.models import Account, AccountWorkspaceMembership, Campaign, Player, World
 
 
 def _build_account_runtime(tmp_path, monkeypatch):
@@ -36,6 +37,7 @@ def _login(
     last_name: str,
     workspace_token: str | None = None,
     password: str = '',
+    intent: str | None = None,
 ):
     payload = {
         'username': username,
@@ -45,10 +47,27 @@ def _login(
     }
     if workspace_token is not None:
         payload['workspace_token'] = workspace_token
+    if intent is not None:
+        payload['intent'] = intent
     return client.post(
         '/api/accounts/login',
         json=payload,
     )
+
+
+def _create_legacy_passwordless_account(app, *, username: str, first_name: str, last_name: str) -> str:
+    token = generate_account_token()
+    with app.app_context():
+        account = Account(
+            username=normalize_username(username),
+            first_name=first_name,
+            last_name=last_name,
+            password_hash=None,
+            account_token_hash=hash_secret(token),
+        )
+        db.session.add(account)
+        db.session.commit()
+    return token
 
 
 def test_account_login_issues_session_token_and_uses_password_plus_workspace_token(tmp_path, monkeypatch):
@@ -141,17 +160,77 @@ def test_account_login_issues_session_token_and_uses_password_plus_workspace_tok
     assert missing_workspace.status_code == 403
 
 
-def test_account_login_replaces_stale_bearer_token_for_passwordless_account(tmp_path, monkeypatch):
+def test_login_and_signup_intents_return_specific_username_errors(tmp_path, monkeypatch):
     app = _build_account_runtime(tmp_path, monkeypatch)
     client = app.test_client()
 
-    login = _login(
+    missing_login = _login(
+        client,
+        username='Missing',
+        first_name='',
+        last_name='',
+        password='secret',
+        intent='login',
+    )
+    assert missing_login.status_code == 404
+    assert missing_login.get_json()['error_code'] == 'username_not_found'
+    assert missing_login.get_json()['error'] == 'Username not found. Please sign up.'
+
+    blank_password_signup = _login(
         client,
         username='Danny',
         first_name='Danny',
         last_name='Reichner',
+        password='',
+        intent='signup',
     )
-    assert login.status_code == 201
+    assert blank_password_signup.status_code == 400
+    assert blank_password_signup.get_json()['error_code'] == 'validation_error'
+    assert blank_password_signup.get_json()['error'] == 'Password is required.'
+
+    signup = _login(
+        client,
+        username='Danny',
+        first_name='Danny',
+        last_name='Reichner',
+        password='secret',
+        intent='signup',
+    )
+    assert signup.status_code == 201
+
+    taken_signup = _login(
+        client,
+        username='Danny',
+        first_name='Daniel',
+        last_name='Reichner',
+        password='another-secret',
+        intent='signup',
+    )
+    assert taken_signup.status_code == 409
+    assert taken_signup.get_json()['error_code'] == 'username_taken'
+    assert taken_signup.get_json()['error'] == 'Username is already taken. Please sign in.'
+
+    existing_login = _login(
+        client,
+        username='Danny',
+        first_name='',
+        last_name='',
+        password='secret',
+        intent='login',
+    )
+    assert existing_login.status_code == 200
+
+
+def test_passwordless_account_requires_saved_session_or_explicit_password_setup(tmp_path, monkeypatch):
+    app = _build_account_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+
+    session_token = _create_legacy_passwordless_account(
+        app,
+        username='Danny',
+        first_name='Danny',
+        last_name='Reichner',
+    )
 
     stale_token = 'stale-account-token'
     stale_login = client.post(
@@ -164,11 +243,56 @@ def test_account_login_replaces_stale_bearer_token_for_passwordless_account(tmp_
             'password': '',
         },
     )
-    assert stale_login.status_code == 200
-    payload = stale_login.get_json()
-    replacement_token = payload['account_token']
+    assert stale_login.status_code == 401
+    assert stale_login.get_json()['error_code'] == 'legacy_password_setup_required'
+    assert stale_login.get_json()['error'] == 'Passwords are required now. Please set one now.'
+
+    saved_token_without_password = client.post(
+        '/api/accounts/login',
+        headers={'Authorization': f'Bearer {session_token}'},
+        json={
+            'username': 'Danny',
+            'first_name': 'Danny',
+            'last_name': 'Reichner',
+            'password': '',
+        },
+    )
+    assert saved_token_without_password.status_code == 401
+    assert saved_token_without_password.get_json()['error_code'] == 'legacy_password_setup_required'
+
+    saved_session_login = client.post(
+        '/api/accounts/login',
+        headers={'Authorization': f'Bearer {session_token}'},
+        json={
+            'username': 'Danny',
+            'first_name': 'Danny',
+            'last_name': 'Reichner',
+            'password': 'secret',
+        },
+    )
+    assert saved_session_login.status_code == 200
+    assert saved_session_login.get_json()['account_token'] == session_token
+
+    wrong_password_login = _login(
+        client,
+        username='Danny',
+        first_name='Danny',
+        last_name='Reichner',
+        password='wrong',
+    )
+    assert wrong_password_login.status_code == 401
+
+    password_login = _login(
+        client,
+        username='Danny',
+        first_name='Danny',
+        last_name='Reichner',
+        password='secret',
+    )
+    assert password_login.status_code == 200
+    replacement_token = password_login.get_json()['account_token']
     assert replacement_token
-    assert replacement_token != stale_token
+    assert replacement_token != session_token
 
     join_owner = client.post(
         '/api/accounts/workspace',
@@ -177,6 +301,100 @@ def test_account_login_replaces_stale_bearer_token_for_passwordless_account(tmp_
     )
     assert join_owner.status_code == 200
     assert join_owner.get_json()['workspace_id'] == 'owner'
+
+
+def test_passwordless_saved_account_cannot_join_workspace_or_use_api(tmp_path, monkeypatch):
+    app = _build_account_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+
+    session_token = _create_legacy_passwordless_account(
+        app,
+        username='Aidan',
+        first_name='Aidan',
+        last_name='Fernandez',
+    )
+    with app.app_context():
+        account = Account.query.filter_by(username='aidan').one()
+        db.session.add(AccountWorkspaceMembership(account_id=account.account_id, workspace_id='owner', role='player'))
+        db.session.commit()
+
+    account_headers = {
+        'Authorization': f'Bearer {session_token}',
+        'X-AIDM-Workspace-Id': 'owner',
+    }
+    account_snapshot = client.get('/api/accounts/me', headers=account_headers)
+    assert account_snapshot.status_code == 200
+    assert account_snapshot.get_json()['requires_password_setup'] is True
+
+    join_owner = client.post(
+        '/api/accounts/workspace',
+        headers={'Authorization': f'Bearer {session_token}'},
+        json={'workspace_token': 'owner-token'},
+    )
+    assert join_owner.status_code == 401
+    assert join_owner.get_json()['error_code'] == 'legacy_password_setup_required'
+
+    select_owner = client.post(
+        '/api/accounts/workspace/select',
+        headers={'Authorization': f'Bearer {session_token}'},
+        json={'workspace_id': 'owner'},
+    )
+    assert select_owner.status_code == 401
+    assert select_owner.get_json()['error_code'] == 'legacy_password_setup_required'
+
+    campaigns = client.get('/api/campaigns', headers=account_headers)
+    assert campaigns.status_code == 401
+    assert campaigns.get_json()['error_code'] == 'legacy_password_setup_required'
+
+
+def test_legacy_claim_sets_password_once_for_passwordless_account(tmp_path, monkeypatch):
+    app = _build_account_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+
+    _create_legacy_passwordless_account(
+        app,
+        username='Maya',
+        first_name='Maya',
+        last_name='Stone',
+    )
+
+    mismatch_claim = client.post(
+        '/api/accounts/login',
+        json={
+            'username': 'Maya',
+            'first_name': 'Mara',
+            'last_name': 'Stone',
+            'password': 'new-secret',
+            'legacy_claim': True,
+        },
+    )
+    assert mismatch_claim.status_code == 401
+
+    claim = client.post(
+        '/api/accounts/login',
+        json={
+            'username': 'Maya',
+            'password': 'new-secret',
+            'legacy_claim': True,
+        },
+    )
+    assert claim.status_code == 200
+    claim_token = claim.get_json()['account_token']
+    assert claim_token
+
+    with app.app_context():
+        account = Account.query.filter_by(username='maya').one()
+        assert account.password_hash
+
+    password_login = _login(
+        client,
+        username='Maya',
+        first_name='Maya',
+        last_name='Stone',
+        password='new-secret',
+    )
+    assert password_login.status_code == 200
+    assert password_login.get_json()['account_token'] != claim_token
 
 
 def test_account_character_visibility_and_legacy_claim(tmp_path, monkeypatch):
@@ -211,6 +429,7 @@ def test_account_character_visibility_and_legacy_claim(tmp_path, monkeypatch):
         first_name='Danny',
         last_name='Reichner',
         workspace_token='owner-token',
+        password='secret',
     )
     assert admin_login.status_code == 201
     admin_payload = admin_login.get_json()
@@ -234,6 +453,7 @@ def test_account_character_visibility_and_legacy_claim(tmp_path, monkeypatch):
         first_name='Maya',
         last_name='Stone',
         workspace_token='owner-token',
+        password='maya-secret',
     )
     assert normal_login.status_code == 201
     normal_payload = normal_login.get_json()

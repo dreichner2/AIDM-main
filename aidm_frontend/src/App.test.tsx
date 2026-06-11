@@ -1345,6 +1345,75 @@ describe('App user workflow regressions', () => {
     )
   })
 
+  it('shows a party-visible roll wait indicator with the remaining character and check', async () => {
+    playersByCampaign[10] = [
+      ...playersByCampaign[10],
+      {
+        player_id: 31,
+        workspace_id: 'owner',
+        account_id: null,
+        username: null,
+        campaign_id: 10,
+        name: 'Maya',
+        character_name: 'Borin',
+        race: 'Dwarf',
+        sex: 'male',
+        profile_image: '/profile-icons/dwarf_male.png',
+        class_: 'Fighter',
+        char_class: 'Fighter',
+        level: 2,
+        created_at: '2026-06-06T10:38:00.000Z',
+        updated_at: '2026-06-06T10:39:00.000Z',
+      },
+    ]
+    sessionLogs[20] = [
+      {
+        id: 1,
+        entry_type: 'player',
+        message: 'Ember: I shove the warehouse door open.',
+        metadata: { turn_id: 7, turn_number: 3, persistence_status: 'saved' },
+        timestamp: '2026-06-06T10:40:00.000Z',
+      },
+      {
+        id: 2,
+        entry_type: 'dm',
+        message: 'DM: The bandits draw steel. Everyone roll initiative.',
+        metadata: {
+          turn_id: 7,
+          turn_number: 3,
+          requires_roll: true,
+          outcome_status: 'deferred',
+          rule_type: 'initiative',
+          remaining_player_ids: [30, 31],
+          persistence_status: 'saved',
+        },
+        timestamp: '2026-06-06T10:41:00.000Z',
+      },
+      {
+        id: 3,
+        entry_type: 'system',
+        message: '**Check Resolved**: turn 7 resolved with roll 12.',
+        metadata: {
+          turn_id: 8,
+          turn_number: 4,
+          resolved_turn_id: 7,
+          roll_value: 12,
+          remaining_player_ids: [31],
+          persistence_status: 'saved',
+        },
+        timestamp: '2026-06-06T10:42:00.000Z',
+      },
+    ]
+
+    await renderLoadedApp()
+
+    const banner = screen.getByRole('status', { name: 'Pending roll' })
+    expect(within(banner).getByText('Waiting on Borin to roll')).toBeInTheDocument()
+    expect(within(banner).getByText('Turn 3: initiative')).toBeInTheDocument()
+    expect(within(banner).getByText('The bandits draw steel. Everyone roll initiative.')).toBeInTheDocument()
+    expect(within(banner).getByText('Roll needed')).toBeInTheDocument()
+  })
+
   it('rolls selected ability checks from the Roll selector', async () => {
     await renderLoadedApp()
 
@@ -1700,7 +1769,13 @@ describe('App user workflow regressions', () => {
           sceneType: 'social',
           mood: 'tense',
           dangerLevel: 2,
-          activeQuestIds: ['find_missing_sailor'],
+          activeQuestIds: [
+            'find_missing_sailor',
+            'question_captain_velra',
+            'search_north_docks',
+            'trace_lantern_bridge',
+            'chart_ash_gate',
+          ],
         },
         quests: [
           {
@@ -1708,6 +1783,30 @@ describe('App user workflow regressions', () => {
             title: 'Find the Missing Sailor',
             status: 'active',
             stage: 'Investigate the docks',
+          },
+          {
+            id: 'question_captain_velra',
+            title: 'Question Captain Velra',
+            status: 'active',
+            stage: 'Ask about the missing crew',
+          },
+          {
+            id: 'search_north_docks',
+            title: 'Search North Docks',
+            status: 'active',
+            stage: 'Check the moorings',
+          },
+          {
+            id: 'trace_lantern_bridge',
+            title: 'Trace Lantern Bridge',
+            status: 'active',
+            stage: 'Follow the lantern ash',
+          },
+          {
+            id: 'chart_ash_gate',
+            title: 'Chart the Ash Gate',
+            status: 'active',
+            stage: 'Map the sealed entrance',
           },
         ],
         locations: [
@@ -1820,6 +1919,7 @@ describe('App user workflow regressions', () => {
       expect(screen.getAllByText('Blackwake Tavern').length).toBeGreaterThan(0)
     })
     expect(screen.getByText('Find the Missing Sailor')).toBeInTheDocument()
+    expect(screen.getByText('Chart the Ash Gate')).toBeInTheDocument()
     expect(screen.getByText('Captain Velra (Human)')).toBeInTheDocument()
     expect(screen.queryByText('Old Hermit (Gnome)')).not.toBeInTheDocument()
     expect(screen.queryByText('Old Lighthouse')).not.toBeInTheDocument()
@@ -2024,6 +2124,7 @@ describe('App user workflow regressions', () => {
     fireEvent.change(usernameInput, { target: { value: 'Danny' } })
     fireEvent.change(within(dialog).getByLabelText('First Name'), { target: { value: 'Danny' } })
     fireEvent.change(within(dialog).getByLabelText('Last Name'), { target: { value: 'Reichner' } })
+    fireEvent.change(within(dialog).getByLabelText('Password'), { target: { value: 'secret' } })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }))
 
     dialog = await screen.findByRole('dialog', { name: 'Join Workspace' })

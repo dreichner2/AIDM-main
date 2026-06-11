@@ -230,6 +230,7 @@ API_TYPE_CONTRACTS: tuple[TypeContract, ...] = (
             field('workspace_id', 'string | null'),
             field('workspace_role', 'string | null'),
             field('is_workspace_admin', 'boolean'),
+            field('requires_password_setup', 'boolean'),
             field('workspaces', 'AccountWorkspace[]'),
         ),
     ),

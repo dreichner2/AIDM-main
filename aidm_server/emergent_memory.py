@@ -35,6 +35,7 @@ from aidm_server.database import db
 from aidm_server.models import (
     Campaign,
     DmTurn,
+    Player,
     StoryEntity,
     StoryFact,
     StoryThread,
@@ -80,6 +81,7 @@ _EMPTY_PATCH = {
 _ALLOWED_FACT_CHANGE_TYPES = {'reveal', 'retcon', 'misconception', 'correction'}
 _GLOBAL_SINGLETON_FACTS = {'current_location', 'current_quest'}
 _SUBJECT_SINGLETON_FACTS = {'status', 'role', 'current_holder'}
+_PLAYER_ENTITY_TYPES = {'entity', 'npc', 'character', 'person', 'player', 'player_character', 'party_member', 'ally'}
 
 
 def _empty_patch() -> dict:
@@ -125,6 +127,51 @@ def _normalize_patch(raw_patch: dict | None) -> dict:
     projection = raw_patch.get('projection', {})
     patch['projection'] = projection if isinstance(projection, dict) else {}
     return patch
+
+
+def _projection_fact_payloads(projection: dict, existing_predicates: set[str]) -> list[dict]:
+    location = str(projection.get('current_location') or '').strip()
+    if not location or 'current_location' in existing_predicates:
+        return []
+    return [
+        {
+            'predicate': 'current_location',
+            'value_text': location,
+            'confidence': 1.0,
+            'replace_existing': True,
+            'change_type': 'correction',
+        }
+    ]
+
+
+def _campaign_player_labels(campaign_id: int) -> set[str]:
+    labels: set[str] = set()
+    for player in Player.query.filter_by(campaign_id=campaign_id).all():
+        for value in (player.character_name, player.name):
+            label = _normalized_name(value)
+            if label:
+                labels.add(label)
+    return labels
+
+
+def _player_ref_labels(payload: Any) -> set[str]:
+    if isinstance(payload, dict):
+        values = [
+            payload.get('name'),
+            payload.get('canonical_name'),
+            payload.get('character_name'),
+            payload.get('characterName'),
+        ]
+        values.extend(payload.get('aliases') or [])
+    else:
+        values = [payload]
+    return {_normalized_name(value) for value in values if _normalized_name(value)}
+
+
+def _is_player_entity_payload(entity_type: str, payload: Any, player_labels: set[str]) -> bool:
+    if not player_labels or str(entity_type or 'entity').strip().lower() not in _PLAYER_ENTITY_TYPES:
+        return False
+    return bool(_player_ref_labels(payload).intersection(player_labels))
 
 
 def _candidate_labels(entity: StoryEntity) -> set[str]:
@@ -607,7 +654,17 @@ def _existing_fact_subject_key(fact: StoryFact) -> str | None:
 def validate_canon_patch(turn: DmTurn, campaign: Campaign, patch: dict) -> tuple[dict, list[dict]]:
     patch = _normalize_patch(patch)
     rejections: list[dict] = []
+    incoming_fact_predicates = {
+        str(fact_payload.get('predicate') or '').strip()
+        for fact_payload in patch['facts']
+        if str(fact_payload.get('predicate') or '').strip()
+    }
+    patch['facts'] = [
+        *patch['facts'],
+        *_projection_fact_payloads(patch.get('projection', {}), incoming_fact_predicates),
+    ]
 
+    player_labels = _campaign_player_labels(campaign.campaign_id)
     deduped_entities: list[dict] = []
     seen_entities: set[tuple[str, str]] = set()
     for entity_payload in patch['entities']:
@@ -615,13 +672,22 @@ def validate_canon_patch(turn: DmTurn, campaign: Campaign, patch: dict) -> tuple
         if not name:
             continue
         entity_type = str(entity_payload.get('entity_type') or 'entity').strip().lower()
+        normalized_payload = dict(entity_payload)
+        normalized_payload['name'] = name
+        normalized_payload['entity_type'] = entity_type
+        if _is_player_entity_payload(entity_type, normalized_payload, player_labels):
+            rejections.append(
+                {
+                    'type': 'entity',
+                    'reason': 'Player character is tracked by player state, not story NPC canon.',
+                    'entity': normalized_payload,
+                }
+            )
+            continue
         dedupe_key = (entity_type, _normalized_name(name))
         if dedupe_key in seen_entities:
             continue
         seen_entities.add(dedupe_key)
-        normalized_payload = dict(entity_payload)
-        normalized_payload['name'] = name
-        normalized_payload['entity_type'] = entity_type
         deduped_entities.append(normalized_payload)
     patch['entities'] = deduped_entities
 
@@ -837,11 +903,16 @@ def apply_canon_patch(
         'threads_created_or_updated': [],
         'inventory_changes_applied': [],
         'character_state_changes_applied': [],
+        'projection': patch.get('projection', {}),
         'rejections': rejections,
     }
     lookup_index = _EntityLookupIndex(campaign.campaign_id)
+    player_labels = _campaign_player_labels(campaign.campaign_id)
 
     for entity_payload in patch['entities']:
+        entity_type = str(entity_payload.get('entity_type') or 'entity').strip().lower()
+        if _is_player_entity_payload(entity_type, entity_payload, player_labels):
+            continue
         entity = _get_or_create_entity(
             campaign_id=campaign.campaign_id,
             session_id=turn.session_id,
@@ -870,14 +941,14 @@ def apply_canon_patch(
             turn.turn_id,
             fact_payload.get('subject'),
             lookup_index=lookup_index,
-        )
+        ) if not _is_player_entity_payload('entity', fact_payload.get('subject'), player_labels) else None
         object_entity = _resolve_entity_ref(
             campaign.campaign_id,
             turn.session_id,
             turn.turn_id,
             fact_payload.get('object'),
             lookup_index=lookup_index,
-        )
+        ) if not _is_player_entity_payload('entity', fact_payload.get('object'), player_labels) else None
 
         superseded_fact = None
         if fact_payload.get('replace_existing'):

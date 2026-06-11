@@ -134,6 +134,7 @@ export type CombatStatePanel = {
   tacticalLevel: string
   endReason: string
   combatStartedBy: string
+  enemyGroupSummary: string
   initiativeRequired: boolean
   debugEnabled: boolean
   enemies: CombatParticipantSummary[]
@@ -156,6 +157,18 @@ export type PendingRollOption = {
   turnId: number
   label: string
   detail: string
+}
+
+export type PendingRollNotice = {
+  turnId: number
+  waitingOnLabel: string
+  waitingPlayerIds: number[]
+  waitingPlayerNames: string[]
+  turnLabel: string
+  ruleLabel: string
+  detail: string
+  pendingCount: number
+  isWaitingOnSelectedPlayer: boolean
 }
 
 export function isRecord(value: unknown): value is JsonRecord {
@@ -304,6 +317,7 @@ function combatStateFromSnapshot(snapshot: JsonRecord): CombatStatePanel {
   const encounterGoal = isRecord(combat.encounterGoal) ? combat.encounterGoal : {}
   const flags = isRecord(combat.flags) ? combat.flags : {}
   const difficultyAI = isRecord(flags.combatDifficultyAI) ? flags.combatDifficultyAI : {}
+  const enemyGroups = recordArray(flags.enemyGroups)
   const participants = recordArray(combat.participants).map(combatParticipantSummary)
   const enemies = participants.filter((participant) => participant.team === 'enemy')
   const allies = participants.filter((participant) => participant.team !== 'enemy')
@@ -325,6 +339,15 @@ function combatStateFromSnapshot(snapshot: JsonRecord): CombatStatePanel {
     tacticalLevel: stringValue(difficultyAI.tacticalLevel, 'normal'),
     endReason: stringValue(flags.endReason).replace(/_/g, ' '),
     combatStartedBy: stringValue(flags.combatStartedBy).replace(/_/g, ' '),
+    enemyGroupSummary: enemyGroups
+      .map((group) => {
+        const count = stringValue(group.count)
+        const name = stringValue(group.name || group.label, 'enemy')
+        return [count, name].filter(Boolean).join(' x ')
+      })
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(', '),
     initiativeRequired: Boolean(flags.initiativeRequired),
     debugEnabled: Boolean(flags.debugCombat || flags.showDebug || flags.debug),
     enemies,
@@ -945,7 +968,6 @@ export function worldStateFromSnapshot(snapshot: unknown): WorldStatePanel {
       const status = stringValue(quest.status).toLowerCase()
       return activeQuestIds.has(id) || status === 'active' || status === 'available'
     })
-    .slice(0, 4)
     .map((quest) => ({
       id: stringValue(quest.id),
       title: stringValue(quest.title, 'Untitled quest'),
@@ -1161,36 +1183,147 @@ export function buildTimeline({
   return entries
 }
 
-export function pendingRollOptionsFromTimeline(timeline: TimelineEntry[]): PendingRollOption[] {
-  const resolvedTurnIds = new Set<number>()
+type RollResolutionState = {
+  resolved: boolean
+  remainingPlayerIds: number[] | null
+}
+
+type PendingRollTimelineEntry = {
+  turnId: number
+  label: string
+  detail: string
+  ruleLabel: string
+  waitingPlayerIds: number[]
+}
+
+function uniquePositiveIntegers(values: number[]) {
+  return [...new Set(values.filter((value) => Number.isInteger(value) && value > 0))]
+}
+
+function numberArrayValue(value: unknown): number[] | null {
+  if (!Array.isArray(value)) return null
+  return uniquePositiveIntegers(
+    value
+      .map((item) => numberValue(item))
+      .filter((item): item is number => item !== null),
+  )
+}
+
+function metadataRollGate(metadata: JsonRecord) {
+  return isRecord(metadata.roll_gate) ? metadata.roll_gate : {}
+}
+
+function metadataNumberArray(metadata: JsonRecord, key: string): number[] | null {
+  const direct = numberArrayValue(metadata[key])
+  if (direct !== null) return direct
+  const rollGate = metadataRollGate(metadata)
+  return numberArrayValue(rollGate[key])
+}
+
+function pendingRollResolutionState(timeline: TimelineEntry[]) {
+  const state = new Map<number, RollResolutionState>()
   timeline.forEach((entry) => {
     const resolvedTurnId = numberValue(entry.metadata.resolved_turn_id)
     if (resolvedTurnId !== null && Number.isInteger(resolvedTurnId)) {
-      resolvedTurnIds.add(resolvedTurnId)
+      const remainingPlayerIds = metadataNumberArray(entry.metadata, 'remaining_player_ids')
+      state.set(resolvedTurnId, {
+        resolved: remainingPlayerIds !== null ? remainingPlayerIds.length === 0 : true,
+        remainingPlayerIds,
+      })
     }
   })
+  return state
+}
 
+function metadataPendingRoll(entry: TimelineEntry) {
+  if (!entry.metadata.requires_roll) return false
+  const outcomeStatus = stringValue(entry.metadata.outcome_status).toLowerCase()
+  const outcomeDeferred = entry.metadata.outcome_deferred
+  return outcomeStatus === 'deferred' || outcomeDeferred === true || stringValue(outcomeDeferred).toLowerCase() === 'true'
+}
+
+function pendingPlayerIds(entry: TimelineEntry, resolutionState?: RollResolutionState) {
+  if (resolutionState?.remainingPlayerIds !== null && resolutionState?.remainingPlayerIds !== undefined) {
+    return resolutionState.remainingPlayerIds
+  }
+  const remainingPlayerIds = metadataNumberArray(entry.metadata, 'remaining_player_ids')
+  if (remainingPlayerIds !== null) return remainingPlayerIds
+  const requiredPlayerIds = metadataNumberArray(entry.metadata, 'required_player_ids')
+  if (requiredPlayerIds !== null) return requiredPlayerIds
+  const fallbackPlayerId = numberValue(entry.metadata.pending_player_id ?? entry.metadata.player_id)
+  return fallbackPlayerId !== null ? [fallbackPlayerId] : []
+}
+
+function pendingRollTimelineEntries(timeline: TimelineEntry[]): PendingRollTimelineEntry[] {
+  const resolutionStates = pendingRollResolutionState(timeline)
   return timeline
     .filter((entry) => {
       const turnId = metadataTurnId(entry.metadata)
+      const resolutionState = turnId !== null ? resolutionStates.get(turnId) : undefined
       return (
         turnId !== null &&
-        !resolvedTurnIds.has(turnId) &&
-        Boolean(entry.metadata.requires_roll) &&
-        stringValue(entry.metadata.outcome_status).toLowerCase() === 'deferred'
+        resolutionState?.resolved !== true &&
+        metadataPendingRoll(entry)
       )
     })
     .map((entry, index) => {
       const turnId = metadataTurnId(entry.metadata) as number
-      const ruleType = stringValue(entry.metadata.rule_type, 'check').replace(/_/g, ' ')
+      const resolutionState = resolutionStates.get(turnId)
+      const ruleType = stringValue(entry.metadata.rule_type ?? entry.metadata.roll_type, 'check').replace(/_/g, ' ')
       const detail = truncateText(entry.text || 'Pending check', 72)
       return {
         turnId,
         label: `Turn ${turnNumber(entry, index)}: ${ruleType}`,
         detail,
+        ruleLabel: ruleType,
+        waitingPlayerIds: pendingPlayerIds(entry, resolutionState),
       }
     })
     .reverse()
+}
+
+export function pendingRollOptionsFromTimeline(timeline: TimelineEntry[]): PendingRollOption[] {
+  return pendingRollTimelineEntries(timeline).map(({ turnId, label, detail }) => ({
+    turnId,
+    label,
+    detail,
+  }))
+}
+
+function playerDisplayName(player: Player) {
+  return player.character_name || player.name || `Player ${player.player_id}`
+}
+
+function formatWaitingNames(names: string[]) {
+  if (!names.length) return 'the acting character'
+  if (names.length === 1) return names[0]
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`
+}
+
+export function pendingRollNoticeFromTimeline(
+  timeline: TimelineEntry[],
+  players: Player[],
+  selectedPlayerId: number | null,
+): PendingRollNotice | null {
+  const pendingRolls = pendingRollTimelineEntries(timeline)
+  if (!pendingRolls.length) return null
+
+  const current = pendingRolls[0]
+  const playerNamesById = new Map(players.map((player) => [player.player_id, playerDisplayName(player)]))
+  const waitingPlayerIds = uniquePositiveIntegers(current.waitingPlayerIds)
+  const waitingPlayerNames = waitingPlayerIds.map((playerId) => playerNamesById.get(playerId) ?? `Player ${playerId}`)
+  return {
+    turnId: current.turnId,
+    waitingOnLabel: formatWaitingNames(waitingPlayerNames),
+    waitingPlayerIds,
+    waitingPlayerNames,
+    turnLabel: current.label.split(':')[0] || `Turn ${current.turnId}`,
+    ruleLabel: current.ruleLabel,
+    detail: current.detail,
+    pendingCount: pendingRolls.length,
+    isWaitingOnSelectedPlayer: selectedPlayerId !== null && waitingPlayerIds.includes(selectedPlayerId),
+  }
 }
 
 export function memorySnippetRecords(value: unknown): JsonRecord[] {

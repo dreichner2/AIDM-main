@@ -5,6 +5,7 @@ import json
 from aidm_server.contracts import ProviderResponse
 from aidm_server.database import db
 import aidm_server.game_state.extraction.post_dm_outcome_extractor as post_extractor_module
+import aidm_server.turn_events as turn_events_module
 import aidm_server.turn_control as turn_control_module
 from aidm_server.models import (
     Campaign,
@@ -180,6 +181,56 @@ def test_send_message_persists_turn_and_emits_metadata(app, socketio, app_runtim
         'projection_refresh',
     }:
         assert any(f'phase={phase}' in key for key in phase_keys)
+
+
+def test_send_message_persists_turn_when_legacy_player_action_projection_fails(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+    original_project_turn_event = turn_events_module._project_turn_event
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        del user_input, context, speaking_player, rules_hint
+        yield 'The chamber answers without losing the turn.'
+
+    def flaky_projection(event, payload, *, timestamp=None):
+        if event.event_type == turn_events_module.PLAYER_MESSAGE_EVENT:
+            raise RuntimeError('legacy player action projection failed')
+        return original_project_turn_event(event, payload, timestamp=timestamp)
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    monkeypatch.setattr(turn_events_module, '_project_turn_event', flaky_projection)
+
+    ids = seed_world_campaign_player_session(app)
+    client = socketio.test_client(app, flask_test_client=app.test_client())
+    assert client.is_connected()
+
+    client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    client.get_received()
+    client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'I inspect the damaged altar.',
+        },
+    )
+    received = client.get_received()
+
+    assert _event_payload(received, 'turn_persist_failed') is None
+    assert _event_payload(received, 'dm_response_end') is not None
+
+    with app.app_context():
+        turn = DmTurn.query.order_by(DmTurn.turn_id.desc()).first()
+        assert turn is not None
+        assert turn.player_input == 'I inspect the damaged altar.'
+        player_event = TurnEvent.query.filter_by(
+            session_id=ids['session_id'],
+            event_type=turn_events_module.PLAYER_MESSAGE_EVENT,
+        ).one()
+        payload = safe_json_loads(player_event.payload_json, {})
+        assert payload['message'] == 'I inspect the damaged altar.'
+        assert PlayerAction.query.filter_by(session_id=ids['session_id']).count() == 0
 
 
 def test_send_message_persists_typed_action_intent_and_status_events(app, socketio, app_runtime, monkeypatch):

@@ -221,12 +221,32 @@ def get_player_by_id(player_id):
     if not player:
         return error_response('player_not_found', 'Player not found.', 404)
 
-    inventory_changed = _assign_missing_starting_inventory(player)
-    spells_changed = _assign_missing_starting_spells(player)
-    if inventory_changed or spells_changed:
-        db.session.commit()
-
     return jsonify(player_detail_payload(player))
+
+
+@players_bp.route('/<int:player_id>/repair-starting-loadout', methods=['POST'])
+def repair_player_starting_loadout(player_id):
+    player = workspace_player(player_id)
+    if not player:
+        return error_response('player_not_found', 'Player not found.', 404)
+
+    try:
+        repaired = {
+            'inventory': _assign_missing_starting_inventory(player),
+            'spells': _assign_missing_starting_spells(player),
+        }
+        if any(repaired.values()):
+            db.session.commit()
+        return jsonify(
+            {
+                **player_detail_payload(player),
+                'repaired': repaired,
+            }
+        )
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to repair player starting loadout: %s', str(exc))
+        return error_response('player_repair_failed', 'Failed to repair player starting loadout.', 400)
 
 
 @players_bp.route('/<int:player_id>', methods=['PATCH'])
@@ -342,51 +362,56 @@ def update_player_equipment(player_id):
     if not item_id and not item_name:
         return error_response('validation_error', 'item_id or item_name is required.', 400)
 
-    actor_id = display_actor_id(player.player_id)
-    items = load_inventory_items(player.inventory)
-    state = {
-        'playerCharacters': [
-            {
-                'id': actor_id,
-                'playerId': player.player_id,
-                'name': player.character_name,
-                'inventory': {'items': items, 'currency': {}},
-                'metadata': {},
-            }
-        ],
-        'stateChangeLedger': [],
-    }
-    change = {
-        'id': stable_change_id('manual_equipment', player.player_id, action, item_id, item_name, payload.get('slot')),
-        'type': f'inventory.{action}',
-        'source': 'manual',
-        'actorId': actor_id,
-        'itemId': item_id or None,
-        'itemName': item_name or None,
-        'slot': payload.get('slot') or payload.get('equipmentSlot') or payload.get('equipment_slot'),
-        'visible': True,
-        'reason': f"Manual inventory {action}.",
-    }
-    validation = validate_state_changes(state=state, changes=[change])
-    if validation.get('rejected'):
-        reason = validation['rejected'][0].get('reason') or 'Equipment update was rejected.'
-        return error_response('validation_error', reason, 400, {'validation': validation})
-
-    result = apply_state_changes(state, validated_changes_for_application(validation))
-    next_actor = (result.get('nextState') or {}).get('playerCharacters', [{}])[0]
-    next_inventory = next_actor.get('inventory') if isinstance(next_actor.get('inventory'), dict) else {}
-    player.inventory = dump_inventory_items(next_inventory.get('items') or [])
-    db.session.commit()
-    return jsonify(
-        {
-            **player_detail_payload(player),
-            'equipment_update': {
-                'action': action,
-                'applied_changes': result.get('appliedChanges') or [],
-                'validation': validation,
-            },
+    try:
+        actor_id = display_actor_id(player.player_id)
+        items = load_inventory_items(player.inventory)
+        state = {
+            'playerCharacters': [
+                {
+                    'id': actor_id,
+                    'playerId': player.player_id,
+                    'name': player.character_name,
+                    'inventory': {'items': items, 'currency': {}},
+                    'metadata': {},
+                }
+            ],
+            'stateChangeLedger': [],
         }
-    )
+        change = {
+            'id': stable_change_id('manual_equipment', player.player_id, action, item_id, item_name, payload.get('slot')),
+            'type': f'inventory.{action}',
+            'source': 'manual',
+            'actorId': actor_id,
+            'itemId': item_id or None,
+            'itemName': item_name or None,
+            'slot': payload.get('slot') or payload.get('equipmentSlot') or payload.get('equipment_slot'),
+            'visible': True,
+            'reason': f"Manual inventory {action}.",
+        }
+        validation = validate_state_changes(state=state, changes=[change])
+        if validation.get('rejected'):
+            reason = validation['rejected'][0].get('reason') or 'Equipment update was rejected.'
+            return error_response('validation_error', reason, 400, {'validation': validation})
+
+        result = apply_state_changes(state, validated_changes_for_application(validation))
+        next_actor = (result.get('nextState') or {}).get('playerCharacters', [{}])[0]
+        next_inventory = next_actor.get('inventory') if isinstance(next_actor.get('inventory'), dict) else {}
+        player.inventory = dump_inventory_items(next_inventory.get('items') or [])
+        db.session.commit()
+        return jsonify(
+            {
+                **player_detail_payload(player),
+                'equipment_update': {
+                    'action': action,
+                    'applied_changes': result.get('appliedChanges') or [],
+                    'validation': validation,
+                },
+            }
+        )
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to update player equipment: %s', str(exc))
+        return error_response('equipment_update_failed', 'Failed to update equipment.', 400)
 
 
 @players_bp.route('/<int:player_id>', methods=['DELETE'])

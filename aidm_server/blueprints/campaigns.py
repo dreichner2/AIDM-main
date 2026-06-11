@@ -7,12 +7,17 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import joinedload
 
 from aidm_server.canon_jobs import canon_job_status_counts
+from aidm_server.creatures.campaign_pack import generate_campaign_pack_bestiary
+from aidm_server.creatures.repository import save_bestiary_entry
 from aidm_server.database import db
 from aidm_server.errors import error_response
 from aidm_server.models import (
     Campaign,
     CampaignSegment,
     CanonJob,
+    BestiaryEntry,
+    CombatDebugEvent,
+    CombatEncounter,
     DmCoherenceFeedback,
     DmTurn,
     Map,
@@ -57,6 +62,82 @@ CAMPAIGN_TITLE_MAX_LENGTH = 120
 CAMPAIGN_TEXT_MAX_LENGTH = 2000
 ACTIVE_STATUS = 'active'
 ARCHIVED_STATUS = 'archived'
+
+
+def _truthy_enabled(value, *, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {'0', 'false', 'no', 'off', 'disabled'}
+
+
+def _theme_list(value) -> list[str]:
+    if isinstance(value, str):
+        raw_values = value.replace(';', ',').split(',')
+    elif isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = []
+    result: list[str] = []
+    for item in raw_values:
+        text = str(item or '').strip().lower().replace(' ', '_').replace('-', '_')
+        if text and text not in result:
+            result.append(text)
+        if len(result) >= 8:
+            break
+    return result
+
+
+def _campaign_bestiary_themes(payload: dict, *, title: str, description: str, location: str | None, world) -> list[str]:
+    explicit = _theme_list(payload.get('bestiary_themes') or payload.get('bestiaryThemes') or payload.get('themes'))
+    if explicit:
+        return explicit
+    values = [title, description, location, getattr(world, 'name', None), getattr(world, 'description', None)]
+    themes: list[str] = []
+    for value in values:
+        for token in str(value or '').lower().replace('-', ' ').split():
+            if len(token) < 4:
+                continue
+            normalized = token.strip(".,:;!?()[]{}'\"").replace(' ', '_')
+            if normalized and normalized not in themes:
+                themes.append(normalized)
+            if len(themes) >= 6:
+                return themes
+    return themes or ['campaign']
+
+
+def _seed_campaign_bestiary(campaign: Campaign, payload: dict, *, world) -> int:
+    if not _truthy_enabled(payload.get('seed_bestiary', payload.get('seedBestiary')), default=True):
+        return 0
+    requested_count = coerce_int(payload.get('bestiary_count') or payload.get('bestiaryCount'))
+    count = max(3, min(18, requested_count or 8))
+    themes = _campaign_bestiary_themes(
+        payload,
+        title=campaign.title,
+        description=campaign.description or '',
+        location=campaign.location,
+        world=world,
+    )
+    creatures = generate_campaign_pack_bestiary(
+        {
+            'title': campaign.title,
+            'themes': themes,
+            'count': count,
+        }
+    )
+    for creature in creatures:
+        save_bestiary_entry(
+            workspace_id=campaign.workspace_id,
+            campaign_id=campaign.campaign_id,
+            scope='campaign',
+            source='campaign_pack',
+            persistence='campaign',
+            creature=creature,
+            tags=creature.get('visualTags') or [],
+            created_because='Seeded during campaign creation.',
+        )
+    return len(creatures)
 
 
 def _stale_update_error(payload: dict, current_updated_at, *, label: str) -> tuple[dict, int] | None:
@@ -109,6 +190,9 @@ def _force_delete_campaign(campaign: Campaign) -> dict:
     CanonJob.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
     TurnCanonUpdate.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
     TurnEvent.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    CombatDebugEvent.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    CombatEncounter.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+    BestiaryEntry.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
     DmCoherenceFeedback.query.filter(
         DmCoherenceFeedback.turn_id.in_(
             db.session.query(DmTurn.turn_id).filter_by(campaign_id=campaign_id),
@@ -266,8 +350,12 @@ def create_campaign():
             location=location,
         )
         db.session.add(new_campaign)
+        db.session.flush()
+        seeded_bestiary_count = _seed_campaign_bestiary(new_campaign, payload, world=world)
         db.session.commit()
-        return jsonify(campaign_payload(new_campaign)), 201
+        response_payload = campaign_payload(new_campaign)
+        response_payload['bestiary_seeded_count'] = seeded_bestiary_count
+        return jsonify(response_payload), 201
     except Exception as exc:
         db.session.rollback()
         logger.error('Failed to create campaign: %s', str(exc))
@@ -462,6 +550,9 @@ def delete_campaign(campaign_id):
                     {Player.campaign_id: None},
                     synchronize_session=False,
                 )
+                CombatDebugEvent.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+                CombatEncounter.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
+                BestiaryEntry.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
                 payload = {
                     'deleted': True,
                     'campaign_id': campaign_id,

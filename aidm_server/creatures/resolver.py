@@ -26,6 +26,8 @@ PURPOSE_GOALS = {
 ENCOUNTER_MATCH_THRESHOLD = 0.6
 SCOPED_BESTIARY_MATCH_THRESHOLD = 0.72
 CORE_BESTIARY_MATCH_THRESHOLD = 0.6
+MAX_ENCOUNTER_GROUPS = 8
+MAX_ENCOUNTER_ENEMIES = 24
 
 
 def _text(value: Any) -> str:
@@ -38,6 +40,22 @@ def _list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip().lower().replace(' ', '_').replace('-', '_')]
     return []
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _enabled(value: Any, *, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {'0', 'false', 'no', 'off', 'disabled'}
 
 
 def normalize_creature_request(request: dict[str, Any] | None) -> dict[str, Any]:
@@ -55,10 +73,11 @@ def normalize_creature_request(request: dict[str, Any] | None) -> dict[str, Any]
         'partySize': max(1, int(request.get('partySize', request.get('party_size')) or 4)),
         'difficulty': _text(request.get('difficulty') or 'standard').lower(),
         'descriptionHint': _text(request.get('descriptionHint', request.get('description_hint'))),
-        'allowGeneration': bool(request.get('allowGeneration', request.get('allow_generation', True))),
-        'allowVariants': bool(request.get('allowVariants', request.get('allow_variants', True))),
+        'allowGeneration': _enabled(request.get('allowGeneration', request.get('allow_generation')), default=True),
+        'allowVariants': _enabled(request.get('allowVariants', request.get('allow_variants')), default=True),
         'encounterDefinedCreatures': request.get('encounterDefinedCreatures', request.get('encounter_defined_creatures')) if isinstance(request.get('encounterDefinedCreatures', request.get('encounter_defined_creatures')), list) else [],
-        'saveGenerated': request.get('saveGenerated', request.get('save_generated', True)) is not False,
+        'saveGenerated': _enabled(request.get('saveGenerated', request.get('save_generated')), default=True),
+        'enemyCount': _bounded_int(request.get('enemyCount', request.get('enemy_count')), default=1, minimum=1, maximum=MAX_ENCOUNTER_ENEMIES),
     }
 
 
@@ -289,6 +308,270 @@ def resolve_creature_for_encounter(
     )
 
 
+def _encounter_group_payloads(request_payload: dict[str, Any], request: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_groups = (
+        request_payload.get('enemyGroups')
+        or request_payload.get('enemy_groups')
+        or request_payload.get('encounterGroups')
+        or request_payload.get('encounter_groups')
+    )
+    if isinstance(raw_groups, list) and raw_groups:
+        return [group for group in raw_groups[:MAX_ENCOUNTER_GROUPS] if isinstance(group, dict)]
+
+    explicit_creatures = request.get('encounterDefinedCreatures') or []
+    if explicit_creatures:
+        return [
+            {
+                'creature': creature,
+                'count': 1,
+                'label': f'encounter_defined_{index + 1}',
+            }
+            for index, creature in enumerate(explicit_creatures[:MAX_ENCOUNTER_GROUPS])
+            if isinstance(creature, dict)
+        ]
+
+    purpose = request.get('encounterPurpose') or 'custom'
+    difficulty = request.get('difficulty') or 'standard'
+    party_size = _bounded_int(request.get('partySize'), default=4, minimum=1, maximum=10)
+    requested_count = _bounded_int(request.get('enemyCount'), default=1, minimum=1, maximum=MAX_ENCOUNTER_ENEMIES)
+    if requested_count > 1:
+        return [{'count': requested_count, 'label': 'requested_group'}]
+
+    if difficulty == 'boss' or purpose == 'boss':
+        groups = [
+            {
+                'count': 1,
+                'difficulty': 'boss',
+                'desiredRole': 'boss',
+                'encounterPurpose': 'boss',
+                'label': 'boss',
+            }
+        ]
+        if party_size >= 3 and request.get('allowVariants'):
+            groups.append(
+                {
+                    'count': min(4, max(1, party_size - 2)),
+                    'difficulty': 'easy',
+                    'desiredRole': 'minion',
+                    'encounterPurpose': 'guard',
+                    'label': 'support_minions',
+                }
+            )
+        return groups
+
+    if purpose in {'ambush', 'patrol', 'guard'} and party_size >= 4 and difficulty in {'standard', 'hard', 'deadly'}:
+        return [
+            {
+                'count': 2,
+                'desiredRole': request.get('desiredRole') or 'skirmisher',
+                'label': 'pressure_pair',
+            },
+            {
+                'count': 1,
+                'desiredRole': 'brute' if purpose != 'guard' else 'leader',
+                'difficulty': 'easy' if difficulty == 'standard' else difficulty,
+                'label': 'anchor_enemy',
+            },
+        ]
+
+    return [{'count': 1, 'label': 'single_threat'}]
+
+
+def _merge_group_request(base_request: dict[str, Any], raw_group: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {
+        'campaignId',
+        'campaign_id',
+        'sessionId',
+        'session_id',
+        'regionId',
+        'region_id',
+        'locationId',
+        'location_id',
+        'encounterPurpose',
+        'encounter_purpose',
+        'desiredRole',
+        'desired_role',
+        'desiredCreatureType',
+        'desired_creature_type',
+        'themeTags',
+        'theme_tags',
+        'partyLevel',
+        'party_level',
+        'partySize',
+        'party_size',
+        'difficulty',
+        'descriptionHint',
+        'description_hint',
+        'allowGeneration',
+        'allow_generation',
+        'allowVariants',
+        'allow_variants',
+        'saveGenerated',
+        'save_generated',
+        'encounterDefinedCreatures',
+        'encounter_defined_creatures',
+    }
+    merged = dict(base_request)
+    for key, value in raw_group.items():
+        if key in allowed_keys and value not in (None, '', [], {}):
+            merged[key] = value
+    group_tags = _list(raw_group.get('themeTags', raw_group.get('theme_tags')))
+    if group_tags:
+        merged['themeTags'] = [*base_request.get('themeTags', []), *group_tags]
+    if raw_group.get('creature') and isinstance(raw_group.get('creature'), dict):
+        merged['encounterDefinedCreatures'] = [raw_group['creature']]
+    return merged
+
+
+def _group_result_from_resolution(
+    *,
+    resolution: dict[str, Any] | None,
+    raw_group: dict[str, Any],
+    group_request: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
+    if not isinstance(resolution, dict):
+        resolution = _result(
+            core_bestiary()[0],
+            source='core_bestiary',
+            method='resolver_fallback',
+            score=0.0,
+            notes=['Resolver returned no creature; fallback core creature used.'],
+            debug={'request': group_request},
+        )
+    creature = normalize_creature_definition(resolution.get('creature') if isinstance(resolution, dict) else {}, source=resolution.get('source'))
+    count = _bounded_int(raw_group.get('count', raw_group.get('enemyCount', raw_group.get('enemy_count'))), default=1, minimum=1, maximum=MAX_ENCOUNTER_ENEMIES)
+    return {
+        'id': str(raw_group.get('id') or raw_group.get('label') or f'group_{index + 1}'),
+        'label': str(raw_group.get('label') or creature.get('name') or f'Group {index + 1}'),
+        'count': count,
+        'creature': creature,
+        'source': resolution.get('source') or creature.get('source'),
+        'resolutionMethod': resolution.get('resolutionMethod'),
+        'matchScore': resolution.get('matchScore'),
+        'generated': bool(resolution.get('generated')),
+        'savedToBestiary': bool(resolution.get('savedToBestiary')),
+        'notes': resolution.get('notes') or [],
+        'request': group_request,
+        'debug': resolution.get('debug') or {},
+    }
+
+
+def _encounter_goal_type(purpose: str) -> str:
+    return {
+        'ambush': 'kill_all_enemies',
+        'guard': 'defend_location',
+        'boss': 'kill_all_enemies',
+        'patrol': 'defend_location',
+        'ritual': 'stop_ritual',
+        'random_encounter': 'kill_all_enemies',
+        'predator': 'feed',
+        'social_threat': 'negotiate',
+    }.get(purpose, 'custom')
+
+
+def resolve_creatures_for_encounter(
+    request_payload: dict[str, Any],
+    *,
+    workspace_id: str = 'owner',
+) -> dict[str, Any]:
+    request = normalize_creature_request(request_payload)
+    raw_groups = _encounter_group_payloads(request_payload if isinstance(request_payload, dict) else {}, request)
+    groups: list[dict[str, Any]] = []
+    total_enemies = 0
+    for index, raw_group in enumerate(raw_groups):
+        if total_enemies >= MAX_ENCOUNTER_ENEMIES:
+            break
+        group_request = _merge_group_request(request, raw_group)
+        group_request['enemyCount'] = 1
+        if isinstance(raw_group.get('creature'), dict):
+            explicit_creature = normalize_creature_definition(
+                raw_group['creature'],
+                source=raw_group['creature'].get('source') or 'campaign_pack',
+            )
+            resolution = _result(
+                explicit_creature,
+                source=explicit_creature.get('source') or 'campaign_pack',
+                method='encounter_defined',
+                score=1.0,
+                notes=['Encounter group supplied an explicit creature.'],
+                debug={'request': group_request, 'rankings': {'encounter': [{'id': explicit_creature['id'], 'score': 1.0}]}},
+            )
+        else:
+            resolution = resolve_creature_for_encounter(group_request, workspace_id=workspace_id)
+        group = _group_result_from_resolution(
+            resolution=resolution,
+            raw_group=raw_group,
+            group_request=group_request,
+            index=index,
+        )
+        remaining = MAX_ENCOUNTER_ENEMIES - total_enemies
+        group['count'] = min(group['count'], remaining)
+        total_enemies += group['count']
+        groups.append(group)
+
+    if not groups:
+        resolution = resolve_creature_for_encounter(request, workspace_id=workspace_id)
+        groups.append(
+            _group_result_from_resolution(
+                resolution=resolution,
+                raw_group={'count': 1, 'label': 'fallback'},
+                group_request=request,
+                index=0,
+            )
+        )
+        total_enemies = 1
+
+    methods = sorted({str(group.get('resolutionMethod') or '') for group in groups if group.get('resolutionMethod')})
+    sources = sorted({str(group.get('source') or '') for group in groups if group.get('source')})
+    purpose = request.get('encounterPurpose') or 'custom'
+    return {
+        'groups': groups,
+        'totalEnemies': total_enemies,
+        'resolutionMethod': 'encounter_composed' if len(groups) > 1 or total_enemies > 1 else groups[0].get('resolutionMethod'),
+        'resolutionMethods': methods,
+        'sources': sources,
+        'generated': any(group.get('generated') for group in groups),
+        'savedToBestiary': any(group.get('savedToBestiary') for group in groups),
+        'encounterGoal': {
+            'type': _encounter_goal_type(purpose),
+            'description': f"Resolve a {purpose.replace('_', ' ')} encounter with {total_enemies} hostile participant{'s' if total_enemies != 1 else ''}.",
+            'enemyObjective': ', '.join(
+                sorted(
+                    {
+                        str((group.get('creature') or {}).get('behavior', {}).get('primaryGoal') or '')
+                        for group in groups
+                        if isinstance((group.get('creature') or {}).get('behavior'), dict)
+                    }
+                    - {''}
+                )
+            )
+            or PURPOSE_GOALS.get(purpose, 'survive'),
+            'playerObjective': 'Survive, protect allies, and resolve the threat.',
+            'successConditions': ['Enemies are defeated, flee, surrender, negotiate, or their objective is stopped.'],
+            'failureConditions': ['Enemies achieve their objective or incapacitate the party.'],
+        },
+        'notes': [note for group in groups for note in (group.get('notes') or [])],
+        'debug': {
+            'request': request,
+            'groupCount': len(groups),
+            'totalEnemies': total_enemies,
+            'groups': [
+                {
+                    'id': group.get('id'),
+                    'label': group.get('label'),
+                    'count': group.get('count'),
+                    'creatureId': (group.get('creature') or {}).get('id'),
+                    'source': group.get('source'),
+                    'resolutionMethod': group.get('resolutionMethod'),
+                    'matchScore': group.get('matchScore'),
+                }
+                for group in groups
+            ],
+        },
+    }
+
+
 def default_request_from_session(
     *,
     session_obj: Session,
@@ -301,6 +584,11 @@ def default_request_from_session(
     levels = [int(player.get('level') or 1) for player in players if isinstance(player, dict)]
     message = str(player_message or '').lower()
     purpose = 'ambush' if any(word in message for word in ('ambush', 'attack', 'fight', 'enemy', 'monster')) else 'random_encounter'
+    plural_signal = any(
+        word in message
+        for word in ('enemies', 'monsters', 'bandits', 'goblins', 'wolves', 'skeletons', 'zombies', 'cultists', 'guards')
+    )
+    party_size = max(1, len(players))
     tags = []
     for value in [scene.get('sceneType'), scene.get('mood'), scene.get('name'), campaign.title if campaign else None]:
         for token in str(value or '').lower().replace('-', ' ').split():
@@ -314,9 +602,10 @@ def default_request_from_session(
         'encounterPurpose': purpose,
         'themeTags': tags[:8],
         'partyLevel': round(sum(levels) / len(levels)) if levels else 1,
-        'partySize': max(1, len(players)),
+        'partySize': party_size,
         'difficulty': 'standard',
         'descriptionHint': player_message,
         'allowGeneration': True,
         'allowVariants': True,
+        'enemyCount': min(4, max(2, party_size)) if plural_signal else 1,
     }

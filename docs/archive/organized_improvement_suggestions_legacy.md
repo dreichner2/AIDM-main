@@ -1,6 +1,6 @@
 # Organized AIDM Improvement Suggestions
 
-This is a sorted copy of `docs/improvements_suggestions.md`. The original file is left untouched; recommendation and finding text is preserved verbatim, with only new organization headings and source labels added here.
+This is a sorted copy of `docs/archive/improvements_suggestions_legacy.md`. The original recommendation and finding text is preserved verbatim, with only organization headings and source labels added here.
 
 ## Table of Contents
 - [0. Source Notes And Verification](#0-source-notes-and-verification)

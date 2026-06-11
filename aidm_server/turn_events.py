@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from aidm_server.database import db
 from aidm_server.models import PlayerAction, SessionLogEntry, TurnEvent, safe_json_dumps, safe_json_loads
+
+logger = logging.getLogger(__name__)
 
 
 PLAYER_MESSAGE_EVENT = 'player_message'
@@ -39,7 +42,18 @@ def record_turn_event(
     db.session.flush()
 
     if project_legacy:
-        _project_turn_event(event, payload)
+        try:
+            with db.session.begin_nested():
+                _project_turn_event(event, payload)
+                db.session.flush()
+        except Exception as exc:
+            logger.warning(
+                'Failed to project legacy turn event %s for session %s turn %s: %s',
+                event.event_type,
+                event.session_id,
+                event.turn_id,
+                exc,
+            )
     return event
 
 

@@ -13,6 +13,7 @@ from aidm_server.emergent_memory import (
 from aidm_server.models import (
     DmTurn,
     Player,
+    Session,
     SessionState,
     StoryEntity,
     StoryFact,
@@ -85,6 +86,48 @@ def test_alias_resolution_reuses_existing_entity(app):
         aliases = safe_json_loads(entity.aliases_json, [])
         assert entity.name == 'Captain Liora Vale'
         assert 'Liora' in aliases
+
+
+def test_canon_patch_does_not_create_story_entity_for_player_character(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        turn = _create_turn(
+            app,
+            ids,
+            player_input='I ask whether Seraphina can keep watch.',
+            dm_output='Seraphina keeps her bow ready and listens at the archway.',
+        )
+        campaign = turn.campaign
+        patch = {
+            'entities': [
+                {
+                    'entity_type': 'npc',
+                    'name': 'Seraphina',
+                    'summary': 'The player character keeping watch.',
+                }
+            ],
+            'facts': [
+                {
+                    'subject': {'entity_type': 'npc', 'name': 'Seraphina'},
+                    'predicate': 'status',
+                    'value_text': 'keeping watch',
+                }
+            ],
+        }
+
+        validated, rejections = validate_canon_patch(turn, campaign, patch)
+        summary = apply_canon_patch(turn, campaign, validated, 'test-extractor', rejections)
+        db.session.commit()
+
+        facts = StoryFact.query.filter_by(campaign_id=ids['campaign_id'], predicate='status').all()
+
+        assert validated['entities'] == []
+        assert rejections[0]['reason'] == 'Player character is tracked by player state, not story NPC canon.'
+        assert summary['entities_created_or_updated'] == []
+        assert StoryEntity.query.filter_by(campaign_id=ids['campaign_id'], name='Seraphina').count() == 0
+        assert len(facts) == 1
+        assert facts[0].subject_entity_id is None
 
 
 def test_conflicting_fact_requires_explicit_change_type(app):
@@ -927,6 +970,94 @@ def test_refresh_session_projection_resets_current_quest_when_open_threads_are_r
 
         db.session.refresh(state)
         assert state.current_quest == campaign.current_quest
+
+
+def test_projection_syncs_session_state_and_snapshot_quests(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        turn = _create_turn(
+            app,
+            ids,
+            player_input='We ask Master Roshi to teach us to fly.',
+            dm_output='Master Roshi points toward Kame House and says breakfast comes before flying lessons.',
+        )
+        campaign = turn.campaign
+        session_obj = db.session.get(Session, ids['session_id'])
+        session_obj.state_snapshot = safe_json_dumps(
+            {
+                'currentScene': {
+                    'locationId': 'south_dock',
+                    'name': 'south dock',
+                    'sceneType': 'combat',
+                    'dangerLevel': 8,
+                    'mood': 'dangerous',
+                    'combatState': 'active',
+                    'description': 'A stale combat scene on the south dock.',
+                    'activeNpcIds': ['unknown_segmented_creature'],
+                    'activeQuestIds': ['investigate_underwater_disturbance'],
+                },
+                'quests': [
+                    {
+                        'id': 'investigate_underwater_disturbance',
+                        'title': 'Investigate the Underwater Disturbance',
+                        'status': 'active',
+                        'summary': 'Find what is disturbing the fishermen beneath the waves.',
+                        'stage': '2',
+                        'objectives': [
+                            {'id': 'obj_find_clues', 'description': 'Find the creature.', 'status': 'completed'}
+                        ],
+                        'updatedAtTurn': 42,
+                    }
+                ],
+                'locations': [],
+            },
+            {},
+        )
+
+        patch = {
+            'threads': [
+                {
+                    'title': 'Flying Lessons from Master Roshi',
+                    'summary': 'Master Roshi agreed to begin training after breakfast.',
+                    'status': 'open',
+                    'priority': 2,
+                },
+                {
+                    'title': 'Mysterious Stirring Beneath the Waves',
+                    'summary': 'The creature beneath the waves has been slain.',
+                    'status': 'closed',
+                    'priority': 2,
+                },
+            ],
+            'projection': {
+                'current_location': 'Dock outside Kame House',
+                'current_quest': 'Flying Lessons from Master Roshi',
+            },
+        }
+        validated_patch, rejections = validate_canon_patch(turn, campaign, patch)
+        assert rejections == []
+        apply_canon_patch(turn, campaign, validated_patch, 'test-extractor', rejections)
+        refresh_session_projection(ids['session_id'], campaign)
+        db.session.commit()
+
+        state = SessionState.query.filter_by(session_id=ids['session_id']).one()
+        snapshot = safe_json_loads(db.session.get(Session, ids['session_id']).state_snapshot, {})
+        scene = snapshot['currentScene']
+        quests = {quest['id']: quest for quest in snapshot['quests']}
+
+        assert state.current_location == 'Dock outside Kame House'
+        assert state.current_quest == 'Flying Lessons from Master Roshi'
+        assert scene['locationId'] == 'dock_outside_kame_house'
+        assert scene['name'] == 'Dock outside Kame House'
+        assert scene['sceneType'] == 'exploration'
+        assert scene['dangerLevel'] == 0
+        assert scene['combatState'] == 'none'
+        assert scene['activeNpcIds'] == []
+        assert scene['activeQuestIds'] == ['flying_lessons_from_master_roshi']
+        assert 'mood' not in scene
+        assert quests['investigate_underwater_disturbance']['status'] == 'completed'
+        assert quests['flying_lessons_from_master_roshi']['status'] == 'active'
 
 
 def test_extract_canon_patch_does_not_reuse_shared_patch_state(app, monkeypatch):

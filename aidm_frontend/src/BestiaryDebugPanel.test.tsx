@@ -97,6 +97,15 @@ describe('BestiaryDebugPanel', () => {
         return Promise.resolve({
           events: [
             {
+              debug_event_id: 5,
+              event_type: 'post_dm_combat_outcome',
+              payload: {
+                validationCounts: { accepted: 2, modified: 0, rejected: 1 },
+                appliedCombatChanges: [{ type: 'combat.participant.update', participantId: 'enemy_wolf_1' }],
+                rejectedCombatChanges: [{ change: { type: 'combat.participant.update' }, reason: 'not found' }],
+              },
+            },
+            {
               debug_event_id: 4,
               event_type: 'pre_dm_combat_plan',
               payload: {
@@ -130,6 +139,8 @@ describe('BestiaryDebugPanel', () => {
     expect(within(panel).getByText('beast / beast / easy')).toBeInTheDocument()
 
     expect(screen.getByText(/Combat debug/)).toBeInTheDocument()
+    expect(screen.getByText('Outcome / 1 applied / 1 rejected / 2 accepted total')).toBeInTheDocument()
+    expect(screen.getByText('Plan / campaign_bestiary_match / Goblin retreats.')).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Campaign pack themes'), { target: { value: 'ash, crown' } })
     fireEvent.click(screen.getByRole('button', { name: /seed/i }))
 

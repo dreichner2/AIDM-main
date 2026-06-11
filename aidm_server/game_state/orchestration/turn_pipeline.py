@@ -6,7 +6,12 @@ from typing import Any
 
 from aidm_server.canon_inventory import append_drop_all_inventory_changes_from_text, inventory_change_from_intent_outcome
 from aidm_server.canon_text import int_or_default
-from aidm_server.combat.pipeline import prepare_combat_for_turn, prepare_combat_from_dm_response, record_combat_debug_from_prepare
+from aidm_server.combat.pipeline import (
+    prepare_combat_for_turn,
+    prepare_combat_from_dm_response,
+    record_combat_debug_from_outcome,
+    record_combat_debug_from_prepare,
+)
 from aidm_server.database import db
 from aidm_server.game_state import STATE_PIPELINE_METADATA_KEY, STATE_PIPELINE_VERSION
 from aidm_server.game_state.application.applier import (
@@ -891,6 +896,15 @@ def post_dm_pipeline(
             *(post_validation.get('rejected') or []),
             *((pipeline.get('immediateValidation') or {}).get('rejected') if isinstance(pipeline.get('immediateValidation'), dict) else []),
         ],
+    )
+    record_combat_debug_from_outcome(
+        session_obj=session_obj,
+        campaign=campaign,
+        turn=turn,
+        prepare_result=post_combat_prepare,
+        post_validation=post_validation,
+        applied_changes=applied_post,
+        state_log=state_log,
     )
 
     pipeline.update(

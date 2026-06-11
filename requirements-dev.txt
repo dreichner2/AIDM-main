@@ -2,4 +2,6 @@
 
 Flask-Migrate
 flask-admin
+pip-audit
 pytest
+ruff

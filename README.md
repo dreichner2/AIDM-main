@@ -56,6 +56,9 @@ This README is aligned to the current codebase as of June 2026.
 
 Runtime state source-of-truth boundaries are documented in
 [docs/runtime_state_boundaries.md](docs/runtime_state_boundaries.md).
+For the current beta-hardening map, see [docs/roadmap.md](docs/roadmap.md),
+[docs/architecture.md](docs/architecture.md), and
+[docs/production-readiness.md](docs/production-readiness.md).
 
 ---
 
@@ -63,7 +66,8 @@ Runtime state source-of-truth boundaries are documented in
 
 ### 1) Create a virtual environment and install deps
 ```bash
-cd /Users/danny/Downloads/AIDM-main
+git clone <repo-url> AIDM-main
+cd AIDM-main
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -697,9 +701,14 @@ Local development conveniences should not be treated as production defaults:
 - `.env.local` writes from `/api/llm/config` are for local runtime switching.
 - Wildcard CORS is local/debug only; production bootstrap rejects wildcard CORS.
 - `AIDM_AUTH_REQUIRED=false` is local/private-network only.
+- `scripts/deploy_bootstrap.py` may serve local/test runs, but production should
+  run it with `--check-only` and start with a production Socket.IO server.
+- Production requires database-backed shared stores:
+  `AIDM_RATE_LIMIT_STORE=database` and
+  `AIDM_TURN_COORDINATOR_STORE=database`.
 - SQLite and local DB backups are developer data, not source fixtures or a shared deployment store. Local defaults use `~/.aidm/`; do not put active DBs or backups under `aidm_server/instance/` before packaging or sharing.
 - Flask admin is a local/admin surface and should be deliberately gated.
-- In-memory rate limiting, the in-memory turn coordinator, and module-global socket state are single-process only. For multiple backend workers, use `AIDM_RATE_LIMIT_STORE=database` and `AIDM_TURN_COORDINATOR_STORE=database`, and keep Socket.IO session affinity or a shared Socket.IO message queue in the deployment layer.
+- In-memory rate limiting, the in-memory turn coordinator, and module-global socket state are single-process only. For multiple backend workers, keep Socket.IO session affinity or a shared Socket.IO message queue in the deployment layer.
 - `scripts/smoke_beta_flow.py` defaults to isolated fallback mode to avoid
   local DB pollution and provider spend.
 - Browser QA screenshots and traces should live under ignored paths such as
@@ -788,11 +797,11 @@ AIDM-main/
 
 ## Known Gaps and Next Steps
 
-Still open from the long-range vision:
-- Hosted observability provider selection, alert routing, and production dashboard ownership remain deployment-specific. A local Prometheus/Grafana bundle is available under `observability/`.
-- Closed-beta execution and post-beta prioritization remain ongoing product operations.
-- Canon extraction still blends provider-assisted parsing with deterministic heuristics; deeper semantic contradiction policies can be added in a later pass.
-- Potential Python 3.14 deprecation cleanup (where applicable) can be finished in a dedicated maintenance pass.
+The current source of truth is [docs/roadmap.md](docs/roadmap.md). The biggest
+remaining hardening items are frontend dialog extraction, lifecycle service
+cleanup for destructive campaign/player/session flows, modal accessibility
+checks, hosted observability ownership, and production Socket.IO worker-model
+validation.
 
 ---
 

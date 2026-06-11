@@ -225,6 +225,20 @@ def test_start_session_rejects_invalid_client_session_id(client, app):
     assert response.get_json()['error_code'] == 'validation_error'
 
 
+def test_start_session_rejects_overlong_client_session_id(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    response = client.post(
+        '/api/sessions/start',
+        json={'campaign_id': ids['campaign_id'], 'client_session_id': 'a' * 81},
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload['error_code'] == 'validation_error'
+    assert '80 characters or fewer' in payload['error']
+
+
 def test_import_session_from_export_restores_state_events_and_projected_log(client, app):
     ids = seed_world_campaign_player_session(app)
     export_payload = {

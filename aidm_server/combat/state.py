@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from aidm_server.canon_text import int_or_default
-from aidm_server.creatures.schemas import normalize_creature_definition
+from aidm_server.creatures.schemas import DAMAGE_TYPES, normalize_creature_definition
 from aidm_server.game_state.models import stable_slug
 
 
@@ -14,6 +14,7 @@ PARTICIPANT_KINDS = {'player_character', 'npc', 'creature', 'boss', 'minion'}
 RANGE_BANDS = {'melee', 'near', 'far', 'distant'}
 LIGHTING_VALUES = {'bright', 'dim', 'dark'}
 VISIBILITY_VALUES = {'clear', 'fog', 'smoke', 'rain', 'magical_darkness'}
+COVER_TYPES = {'half', 'three_quarters', 'full'}
 ENVIRONMENT_TYPES = {
     'open_field',
     'forest',
@@ -41,9 +42,109 @@ def _string_list(value: Any) -> list[str]:
     return []
 
 
+def _bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {'0', 'false', 'no', 'off', 'unblocked'}
+
+
 def _enum(value: Any, allowed: set[str], default: str) -> str:
     normalized = _text(value, default).lower().replace(' ', '_').replace('-', '_')
     return normalized if normalized in allowed else default
+
+
+def _object_id(raw: dict[str, Any], fallback: str) -> str:
+    return stable_slug(_text(raw.get('id') or raw.get('name'), fallback))
+
+
+def _normalize_zone(value: Any, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    zone_id = _object_id(value, f'zone_{index + 1}')
+    return {
+        'id': zone_id,
+        'name': _text(value.get('name'), zone_id.replace('_', ' ').title())[:100],
+        'description': _text(value.get('description'))[:500],
+    }
+
+
+def _normalize_damage(value: Any) -> dict[str, Any] | None:
+    raw = value if isinstance(value, dict) else {}
+    dice = _text(raw.get('dice'))
+    if not dice:
+        return None
+    return {
+        'dice': dice[:40],
+        'type': _enum(raw.get('type'), DAMAGE_TYPES, 'bludgeoning'),
+    }
+
+
+def _normalize_hazard(value: Any, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    hazard_id = _object_id(value, f'hazard_{index + 1}')
+    hazard = {
+        'id': hazard_id,
+        'name': _text(value.get('name'), hazard_id.replace('_', ' ').title())[:100],
+        'description': _text(value.get('description'))[:500],
+        'effect': _text(value.get('effect'), 'hazardous terrain')[:160],
+    }
+    damage = _normalize_damage(value.get('damage'))
+    if damage:
+        hazard['damage'] = damage
+    return hazard
+
+
+def _normalize_cover(value: Any, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    cover_id = _object_id(value, f'cover_{index + 1}')
+    cover = {
+        'id': cover_id,
+        'name': _text(value.get('name'), cover_id.replace('_', ' ').title())[:100],
+        'coverType': _enum(value.get('coverType', value.get('cover_type')), COVER_TYPES, 'half'),
+    }
+    if value.get('zoneId') or value.get('zone_id'):
+        cover['zoneId'] = _text(value.get('zoneId') or value.get('zone_id'))[:100]
+    return cover
+
+
+def _normalize_exit(value: Any, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    exit_id = _object_id(value, f'exit_{index + 1}')
+    exit_item = {
+        'id': exit_id,
+        'name': _text(value.get('name'), exit_id.replace('_', ' ').title())[:100],
+        'blocked': _bool(value.get('blocked'), default=False),
+    }
+    destination = _text(value.get('destinationLocationId', value.get('destination_location_id')))
+    if destination:
+        exit_item['destinationLocationId'] = destination[:120]
+    return exit_item
+
+
+def _normalize_interactable(value: Any, index: int) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    interactable_id = _object_id(value, f'interactable_{index + 1}')
+    return {
+        'id': interactable_id,
+        'name': _text(value.get('name'), interactable_id.replace('_', ' ').title())[:100],
+        'description': _text(value.get('description'))[:500],
+        'possibleUses': _string_list(value.get('possibleUses', value.get('possible_uses')))[:10],
+    }
+
+
+def _normalize_items(values: Any, normalizer) -> list[dict[str, Any]]:
+    result = []
+    for index, item in enumerate(values if isinstance(values, list) else []):
+        normalized = normalizer(item, index)
+        if normalized:
+            result.append(normalized)
+    return result
 
 
 def default_battlefield(scene: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -79,11 +180,11 @@ def normalize_battlefield(value: Any, scene: dict[str, Any] | None = None) -> di
     fallback = default_battlefield(scene)
     return {
         'environmentType': _enum(raw.get('environmentType', raw.get('environment_type')), ENVIRONMENT_TYPES, fallback['environmentType']),
-        'zones': [item for item in (raw.get('zones') or []) if isinstance(item, dict)],
-        'hazards': [item for item in (raw.get('hazards') or []) if isinstance(item, dict)],
-        'cover': [item for item in (raw.get('cover') or []) if isinstance(item, dict)],
-        'exits': [item for item in (raw.get('exits') or []) if isinstance(item, dict)],
-        'interactables': [item for item in (raw.get('interactables') or []) if isinstance(item, dict)],
+        'zones': _normalize_items(raw.get('zones'), _normalize_zone),
+        'hazards': _normalize_items(raw.get('hazards'), _normalize_hazard),
+        'cover': _normalize_items(raw.get('cover'), _normalize_cover),
+        'exits': _normalize_items(raw.get('exits'), _normalize_exit),
+        'interactables': _normalize_items(raw.get('interactables'), _normalize_interactable),
         'lighting': _enum(raw.get('lighting'), LIGHTING_VALUES, fallback['lighting']),
         'visibility': _enum(raw.get('visibility'), VISIBILITY_VALUES, fallback['visibility']),
     }
@@ -134,6 +235,7 @@ def instantiate_creature(
     position: dict[str, Any] | None = None,
     current_turn: int | None = None,
 ) -> dict[str, Any]:
+    memory_seed = definition.get('combatMemorySeed') if isinstance(definition, dict) and isinstance(definition.get('combatMemorySeed'), dict) else {}
     creature = normalize_creature_definition(definition, source=definition.get('source') if isinstance(definition, dict) else None)
     participant_id = instance_id or f"enemy_{stable_slug(creature['name'])}_01"
     behavior = creature.get('behavior') if isinstance(creature.get('behavior'), dict) else {}
@@ -161,7 +263,7 @@ def instantiate_creature(
         'abilities': deepcopy(creature.get('abilities') or []),
         'behavior': deepcopy(behavior),
         'currentIntent': None,
-        'memory': {},
+        'memory': deepcopy(memory_seed),
         'morale': int_or_default(behavior.get('morale'), default=50),
         'isAlive': True,
         'isConscious': True,

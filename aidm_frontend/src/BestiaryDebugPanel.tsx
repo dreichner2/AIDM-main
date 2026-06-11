@@ -82,14 +82,35 @@ function debugSummary(event: JsonRecord) {
   const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
     ? event.payload as JsonRecord
     : {}
+  const combatDebug = payload.combatDebug && typeof payload.combatDebug === 'object' && !Array.isArray(payload.combatDebug)
+    ? payload.combatDebug as JsonRecord
+    : {}
   const resolver = payload.resolver && typeof payload.resolver === 'object' && !Array.isArray(payload.resolver)
     ? payload.resolver as JsonRecord
+    : combatDebug.resolver && typeof combatDebug.resolver === 'object' && !Array.isArray(combatDebug.resolver)
+      ? combatDebug.resolver as JsonRecord
     : {}
   const intentPlan = payload.intentPlan && typeof payload.intentPlan === 'object' && !Array.isArray(payload.intentPlan)
     ? payload.intentPlan as JsonRecord
+    : combatDebug.intentPlan && typeof combatDebug.intentPlan === 'object' && !Array.isArray(combatDebug.intentPlan)
+      ? combatDebug.intentPlan as JsonRecord
     : {}
+  if (event.event_type === 'post_dm_combat_outcome') {
+    const counts = payload.validationCounts && typeof payload.validationCounts === 'object' && !Array.isArray(payload.validationCounts)
+      ? payload.validationCounts as JsonRecord
+      : {}
+    const applied = Array.isArray(payload.appliedCombatChanges) ? payload.appliedCombatChanges.length : 0
+    const rejected = Array.isArray(payload.rejectedCombatChanges) ? payload.rejectedCombatChanges.length : 0
+    return [
+      'Outcome',
+      `${applied} applied`,
+      rejected ? `${rejected} rejected` : '',
+      counts.accepted !== undefined ? `${String(counts.accepted)} accepted total` : '',
+      String(intentPlan.summaryForDm || ''),
+    ].filter(Boolean).join(' / ')
+  }
   return [
-    String(event.event_type || 'combat debug'),
+    event.event_type === 'pre_dm_combat_plan' ? 'Plan' : String(event.event_type || 'combat debug'),
     String(resolver.resolutionMethod || ''),
     String(intentPlan.summaryForDm || ''),
   ].filter(Boolean).join(' / ')

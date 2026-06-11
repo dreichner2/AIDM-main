@@ -9,6 +9,7 @@ from flask import current_app, request
 from aidm_server.auth import (
     DEFAULT_WORKSPACE_ID,
     account_for_token,
+    account_requires_password_setup,
     account_workspace_membership,
     ensure_account_workspace_membership,
     extract_socket_account_token,
@@ -96,6 +97,8 @@ class SocketRuntime:
         selected_workspace_id = extract_socket_workspace_id(auth_payload=auth_payload, data_payload=data_payload)
         if selected_workspace_id:
             account = self.account_for_auth(auth_payload=auth_payload)
+            if account_requires_password_setup(account):
+                return None
             if account_workspace_membership(account, selected_workspace_id):
                 return selected_workspace_id
             return None
@@ -115,6 +118,8 @@ class SocketRuntime:
     def membership_for_auth(self, auth_payload: dict | None = None, workspace_id: str | None = None):
         account = self.account_for_auth(auth_payload=auth_payload)
         if account is None or not workspace_id:
+            return None
+        if account_requires_password_setup(account):
             return None
         return ensure_account_workspace_membership(account, workspace_id)
 

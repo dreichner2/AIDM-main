@@ -5,14 +5,15 @@ import aidm_server.combat.enemy_brain as enemy_brain_module
 from aidm_server.combat.intent_planner import plan_enemy_intents
 from aidm_server.combat.pipeline import prepare_combat_for_turn
 from aidm_server.combat.morale import apply_morale_event
-from aidm_server.combat.state import combat_summary_for_dm, instantiate_creature, player_combat_participant
+from aidm_server.combat.state import combat_summary_for_dm, instantiate_creature, normalize_battlefield, player_combat_participant
 from aidm_server.creatures.balance import analyze_creature_balance, auto_scale_creature
 from aidm_server.creatures.campaign_pack import generate_campaign_pack_bestiary
 from aidm_server.creatures.core_bestiary import core_bestiary, core_creature
 from aidm_server.creatures.evolution import evolve_creature
 from aidm_server.creatures.generator import generate_new_creature
 from aidm_server.creatures.repository import save_bestiary_entry, should_save_generated_creature
-from aidm_server.creatures.resolver import resolve_creature_for_encounter
+from aidm_server.creatures.resolver import normalize_creature_request, resolve_creature_for_encounter, resolve_creatures_for_encounter
+from aidm_server.creatures.schemas import normalize_creature_definition
 from aidm_server.game_state.application.applier import apply_state_changes
 from aidm_server.game_state.validation.validator import validate_state_changes, validated_changes_for_application
 from aidm_server.database import db
@@ -245,9 +246,90 @@ def test_resolver_uses_region_then_core_before_generation_and_saves_meaningful_g
     assert saved_generated == 1
 
 
+def test_encounter_resolver_composes_explicit_groups(app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        result = resolve_creatures_for_encounter(
+            {
+                'campaignId': ids['campaign_id'],
+                'sessionId': ids['session_id'],
+                'encounterPurpose': 'guard',
+                'partyLevel': 2,
+                'partySize': 4,
+                'difficulty': 'standard',
+                'allowGeneration': False,
+                'allowVariants': False,
+                'enemyGroups': [
+                    {'label': 'wolf screen', 'count': 2, 'creature': core_creature('wolf')},
+                    {
+                        'label': 'goblin handler',
+                        'count': 1,
+                        'themeTags': ['goblin'],
+                        'desiredRole': 'skirmisher',
+                        'desiredCreatureType': 'humanoid',
+                        'encounterPurpose': 'ambush',
+                        'difficulty': 'easy',
+                    },
+                ],
+            },
+            workspace_id='owner',
+        )
+
+    assert result['resolutionMethod'] == 'encounter_composed'
+    assert result['totalEnemies'] == 3
+    assert [group['count'] for group in result['groups']] == [2, 1]
+    assert result['groups'][0]['resolutionMethod'] == 'encounter_defined'
+    assert result['groups'][1]['creature']['id'] == 'goblin_skirmisher'
+    assert result['encounterGoal']['type'] == 'defend_location'
+
+
 def test_disposable_generated_creature_is_not_saved_by_policy():
     assert should_save_generated_creature({'name': 'illusion', 'source': 'generated'}, {'temporary': True}) is False
     assert should_save_generated_creature({'name': 'Named Ember Hound', 'source': 'generated_variant', 'visualTags': ['ember']}, {}) is True
+
+
+def test_creature_request_normalizes_string_booleans_and_enemy_count_bounds():
+    request = normalize_creature_request(
+        {
+            'allowGeneration': 'false',
+            'allowVariants': '0',
+            'saveGenerated': 'off',
+            'enemyCount': 99,
+        }
+    )
+
+    assert request['allowGeneration'] is False
+    assert request['allowVariants'] is False
+    assert request['saveGenerated'] is False
+    assert request['enemyCount'] == 24
+
+
+def test_battlefield_normalization_shapes_hazards_cover_exits_and_interactables():
+    battlefield = normalize_battlefield(
+        {
+            'environmentType': 'Dungeon Room',
+            'lighting': 'dark',
+            'visibility': 'smoke',
+            'zones': [{'name': 'Upper Gallery', 'description': 'A balcony above the ritual floor.'}],
+            'hazards': [
+                {
+                    'name': 'Open Fire Pit',
+                    'description': 'A cracked pit of coals.',
+                    'effect': 'fire_damage_if_entered',
+                    'damage': {'dice': '1d6', 'type': 'fire'},
+                }
+            ],
+            'cover': [{'name': 'Stone Pillar', 'cover_type': 'three quarters', 'zone_id': 'upper_gallery'}],
+            'exits': [{'name': 'North Tunnel', 'blocked': 'false', 'destination_location_id': 'moonfen'}],
+            'interactables': [{'name': 'Loose Chandelier', 'possible_uses': ['drop_on_target']}],
+        }
+    )
+
+    assert battlefield['environmentType'] == 'dungeon_room'
+    assert battlefield['hazards'][0]['damage'] == {'dice': '1d6', 'type': 'fire'}
+    assert battlefield['cover'][0]['coverType'] == 'three_quarters'
+    assert battlefield['exits'][0]['blocked'] is False
+    assert battlefield['interactables'][0]['possibleUses'] == ['drop_on_target']
 
 
 def test_intent_planner_goblin_flees_zombie_attacks_bandit_negotiates_and_wolf_hunts_weak_prey():
@@ -290,6 +372,133 @@ def test_intent_planner_goblin_flees_zombie_attacks_bandit_negotiates_and_wolf_h
     assert dead_leader_plan['intents'][0]['intentType'] == 'retreat'
 
 
+def test_schema_aliases_and_survival_rules_drive_planner_behavior():
+    creature = normalize_creature_definition(
+        {
+            'id': 'schematic_bandit',
+            'name': 'Schematic Bandit',
+            'source': 'campaign_pack',
+            'creatureType': 'humanoid',
+            'challengeTier': 'standard',
+            'stats': {'maxHp': 18, 'armorClass': 12},
+            'abilities': [{'id': 'club', 'name': 'Club', 'damage': {'dice': '1d6+1', 'type': 'bludgeoning'}}],
+            'behavior': {
+                'intelligenceProfile': 'average',
+                'combatRole': 'brute',
+                'primaryGoal': 'steal_item',
+                'aggression': 45,
+                'selfPreservation': 70,
+                'morale': 55,
+                'targetPriority': ['lowest_hp', 'nearest_target', 'last_attacker'],
+                'survivalRules': {
+                    'fightToDeath': False,
+                    'surrenderBelowHpPercent': 15,
+                    'callForHelpBelowHpPercent': 60,
+                },
+            },
+        },
+        source='campaign_pack',
+    )
+    enemy = instantiate_creature(creature, instance_id='schematic_bandit_1')
+    enemy['hp']['current'] = 9
+    combat = _combat_with(enemy)
+    combat['flags'] = {'combatDifficultyAI': {'allowFocusFire': False, 'allowSentientEnemyBrain': False}}
+    combat['participants'][0]['hp'] = {'current': 6, 'max': 24}
+    second_player = player_combat_participant(_player(name='Shield', hp=24))
+    second_player['id'] = 'player_2'
+    combat['participants'].append(second_player)
+
+    plan = plan_enemy_intents(combat)
+
+    assert creature['behavior']['targetPriority'] == ['wounded', 'nearest', 'last_damaged_by']
+    assert creature['behavior']['survivalRules']['surrenderBelowHpPercent'] == 15
+    assert plan['intents'][0]['intentType'] == 'call_reinforcements'
+    assert any(candidate['targetId'] == 'player_1' for candidate in plan['intentCandidates']['schematic_bandit_1'])
+
+
+def test_non_boss_enemy_uses_battlefield_hazard_when_objective_depends_on_terrain():
+    cultist = instantiate_creature(core_creature('cultist'), instance_id='cultist_1')
+    combat = _combat_with(cultist)
+    combat['battlefield']['hazards'] = [{'id': 'ritual_fire', 'name': 'Ritual Fire'}]
+    combat['battlefield']['interactables'] = [{'id': 'hanging_brazier', 'name': 'Hanging Brazier'}]
+    combat['flags'] = {
+        'combatDifficultyAI': {
+            'allowSentientEnemyBrain': False,
+            'allowEnvironmentalHazards': True,
+        }
+    }
+
+    plan = plan_enemy_intents(combat)
+
+    assert plan['intents'][0]['intentType'] == 'use_environment'
+    assert plan['intents'][0]['targetId'] == 'player_1'
+    assert plan['intents'][0]['selectionMethod'] == 'deterministic_scoring'
+    assert 'tacticSource' not in plan['intents'][0]
+    assert plan['combatFacts']['battlefieldHazards'] == 1
+    assert plan['combatFactsByEnemy']['cultist_1']['hazardIds'] == ['ritual_fire']
+    assert plan['intentCandidates']['cultist_1'][0]['intentType'] == 'use_environment'
+
+
+def test_trained_enemy_uses_cover_when_smart_tactics_make_exposure_costly():
+    mercenary = instantiate_creature(core_creature('mercenary'), instance_id='mercenary_1')
+    mercenary['hp']['current'] = 20
+    combat = _combat_with(mercenary)
+    combat['battlefield']['cover'] = [{'id': 'stone_pillar', 'name': 'Stone Pillar', 'coverType': 'half'}]
+    combat['flags'] = {
+        'combatDifficultyAI': {
+            'tacticalLevel': 'smart',
+            'allowSentientEnemyBrain': False,
+        }
+    }
+
+    plan = plan_enemy_intents(combat)
+
+    assert plan['intents'][0]['intentType'] == 'defend'
+    assert plan['intents'][0]['movementGoal'] == 'move to Stone Pillar'
+    assert plan['combatFactsByEnemy']['mercenary_1']['coverIds'] == ['stone_pillar']
+
+
+def test_guard_interposes_to_protect_wounded_leader():
+    guard = instantiate_creature(core_creature('guard'), instance_id='guard_1')
+    guard['behavior'] = {
+        **guard['behavior'],
+        'primaryGoal': 'protect_leader',
+        'loyalty': 90,
+        'discipline': 70,
+    }
+    leader = instantiate_creature(core_creature('bandit_captain'), instance_id='leader_1')
+    leader['hp']['current'] = 8
+    combat = _combat_with(guard)
+    combat['participants'].append(leader)
+    combat['flags'] = {'combatDifficultyAI': {'allowSentientEnemyBrain': False}}
+
+    plan = plan_enemy_intents(combat)
+    guard_intent = next(intent for intent in plan['intents'] if intent['enemyId'] == 'guard_1')
+
+    assert guard_intent['intentType'] == 'protect_ally'
+    assert guard_intent['targetId'] == 'leader_1'
+    assert plan['combatFactsByEnemy']['guard_1']['allyIds'] == ['leader_1']
+
+
+def test_evolved_creature_instance_seeds_grudge_memory_for_targeting():
+    evolved = evolve_creature(
+        core_creature('goblin_skirmisher'),
+        {'eventTags': ['fire'], 'grudgeTargetId': 'player_2', 'reason': 'Survived a humiliating defeat.'},
+    )
+    enemy = instantiate_creature(evolved, instance_id='scarred_goblin_1')
+    combat = _combat_with(enemy)
+    second_player = player_combat_participant(_player(name='Mira', hp=24))
+    second_player['id'] = 'player_2'
+    combat['participants'].append(second_player)
+    combat['flags'] = {'combatDifficultyAI': {'allowSentientEnemyBrain': False}}
+
+    plan = plan_enemy_intents(combat)
+
+    assert enemy['memory']['personalGrudgeTargetId'] == 'player_2'
+    assert plan['intents'][0]['targetId'] == 'player_2'
+    assert plan['combatFactsByEnemy']['scarred_goblin_1']['visibleTargetIds'] == ['player_1', 'player_2']
+
+
 def test_intent_planner_prefers_active_actor_when_targets_are_otherwise_equal():
     wolf = instantiate_creature(core_creature('wolf'), instance_id='wolf_1')
     combat = _combat_with(wolf)
@@ -320,6 +529,23 @@ def test_intent_planner_repositions_when_players_are_in_different_explicit_zone(
 
     assert plan['intents'][0]['intentType'] == 'reposition'
     assert plan['intents'][0].get('targetId') is None
+
+
+def test_sentient_enemy_brain_gate_includes_humanlike_and_intelligent_enemies_but_skips_animals():
+    settings = {'allowSentientEnemyBrain': True}
+    bandit = instantiate_creature(core_creature('bandit_thug'), instance_id='bandit_1')
+    goblin = instantiate_creature(core_creature('goblin_skirmisher'), instance_id='goblin_1')
+    wolf = instantiate_creature(core_creature('wolf'), instance_id='wolf_1')
+    zombie = instantiate_creature(core_creature('zombie'), instance_id='zombie_1')
+    awakened_wolf = instantiate_creature(core_creature('wolf'), instance_id='awakened_wolf_1')
+    awakened_wolf['behavior'] = {**awakened_wolf['behavior'], 'intelligenceProfile': 'average'}
+
+    assert enemy_brain_module.should_use_sentient_enemy_brain(bandit, settings) is True
+    assert enemy_brain_module.should_use_sentient_enemy_brain(goblin, settings) is True
+    assert enemy_brain_module.should_use_sentient_enemy_brain(awakened_wolf, settings) is True
+    assert enemy_brain_module.should_use_sentient_enemy_brain(wolf, settings) is False
+    assert enemy_brain_module.should_use_sentient_enemy_brain(zombie, settings) is False
+    assert enemy_brain_module.should_use_sentient_enemy_brain(bandit, {'allowSentientEnemyBrain': False}) is False
 
 
 def test_sentient_enemy_brain_uses_helper_contract_when_enabled(app, monkeypatch):
@@ -410,6 +636,36 @@ def test_combat_state_changes_validate_and_apply():
     assert final['nextState']['currentScene']['sceneType'] == 'exploration'
 
 
+def test_combat_participant_alias_resolves_generated_enemy_id():
+    thunderer = instantiate_creature(core_creature('bandit_thug'), instance_id='enemy_thor_99_1')
+    thunderer['name'] = 'The Thunderer'
+    thunderer['aliases'] = ['Thor', 'Thunderer']
+    state = {
+        'currentScene': {'sceneType': 'combat', 'dangerLevel': 8, 'combatState': 'active'},
+        'combat': _combat_with(thunderer),
+        'stateChangeLedger': [],
+    }
+
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'thunderer_hit',
+                'type': 'combat.participant.update',
+                'participantId': 'thunderer',
+                'hp': {'current': 4, 'max': thunderer['hp']['max']},
+            }
+        ],
+    )
+    applied_changes = validated_changes_for_application(validation)
+    applied = apply_state_changes(state, applied_changes)
+    enemy = next(participant for participant in applied['nextState']['combat']['participants'] if participant['id'] == 'enemy_thor_99_1')
+
+    assert not validation['rejected']
+    assert applied_changes[0]['participantId'] == 'enemy_thor_99_1'
+    assert enemy['hp']['current'] == 4
+
+
 def test_combat_end_clears_enemy_intent_and_duplicate_resolved_restart_is_rejected():
     surrendered = instantiate_creature(core_creature('bandit_thug'), instance_id='enemy_mirror_trickster_1')
     surrendered['conditions'] = ['surrendered']
@@ -490,6 +746,40 @@ def test_prepare_combat_does_not_restart_resolved_combat_from_non_hostile_fight_
             campaign=campaign,
             turn=turn,
             player_message='Loki says to Himeros: we cannot win in a fair fight.',
+            workspace_id=campaign.workspace_id,
+        )
+
+    assert result['changes'] == []
+    assert result['debug']['triggered'] is False
+
+
+def test_prepare_combat_does_not_start_from_cast_or_stale_scene_combat_state(app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        session_obj = db.session.get(Session, ids['session_id'])
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        assert session_obj is not None
+        assert campaign is not None
+        state = {
+            'currentScene': {'sceneType': 'combat', 'combatState': 'active', 'dangerLevel': 8},
+            'playerCharacters': [_player()],
+            'combat': {'status': 'ended', 'round': 1, 'participants': []},
+        }
+        turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            player_input='Loki casts a ward over Himeros.',
+        )
+        db.session.add(turn)
+        db.session.flush()
+
+        result = prepare_combat_for_turn(
+            state=state,
+            session_obj=session_obj,
+            campaign=campaign,
+            turn=turn,
+            player_message='Loki casts a ward over Himeros.',
             workspace_id=campaign.workspace_id,
         )
 
@@ -618,10 +908,33 @@ def test_creature_api_endpoints(client, app):
         f"/api/sessions/{ids['session_id']}/combat/start",
         json={'creature': core_creature('wolf'), 'enemyCount': 1},
     ).get_json()
+    composed = client.post(
+        f"/api/sessions/{ids['session_id']}/combat/start",
+        json={
+            'encounterPurpose': 'guard',
+            'allowGeneration': False,
+            'allowVariants': False,
+            'enemyGroups': [
+                {'label': 'wolves', 'count': 2, 'creature': core_creature('wolf')},
+                {
+                    'label': 'goblin',
+                    'count': 1,
+                    'themeTags': ['goblin'],
+                    'desiredRole': 'skirmisher',
+                    'desiredCreatureType': 'humanoid',
+                    'encounterPurpose': 'ambush',
+                    'difficulty': 'easy',
+                },
+            ],
+        },
+    ).get_json()
 
     assert core['entries']
     assert resolve['creature']['id'] == 'goblin_skirmisher'
     assert combat['combat']['status'] == 'active'
+    assert composed['combat']['flags']['resolverMethod'] == 'encounter_composed'
+    assert composed['combat']['flags']['enemyCount'] == 3
+    assert len([participant for participant in composed['combat']['participants'] if participant['team'] == 'enemy']) == 3
 
 
 def test_creature_deep_api_endpoints_for_pack_evolution_morale_and_debug(client, app):

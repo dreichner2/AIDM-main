@@ -587,6 +587,7 @@ export function InspectorPanel({
                 <div className="combat-debug-strip">
                   <span>{worldStatePanel.combat.resolverMethod || 'manual'}</span>
                   <span>{worldStatePanel.combat.creatureSource || 'unknown source'}</span>
+                  {worldStatePanel.combat.enemyGroupSummary ? <span>{worldStatePanel.combat.enemyGroupSummary}</span> : null}
                   <span>{worldStatePanel.combat.tacticalLevel}</span>
                   {worldStatePanel.combat.combatStartedBy ? <span>{worldStatePanel.combat.combatStartedBy}</span> : null}
                   {worldStatePanel.combat.initiativeRequired ? <span>initiative</span> : null}

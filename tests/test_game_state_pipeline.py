@@ -20,7 +20,7 @@ from aidm_server.game_state.validation.validator import (
     validated_changes_for_application,
 )
 from aidm_server.emergent_memory import apply_canon_patch
-from aidm_server.models import Campaign, DmTurn, Player, Session, SessionLogEntry, TurnEvent, safe_json_dumps, safe_json_loads
+from aidm_server.models import Campaign, CombatDebugEvent, DmTurn, Player, Session, TurnEvent, safe_json_dumps, safe_json_loads
 from tests.helpers import seed_world_campaign_player_session
 
 
@@ -445,6 +445,44 @@ def test_apply_xp_gain_and_capped_loss():
     assert loss_validation['modified'][0]['modifiedChange']['amount'] == 100
     assert result['nextState']['playerCharacters'][0]['xp']['current'] == 0
     assert state_log['lines'][0]['message'] == 'Removed 100 XP (capped at current XP).'
+
+
+def test_apply_xp_gain_auto_levels_when_threshold_is_reached():
+    state = _state(xp_current=250)
+    state['playerCharacters'][0]['level'] = 1
+    state['combat'] = {
+        'participants': [
+            {
+                'id': 'player_1',
+                'team': 'player',
+                'name': 'Kael',
+                'level': 1,
+                'hp': {'current': 10, 'max': 20, 'temp': 0},
+            }
+        ]
+    }
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'xp_gain_level_up',
+                'type': 'xp.add',
+                'actorId': 'player_1',
+                'amount': 50,
+                'source': 'post_dm',
+                'reason': 'Quest reward.',
+                'visible': True,
+            }
+        ],
+    )
+
+    gained = apply_state_changes(state, validated_changes_for_application(validation))
+    actor = gained['nextState']['playerCharacters'][0]
+
+    assert validation['rejected'] == []
+    assert actor['xp'] == {'current': 300, 'nextLevelAt': 900}
+    assert actor['level'] == 2
+    assert gained['nextState']['combat']['participants'][0]['level'] == 2
 
 
 def test_inventory_transfer_expands_to_atomic_remove_and_add():
@@ -970,6 +1008,25 @@ def test_scene_move_location_resets_stale_scene_local_fields():
     assert scene['description'] == ''
     assert scene['activeNpcIds'] == []
     assert 'mood' not in scene
+
+
+def test_scene_move_location_rejects_sentence_length_location_names():
+    state = _state()
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'bad_scene_location',
+                'type': 'scene.move_location',
+                'name': 'The stone archway groans while the whole hall fills with cold blue fire',
+            }
+        ],
+    )
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+
+    assert validation['accepted'] == []
+    assert validation['rejected'][0]['reason'] == 'Scene movement location must be a short place name.'
+    assert result['nextState'].get('locations') in (None, [])
 
 
 def test_location_discover_adds_location_and_does_not_duplicate_on_retry():
@@ -2290,6 +2347,111 @@ def test_spell_learn_persists_to_player_character_sheet(app):
         assert 'Misty Step' in known
 
 
+def test_xp_auto_level_persists_level_stats_and_spell_unlocks(app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        session_obj = db.session.get(Session, ids['session_id'])
+        player.class_ = 'Wizard'
+        player.level = 4
+        player.stats = safe_json_dumps(
+            {
+                'ability_scores': {
+                    'strength': 10,
+                    'dexterity': 10,
+                    'constitution': 10,
+                    'intelligence': 15,
+                    'wisdom': 10,
+                    'charisma': 10,
+                },
+                'current_hp': 20,
+                'hp_current': 20,
+                'max_hp': 20,
+                'hp_max': 20,
+                'xp': 6400,
+                'experience': 6400,
+                'proficiency_bonus': 2,
+            },
+            {},
+        )
+        player.character_sheet = safe_json_dumps({}, {})
+        db.session.commit()
+
+        actor_id = display_actor_id(player.player_id)
+        state = {
+            'sessionId': session_obj.session_id,
+            'campaignId': ids['campaign_id'],
+            'playerCharacters': [
+                {
+                    'id': actor_id,
+                    'playerId': player.player_id,
+                    'name': player.character_name,
+                    'class': player.class_,
+                    'level': 4,
+                    'health': {'currentHp': 20, 'maxHp': 20, 'tempHp': 0, 'conditions': []},
+                    'inventory': {'items': [], 'currency': {'pp': 0, 'gp': 0, 'ep': 0, 'sp': 0, 'cp': 0}},
+                    'xp': {'current': 6400, 'nextLevelAt': 6500},
+                    'metadata': {},
+                }
+            ],
+            'combat': {
+                'participants': [
+                    {
+                        'id': actor_id,
+                        'team': 'player',
+                        'name': player.character_name,
+                        'level': 4,
+                        'hp': {'current': 20, 'max': 20, 'temp': 0},
+                    }
+                ]
+            },
+            'stateChangeLedger': [],
+        }
+        validation = validate_state_changes(
+            state=state,
+            changes=[
+                {
+                    'id': 'xp_gain_level_five',
+                    'type': 'xp.add',
+                    'source': 'post_dm',
+                    'actorId': actor_id,
+                    'amount': 100,
+                    'visible': True,
+                }
+            ],
+        )
+        applied = apply_state_changes(state, validated_changes_for_application(validation))
+        persist_state_to_database(
+            session_obj=session_obj,
+            state=applied['nextState'],
+            players_by_id={player.player_id: player},
+        )
+        db.session.commit()
+
+        refreshed = db.session.get(Player, player.player_id)
+        stats = safe_json_loads(refreshed.stats, {})
+        sheet = safe_json_loads(refreshed.character_sheet, {})
+        known = {spell['name'] for spell in sheet['spellbook']['knownSpells']}
+        snapshot = safe_json_loads(session_obj.state_snapshot, {})
+        actor = snapshot['playerCharacters'][0]
+
+        assert validation['rejected'] == []
+        assert refreshed.level == 5
+        assert stats['xp'] == 6500
+        assert stats['experience'] == 6500
+        assert stats['nextLevelAt'] == 14000
+        assert stats['proficiency_bonus'] == 3
+        assert stats['max_hp'] == 28
+        assert stats['current_hp'] == 28
+        assert actor['level'] == 5
+        assert actor['xp'] == {'current': 6500, 'nextLevelAt': 14000}
+        assert actor['health']['maxHp'] == 28
+        assert snapshot['combat']['participants'][0]['level'] == 5
+        assert snapshot['combat']['participants'][0]['hp']['max'] == 28
+        assert 'Fireball' in known
+        assert 'Fireball' in actor['spells']
+
+
 def test_post_dm_heuristic_enemy_takes_word_damage_does_not_damage_player(app):
     state = _state(hp_current=10, hp_max=20)
     state['combat'] = {
@@ -2780,6 +2942,99 @@ def test_post_dm_pipeline_skips_extraction_for_pending_roll_turn(app):
         assert result['postAppliedChanges'] == []
         assert item_names == ['Smooth Stone']
         assert TurnEvent.query.filter_by(turn_id=turn.turn_id, event_type='state_update').count() == 0
+
+
+def test_post_dm_pipeline_records_combat_outcome_debug_event(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        player = db.session.get(Player, ids['player_id'])
+        session_obj = db.session.get(Session, ids['session_id'])
+        assert campaign is not None
+        assert player is not None
+        assert session_obj is not None
+        actor_id = f'player_{player.player_id}'
+        state = _state()
+        state['playerCharacters'][0]['id'] = actor_id
+        state['playerCharacters'][0]['playerId'] = player.player_id
+        state['currentScene'] = {'sceneType': 'combat', 'combatState': 'active', 'dangerLevel': 8}
+        state['combat'] = {
+            'status': 'active',
+            'round': 1,
+            'participants': [
+                {
+                    'id': actor_id,
+                    'team': 'player',
+                    'name': player.character_name,
+                    'kind': 'player_character',
+                    'hp': {'current': 10, 'max': 20, 'temp': 0},
+                    'conditions': [],
+                    'position': {'rangeBand': 'near'},
+                    'isAlive': True,
+                    'isConscious': True,
+                },
+                {
+                    'id': 'enemy_wolf_1',
+                    'team': 'enemy',
+                    'name': 'Wolf',
+                    'kind': 'creature',
+                    'hp': {'current': 11, 'max': 11, 'temp': 0},
+                    'conditions': [],
+                    'position': {'rangeBand': 'near'},
+                    'abilities': [],
+                    'morale': 50,
+                    'isAlive': True,
+                    'isConscious': True,
+                },
+            ],
+            'battlefield': {'environmentType': 'forest'},
+            'flags': {},
+        }
+        session_obj.state_snapshot = safe_json_dumps(state, {})
+        turn = DmTurn(
+            session_id=session_obj.session_id,
+            campaign_id=campaign.campaign_id,
+            player_id=player.player_id,
+            player_input='I slash the wolf.',
+            dm_output='Your strike deals 5 damage to the Wolf.',
+            status='completed',
+            metadata_json=safe_json_dumps(
+                {
+                    STATE_PIPELINE_METADATA_KEY: {
+                        'version': STATE_PIPELINE_VERSION,
+                        'actorId': actor_id,
+                        'stateBeforeDm': state,
+                        'preDmValidation': {'validatedActions': [], 'immediateChanges': []},
+                        'immediateValidation': {'accepted': [], 'rejected': [], 'modified': []},
+                        'immediateAppliedChanges': [],
+                    }
+                },
+                {},
+            ),
+        )
+        db.session.add(turn)
+        db.session.commit()
+
+        result = post_dm_pipeline(
+            turn=turn,
+            session_obj=session_obj,
+            campaign=campaign,
+            player=player,
+            dm_response_text=turn.dm_output,
+        )
+        db.session.commit()
+
+        debug_event = CombatDebugEvent.query.filter_by(
+            turn_id=turn.turn_id,
+            event_type='post_dm_combat_outcome',
+        ).one()
+        payload = safe_json_loads(debug_event.payload_json, {})
+
+        assert any(change['type'] == 'combat.participant.update' for change in result['postAppliedChanges'])
+        assert payload['validationCounts']['accepted'] >= 1
+        assert payload['appliedCombatChanges'][0]['participantId'] == 'enemy_wolf_1'
+        assert payload['appliedCombatChanges'][0]['hp']['current'] == 6
 
 
 def test_canon_patch_credits_state_pipeline_character_changes_without_double_apply(app):

@@ -15,6 +15,7 @@ from aidm_server.deploy_bootstrap import (
     _harden_env_local_permissions,
     _validate_rate_limits,
     _validate_network_exposure,
+    _validate_server_start_allowed,
 )
 from aidm_server.database import harden_sqlite_permissions
 
@@ -210,6 +211,21 @@ def test_validate_rate_limits_rejects_unknown_turn_coordinator_store(app):
         _validate_rate_limits(app)
 
 
+def test_validate_rate_limits_requires_database_stores_in_production(app):
+    app.config['AIDM_ENV'] = 'production'
+    app.config['AIDM_RATE_LIMIT_STORE'] = 'memory'
+    app.config['AIDM_TURN_COORDINATOR_STORE'] = 'database'
+
+    with pytest.raises(BootstrapError, match='AIDM_RATE_LIMIT_STORE=database'):
+        _validate_rate_limits(app)
+
+    app.config['AIDM_RATE_LIMIT_STORE'] = 'database'
+    app.config['AIDM_TURN_COORDINATOR_STORE'] = 'memory'
+
+    with pytest.raises(BootstrapError, match='AIDM_TURN_COORDINATOR_STORE=database'):
+        _validate_rate_limits(app)
+
+
 def test_validate_rate_limits_rejects_invalid_turn_lock_settings(app):
     app.config['AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS'] = 5
 
@@ -221,3 +237,13 @@ def test_validate_rate_limits_rejects_invalid_turn_lock_settings(app):
 
     with pytest.raises(BootstrapError, match='AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS'):
         _validate_rate_limits(app)
+
+
+def test_validate_server_start_allowed_rejects_production_werkzeug(app):
+    app.config['AIDM_ENV'] = 'production'
+
+    with pytest.raises(BootstrapError, match='production server'):
+        _validate_server_start_allowed(app)
+
+    app.config['AIDM_ENV'] = 'test'
+    _validate_server_start_allowed(app)

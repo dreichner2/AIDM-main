@@ -29,12 +29,20 @@ jobs:
           python -m pip install -r requirements.txt
       - name: Secret scan
         run: python scripts/scan_secrets.py
+      - name: Python dependency audit
+        run: python -m pip_audit -r requirements.runtime.txt
+      - name: Python lint
+        run: python -m ruff check --select E9,F63,F7,F82 aidm_server tests scripts
       - name: Run backend tests
         env:
           AIDM_ENV: test
           AIDM_AUTO_CREATE_SCHEMA: 'true'
           AIDM_TELEMETRY_ENABLED: 'false'
         run: python -m pytest
+      - name: Check generated API types
+        run: |
+          python scripts/generate_api_types.py
+          git diff --exit-code aidm_frontend/src/apiContract.generated.ts
 
   frontend:
     runs-on: ubuntu-latest
