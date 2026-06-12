@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
 from flask import current_app, has_app_context
 
-from aidm_server.canon_text import int_or_default
 from aidm_server.contracts import ProviderRequest
 from aidm_server.game_state.extraction.schemas import extract_json_object
 from aidm_server.llm_providers import get_helper_provider
@@ -15,13 +15,38 @@ from aidm_server.telemetry import telemetry_event, telemetry_metric
 
 SENTIENT_ENEMY_BRAIN_TASK = 'sentient_enemy_brain'
 SENTIENT_ENEMY_BRAIN_SYSTEM_MESSAGE = (
-    'You are the tactical brain for one sentient tabletop RPG enemy. '
-    'Return JSON only. Do not narrate. Do not mutate game state.'
+    'You are a strict combat candidate selector for one sentient tabletop RPG enemy. '
+    'The combat engine already generated legal candidate actions. '
+    'Return JSON only with selected_candidate_id, backup_candidate_ids, reasoning_summary, and confidence. '
+    'Do not output target IDs, ability IDs, movement, rolls, damage, effects, or resolver fields.'
 )
 NON_SENTIENT_INTELLIGENCE = {'mindless', 'animal'}
 NON_SENTIENT_TYPES = {'beast', 'ooze', 'swarm', 'plant'}
 INTELLIGENT_INTELLIGENCE = {'low_cunning', 'average', 'trained', 'tactical', 'genius', 'alien'}
 HUMANLIKE_CREATURE_TYPES = {'humanoid', 'fey', 'fiend', 'celestial', 'dragon', 'giant', 'aberration', 'monstrosity', 'custom'}
+_SELECTOR_ALLOWED_KEYS = {'selected_candidate_id', 'backup_candidate_ids', 'reasoning_summary', 'confidence'}
+_FORBIDDEN_EXECUTABLE_KEYS = {
+    'target_id',
+    'targetId',
+    'ability_id',
+    'abilityId',
+    'movement',
+    'movementGoal',
+    'destination_id',
+    'destinationId',
+    'roll',
+    'damage',
+    'save_dc',
+    'saveDc',
+    'environment_id',
+    'environmentId',
+    'action_bundle',
+    'actionBundle',
+    'resolver',
+    'intent',
+    'intentType',
+    'action_intent',
+}
 
 
 def _config_value(name: str) -> str:
@@ -131,6 +156,39 @@ def _available_abilities(enemy: dict[str, Any]) -> list[dict[str, Any]]:
     return abilities[:10]
 
 
+def _selector_candidate_view(candidate: dict[str, Any]) -> dict[str, Any]:
+    tags = candidate.get('tags') if isinstance(candidate.get('tags'), dict) else {}
+    return {
+        'candidate_id': candidate.get('candidateId'),
+        'summary': candidate.get('llmSummary') or candidate.get('reason'),
+        'intent_tags': tags.get('intent') or [],
+        'targeting_tags': tags.get('targeting') or [],
+        'ability_tags': tags.get('abilityProfile') or [],
+        'positioning_tags': tags.get('positioning') or [],
+        'risk_posture': tags.get('riskPosture'),
+        'objective_tags': tags.get('objective') or [],
+        'deterministic_rank': candidate.get('deterministicRank'),
+        'deterministic_score': candidate.get('deterministicScore'),
+        'is_fallback_candidate': bool(candidate.get('isFallbackCandidate')),
+    }
+
+
+def _recent_behavior_summary(enemy: dict[str, Any]) -> list[str]:
+    memory = enemy.get('memory') if isinstance(enemy.get('memory'), dict) else {}
+    recent = []
+    for item in memory.get('recentIntents') or memory.get('recent_intents') or []:
+        if isinstance(item, str) and item.strip():
+            recent.append(item.strip()[:160])
+        elif isinstance(item, dict):
+            intent_type = item.get('intentType') or item.get('intent_type') or item.get('type')
+            target = item.get('targetId') or item.get('target_id')
+            ability = item.get('abilityId') or item.get('ability_id')
+            pieces = [str(value) for value in (intent_type, target, ability) if value]
+            if pieces:
+                recent.append(' / '.join(pieces)[:160])
+    return recent[:4]
+
+
 def build_sentient_enemy_brain_prompt(
     enemy: dict[str, Any],
     combat: dict[str, Any],
@@ -143,82 +201,100 @@ def build_sentient_enemy_brain_prompt(
     behavior = _behavior(enemy)
     hp = enemy.get('hp') if isinstance(enemy.get('hp'), dict) else {}
     battlefield = combat.get('battlefield') if isinstance(combat.get('battlefield'), dict) else {}
+    selector_input = {
+        'actor': {
+            'actor_id': enemy.get('id'),
+            'name': enemy.get('name'),
+            'type': enemy.get('creatureType') or enemy.get('kind'),
+            'hp': f"{hp.get('current')}/{hp.get('max')}",
+            'morale': enemy.get('morale'),
+            'position': _position_summary(enemy),
+            'behavior': behavior,
+        },
+        'battle_context': {
+            'round': combat.get('round', 1),
+            'allowed_target_ids': sorted(allowed_target_ids),
+            'party_state': _players_summary(combat, allowed_target_ids),
+            'battlefield': battlefield,
+            'settings': settings,
+        },
+        'deterministic_baseline': {
+            'fallback_candidate_id': fallback_intent.get('candidateId'),
+            'top_candidate_id': fallback_intent.get('candidateId'),
+            'top_candidate_summary': fallback_intent.get('llmSummary') or fallback_intent.get('reason'),
+        },
+        'recent_behavior': _recent_behavior_summary(enemy),
+        'anti_repetition_hint': 'Avoid repeating the same intent unless it is clearly the best legal candidate.',
+        'legal_candidates': [_selector_candidate_view(candidate) for candidate in candidates[:8]],
+        'schema': {
+            'required': ['selected_candidate_id', 'backup_candidate_ids', 'reasoning_summary', 'confidence'],
+            'additionalProperties': False,
+            'forbidden_executable_fields': sorted(_FORBIDDEN_EXECUTABLE_KEYS),
+        },
+    }
     return (
-        'Return one JSON object with this shape:\n'
-        '{"enemy_id": "...", "goal": "...", "current_emotion": "...", "morale": 0, '
-        '"target": {"id": "...", "reason": "..."}, '
-        '"movement_intent": {"goal": "...", "zoneId": "...", "rangeBand": "..."}, '
-        '"action_intent": {"intentType": "...", "abilityId": "...", "requiresRoll": true, "preferredRoll": "..."}, '
-        '"reasoning_summary": "...", "requires_roll": true, "preferred_roll": "...", "fallback_if_blocked": "..."}\n'
-        'Use only allowed target ids and available ability ids. If no target is reachable, choose movement/positioning instead of inventing reach. '
-        'Prefer surrender, retreat, negotiation, or repositioning when morale/self-preservation makes that more alive than fighting to the death.\n\n'
-        f"Enemy: {enemy.get('name')} ({enemy.get('id')})\n"
-        f"Enemy type: {enemy.get('creatureType') or enemy.get('kind')}\n"
-        f"Enemy HP: {hp.get('current')}/{hp.get('max')}; morale {enemy.get('morale')}\n"
-        f"Enemy position: {_position_summary(enemy)}\n"
-        f"Enemy behavior: {behavior}\n"
-        f"Available abilities: {_available_abilities(enemy)}\n"
-        f"Allowed target ids now: {sorted(allowed_target_ids)}\n"
-        f"Party state: {_players_summary(combat, allowed_target_ids)}\n"
-        f"Battlefield: {battlefield}\n"
-        f"Combat settings: {settings}\n"
-        f"Deterministic fallback intent: {fallback_intent}\n"
-        f"Deterministic candidates: {candidates[:6]}\n"
+        'Select exactly one already-legal candidate for this enemy turn.\n'
+        'You are not writing a combat action. You may only choose candidate IDs from legal_candidates.\n'
+        'If no non-fallback candidate clearly fits, choose fallback_candidate_id.\n'
+        'Return JSON only using the schema exactly.\n\n'
+        f"LEGAL_CANDIDATE_SELECTION_INPUT:\n{json.dumps(selector_input, sort_keys=True)}"
     )
 
 
-def _validated_brain_payload(
-    enemy: dict[str, Any],
+def _validated_candidate_selection(
     payload: dict[str, Any] | None,
     *,
-    allowed_target_ids: set[str],
+    candidates: list[dict[str, Any]],
+    fallback_candidate_id: str | None,
 ) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
-    action = payload.get('action_intent') if isinstance(payload.get('action_intent'), dict) else payload
-    intent_type = str(action.get('intentType') or action.get('intent_type') or action.get('type') or '').strip()
-    if not intent_type:
+    if any(key in payload for key in _FORBIDDEN_EXECUTABLE_KEYS):
         return None
-    ability_ids = {
-        str(ability.get('id'))
-        for ability in enemy.get('abilities') or []
-        if isinstance(ability, dict) and ability.get('id')
+    if set(payload.keys()) - _SELECTOR_ALLOWED_KEYS:
+        return None
+    selected_id = str(payload.get('selected_candidate_id') or '').strip()
+    candidate_by_id = {
+        str(candidate.get('candidateId')): candidate
+        for candidate in candidates
+        if isinstance(candidate, dict) and candidate.get('candidateId')
     }
-    ability_id = str(action.get('abilityId') or action.get('ability_id') or '').strip()
-    if ability_id and ability_id not in ability_ids:
-        ability_id = ''
-    target = payload.get('target') if isinstance(payload.get('target'), dict) else {}
-    target_id = str(target.get('id') or action.get('targetId') or action.get('target_id') or '').strip()
-    if target_id and target_id not in allowed_target_ids:
-        target_id = ''
-    morale = int_or_default(payload.get('morale'), default=int_or_default(enemy.get('morale'), default=50))
+    if selected_id not in candidate_by_id:
+        return None
+    selected = candidate_by_id[selected_id]
+    if selected.get('legalAtGeneration') is False:
+        return None
+    dry_run = selected.get('dryRun') if isinstance(selected.get('dryRun'), dict) else {}
+    if dry_run and dry_run.get('canResolveNow') is False:
+        return None
+    backup_ids = []
+    raw_backup_ids = payload.get('backup_candidate_ids')
+    if raw_backup_ids is None:
+        raw_backup_ids = []
+    if not isinstance(raw_backup_ids, list):
+        return None
+    for backup_id in raw_backup_ids[:3]:
+        backup_id = str(backup_id or '').strip()
+        if not backup_id:
+            continue
+        if backup_id not in candidate_by_id:
+            return None
+        backup = candidate_by_id[backup_id]
+        if backup.get('legalAtGeneration') is False:
+            return None
+        backup_ids.append(backup_id)
+    try:
+        confidence = float(payload.get('confidence'))
+    except (TypeError, ValueError):
+        return None
+    confidence = max(0.0, min(1.0, confidence))
     return {
-        'intentType': intent_type,
-        'abilityId': ability_id or None,
-        'targetId': target_id or None,
-        'movementGoal': (
-            (payload.get('movement_intent') or {}).get('goal')
-            if isinstance(payload.get('movement_intent'), dict)
-            else action.get('movementGoal') or action.get('movement_goal')
-        ),
-        'reason': str(payload.get('reasoning_summary') or action.get('reason') or 'Sentient enemy brain selected this tactic.'),
-        'confidence': max(0.0, min(1.0, float(action.get('confidence') or payload.get('confidence') or 0.78))),
-        'visibleTelegraph': action.get('visibleTelegraph') or action.get('visible_telegraph'),
-        'suggestedSpeech': action.get('suggestedSpeech') or action.get('suggested_speech'),
-        'requiredRolls': [payload.get('preferred_roll') or action.get('preferredRoll') or action.get('preferred_roll')] if (payload.get('requires_roll') or action.get('requiresRoll')) else [],
-        'brain': {
-            'enemy_id': payload.get('enemy_id') or enemy.get('id'),
-            'goal': payload.get('goal'),
-            'current_emotion': payload.get('current_emotion'),
-            'morale': max(0, min(100, morale)),
-            'target': {'id': target_id or None, 'reason': target.get('reason')},
-            'movement_intent': payload.get('movement_intent') if isinstance(payload.get('movement_intent'), dict) else {},
-            'action_intent': action,
-            'reasoning_summary': payload.get('reasoning_summary'),
-            'requires_roll': bool(payload.get('requires_roll') or action.get('requiresRoll')),
-            'preferred_roll': payload.get('preferred_roll') or action.get('preferredRoll') or action.get('preferred_roll'),
-            'fallback_if_blocked': payload.get('fallback_if_blocked'),
-        },
+        'selectedCandidateId': selected_id,
+        'backupCandidateIds': backup_ids,
+        'reasoningSummary': str(payload.get('reasoning_summary') or '')[:240],
+        'confidence': confidence,
+        'fallbackCandidateId': fallback_candidate_id,
+        'selectedCandidate': selected,
     }
 
 
@@ -231,6 +307,7 @@ def plan_sentient_enemy_intent(
     fallback_intent: dict[str, Any],
     candidates: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], str]:
+    fallback_candidate_id = str(fallback_intent.get('candidateId') or '').strip() or None
     fallback = {
         **fallback_intent,
         'selectionMethod': fallback_intent.get('selectionMethod') or 'deterministic_sentient_fallback',
@@ -253,17 +330,45 @@ def plan_sentient_enemy_intent(
             )
         )
         payload = extract_json_object(response.text)
-        intent = _validated_brain_payload(enemy, payload, allowed_target_ids=allowed_target_ids)
-        if not intent:
-            raise ValueError('sentient enemy brain returned invalid intent')
+        selection = _validated_candidate_selection(
+            payload,
+            candidates=candidates,
+            fallback_candidate_id=fallback_candidate_id,
+        )
+        if not selection:
+            raise ValueError('sentient enemy brain returned invalid candidate selection')
+        selected_candidate = selection['selectedCandidate']
+        selected_intent = selected_candidate.get('intent') if isinstance(selected_candidate.get('intent'), dict) else None
+        if not selected_intent:
+            raise ValueError('sentient enemy brain selected candidate without an executable intent')
         intent = {
-            **fallback_intent,
-            **{key: value for key, value in intent.items() if value not in (None, [], {})},
-            'enemyId': enemy.get('id'),
-            'selectionMethod': 'sentient_enemy_brain',
+            **selected_intent,
+            'selectionScore': selected_candidate.get('score'),
+            'selectionMethod': 'sentient_enemy_brain_candidate_selector',
             'brainSource': response.model,
+            'candidateSelection': {
+                'selectedCandidateId': selection['selectedCandidateId'],
+                'backupCandidateIds': selection['backupCandidateIds'],
+                'fallbackCandidateId': selection['fallbackCandidateId'],
+                'reasoningSummary': selection['reasoningSummary'],
+                'confidence': selection['confidence'],
+                'changedDeterministicBaseline': selection['selectedCandidateId'] != fallback_candidate_id,
+            },
+            'reason': selection['reasoningSummary'] or selected_intent.get('reason') or fallback_intent.get('reason'),
+            'confidence': selection['confidence'],
         }
         telemetry_metric('combat.sentient_enemy_brain.success_total', 1, tags={'model': response.model})
+        telemetry_event(
+            'combat.sentient_enemy_brain.selected',
+            payload={
+                'enemyId': enemy.get('id'),
+                'selectedCandidateId': selection['selectedCandidateId'],
+                'fallbackCandidateId': selection['fallbackCandidateId'],
+                'changedDeterministicBaseline': selection['selectedCandidateId'] != fallback_candidate_id,
+                'confidence': selection['confidence'],
+                'model': response.model,
+            },
+        )
         return intent, response.model
     except Exception as exc:
         telemetry_event('combat.sentient_enemy_brain.failed', payload={'error': str(exc)[:300]}, severity='warning')

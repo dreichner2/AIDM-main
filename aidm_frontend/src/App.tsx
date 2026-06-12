@@ -624,6 +624,11 @@ function App() {
       ) ?? null,
     [players, selectedCampaignId, selectedPlayerId],
   )
+  const selectedPlayerMatchesDetail =
+    !!selectedPlayer && playerDetail?.player_id === selectedPlayer.player_id
+  const selectedPlayerLevel = selectedPlayerMatchesDetail
+    ? playerDetail.level
+    : selectedPlayer?.level ?? null
   useEffect(() => {
     if (lastSelectedCampaignIdRef.current !== selectedCampaignId) {
       lastSelectedCampaignIdRef.current = selectedCampaignId
@@ -652,7 +657,7 @@ function App() {
   const statBlock = normalizeStats(
     playerDetail?.stats,
     playerDetail?.character_sheet,
-    selectedPlayer?.level ?? null,
+    selectedPlayerLevel,
   )
   const inventoryRows = normalizeInventory(playerDetail?.inventory)
   const spellbook = normalizeSpellbook(playerDetail?.stats, playerDetail?.character_sheet)
@@ -712,7 +717,11 @@ function App() {
     [...timeline].reverse().find((entry) => entry.role === 'dm') ?? null
   const latestTimelineEntry = timeline.length ? timeline[timeline.length - 1] : null
   const currentResponseEntry =
-    latestTimelineEntry?.streaming || latestTimelineEntry?.role === 'dm' ? latestTimelineEntry : null
+    latestTimelineEntry?.streaming || latestTimelineEntry?.role === 'dm'
+      ? latestTimelineEntry
+      : latestTimelineEntry?.role === 'system'
+        ? latestDmEntry
+        : null
   const turnRows = currentResponseEntry
     ? timeline.filter((entry) => entry.id !== currentResponseEntry.id)
     : timeline
@@ -961,6 +970,16 @@ function App() {
     if (!feed) return
     feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' })
     setShowJumpToLatest(false)
+  }, [])
+
+  const dismissTimelineEntry = useCallback((turnId: string) => {
+    setOptimisticEntries((current) => current.filter((entry) => entry.id !== turnId))
+    setExpandedTurnIds((current) => {
+      if (!current.has(turnId)) return current
+      const next = new Set(current)
+      next.delete(turnId)
+      return next
+    })
   }, [])
 
   useEffect(() => {
@@ -2326,23 +2345,24 @@ function App() {
     clearResolvedOperationalErrors()
   }, [clearResolvedOperationalErrors, socketStatus])
 
+  const displayPlayer = selectedPlayerMatchesDetail ? playerDetail : selectedPlayer
   const displayCharacter = {
-    name: selectedPlayer?.character_name ?? 'No player selected',
-    ancestryClass: selectedPlayer
-      ? `${selectedPlayer.race || 'Adventurer'} ${selectedPlayer.char_class || selectedPlayer.class_ || 'Class unset'}`
+    name: displayPlayer?.character_name ?? 'No player selected',
+    ancestryClass: displayPlayer
+      ? `${displayPlayer.race || 'Adventurer'} ${displayPlayer.char_class || displayPlayer.class_ || 'Class unset'}`
       : 'Load or create a player',
-    level: selectedPlayer?.level ?? '—',
-    detailId: selectedPlayer?.player_id ? `Player #${selectedPlayer.player_id}` : 'No player',
+    level: displayPlayer?.level ?? '—',
+    detailId: displayPlayer?.player_id ? `Player #${displayPlayer.player_id}` : 'No player',
   }
   const xpProgress = normalizeXp(playerDetail?.stats ?? playerDetail?.character_sheet, displayCharacter.level)
   const capacity = inventoryCapacity(playerDetail?.stats ?? playerDetail?.character_sheet)
   const inventoryWeightLabel = buildInventoryWeightLabel(inventoryRows, capacity)
   const inventoryGoldLabel = buildInventoryGoldLabel(playerDetail?.stats, playerDetail?.character_sheet)
   const characterAvatarSrc =
-    selectedPlayer?.profile_image ||
+    displayPlayer?.profile_image ||
     profileIconSrcForCharacter({
-      race: selectedPlayer?.race,
-      sex: selectedPlayer?.sex,
+      race: displayPlayer?.race,
+      sex: displayPlayer?.sex,
       seed: displayCharacter.name,
     }) ||
     avatarDataUri(displayCharacter.name, 'character')
@@ -2864,6 +2884,7 @@ function App() {
         olderLogLoading={olderLogLoading}
         loadOlderSessionLog={loadOlderSessionLog}
         turnRows={turnRows}
+        dismissTimelineEntry={dismissTimelineEntry}
         expandedTurnIds={expandedTurnIds}
         setExpandedTurnIds={setExpandedTurnIds}
         selectedPlayer={selectedPlayer}

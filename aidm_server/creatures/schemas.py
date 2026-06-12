@@ -413,6 +413,7 @@ def normalize_creature_definition(value: Any, *, source: str | None = None) -> d
         'descriptionShort': _text(raw.get('descriptionShort', raw.get('description_short')), name)[:240],
         'descriptionLong': _text(raw.get('descriptionLong', raw.get('description_long')), raw.get('descriptionShort') or name)[:2000],
         'creatureType': creature_type,
+        'aliases': _string_list(raw.get('aliases'), limit=12),
         'visualTags': _string_list(raw.get('visualTags', raw.get('visual_tags', raw.get('tags'))), limit=16),
         'level': level,
         'challengeTier': challenge_tier,

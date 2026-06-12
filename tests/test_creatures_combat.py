@@ -1,18 +1,28 @@
 from __future__ import annotations
 
+from copy import deepcopy
+import json
+import re
+import threading
+import time
+
+from flask import has_app_context
+
+import aidm_server.combat.boss_tactics as boss_tactics_module
+import aidm_server.combat.intent_planner as intent_planner_module
 from aidm_server.combat.end_conditions import check_combat_end
 import aidm_server.combat.enemy_brain as enemy_brain_module
+from aidm_server.combat.evaluation import run_combat_helper_evaluation, summarize_combat_helper_plan
 from aidm_server.combat.intent_planner import plan_enemy_intents
-from aidm_server.combat.pipeline import prepare_combat_for_turn
+from aidm_server.combat.pipeline import DIRECT_HOSTILE_ACTION_PATTERN, combat_turn_advance_change, prepare_combat_for_turn
 from aidm_server.combat.morale import apply_morale_event
-from aidm_server.combat.state import combat_summary_for_dm, instantiate_creature, normalize_battlefield, player_combat_participant
+from aidm_server.combat.state import combat_summary_for_dm, combat_turn_context, instantiate_creature, normalize_battlefield, player_combat_participant
 from aidm_server.creatures.balance import analyze_creature_balance, auto_scale_creature
 from aidm_server.creatures.campaign_pack import generate_campaign_pack_bestiary
 from aidm_server.creatures.core_bestiary import core_bestiary, core_creature
 from aidm_server.creatures.evolution import evolve_creature
-from aidm_server.creatures.generator import generate_new_creature
 from aidm_server.creatures.repository import save_bestiary_entry, should_save_generated_creature
-from aidm_server.creatures.resolver import normalize_creature_request, resolve_creature_for_encounter, resolve_creatures_for_encounter
+from aidm_server.creatures.resolver import default_request_from_session, normalize_creature_request, resolve_creature_for_encounter, resolve_creatures_for_encounter
 from aidm_server.creatures.schemas import normalize_creature_definition
 from aidm_server.game_state.application.applier import apply_state_changes
 from aidm_server.game_state.validation.validator import validate_state_changes, validated_changes_for_application
@@ -40,6 +50,255 @@ def _combat_with(enemy):
         'battlefield': {'environmentType': 'forest', 'lighting': 'bright', 'visibility': 'clear'},
         'flags': {},
     }
+
+
+def _player_participant(player_id: int, name: str, hp: int = 20) -> dict:
+    actor = _player(name=name, hp=hp)
+    actor['id'] = f'player_{player_id}'
+    actor['playerId'] = player_id
+    return player_combat_participant(actor)
+
+
+def test_combat_turn_context_orders_players_then_enemy_block():
+    enemy_1 = instantiate_creature(core_creature('bandit_thug'), instance_id='enemy_bandit_1')
+    enemy_2 = instantiate_creature(core_creature('wolf'), instance_id='enemy_wolf_1')
+    combat = {
+        'status': 'active',
+        'round': 1,
+        'turnIndex': 0,
+        'participants': [
+            _player_participant(1, 'Loki'),
+            _player_participant(2, 'Himeros'),
+            enemy_1,
+            enemy_2,
+        ],
+    }
+
+    first_turn = combat_turn_context(combat)
+
+    assert first_turn['turnOrderIds'] == ['player_1', 'player_2', 'enemy_bandit_1', 'enemy_wolf_1']
+    assert first_turn['currentActor']['id'] == 'player_1'
+    assert first_turn['immediateNextActor']['id'] == 'player_2'
+    assert first_turn['enemyTurnBlock'] == []
+    assert first_turn['nextTurnIndex'] == 1
+    assert first_turn['nextRound'] == 1
+
+    combat['turnIndex'] = 1
+    last_player_turn = combat_turn_context(combat)
+
+    assert last_player_turn['currentActor']['id'] == 'player_2'
+    assert [actor['id'] for actor in last_player_turn['enemyTurnBlock']] == ['enemy_bandit_1', 'enemy_wolf_1']
+    assert last_player_turn['handoffActor']['id'] == 'player_1'
+    assert last_player_turn['nextTurnIndex'] == 0
+    assert last_player_turn['nextRound'] == 2
+    assert 'enemy turns in order' in last_player_turn['turnInstruction']
+
+    summary = combat_summary_for_dm(combat)
+    assert summary['currentTurn']['id'] == 'player_2'
+    assert summary['handoffActor']['id'] == 'player_1'
+
+
+def test_prepare_combat_uses_roster_turn_not_submitting_player_for_active_combat(app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        session_obj = db.session.get(Session, ids['session_id'])
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        assert session_obj is not None
+        assert campaign is not None
+        submitted_player_id = ids['player_id']
+        active_player_id = submitted_player_id + 1000
+        enemy = instantiate_creature(core_creature('bandit_thug'), instance_id='enemy_bandit_1')
+        state = {
+            'currentScene': {'sceneType': 'combat', 'combatState': 'active', 'dangerLevel': 8},
+            'playerCharacters': [
+                {'id': f'player_{active_player_id}', 'playerId': active_player_id, 'name': 'Loki', 'health': {'currentHp': 20, 'maxHp': 20}, 'stats': {'armorClass': 13}},
+                {'id': f'player_{submitted_player_id}', 'playerId': submitted_player_id, 'name': 'Goliath', 'health': {'currentHp': 17, 'maxHp': 17}, 'stats': {'armorClass': 14}},
+            ],
+            'combat': {
+                'status': 'active',
+                'round': 1,
+                'turnIndex': 0,
+                'participants': [
+                    _player_participant(active_player_id, 'Loki'),
+                    _player_participant(submitted_player_id, 'Goliath', hp=17),
+                    enemy,
+                ],
+                'flags': {'activeActorId': f'player_{submitted_player_id}'},
+            },
+        }
+        turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=submitted_player_id,
+            player_input='Goliath swings again.',
+        )
+        db.session.add(turn)
+        db.session.flush()
+
+        result = prepare_combat_for_turn(
+            state=state,
+            session_obj=session_obj,
+            campaign=campaign,
+            turn=turn,
+            player_message='Goliath swings again.',
+            workspace_id=campaign.workspace_id,
+        )
+
+    update = next(change for change in result['changes'] if change['type'] == 'combat.update')
+    assert update['turnIndex'] == 0
+    assert update['flags']['activeActorId'] == f'player_{active_player_id}'
+    assert update['flags']['submittedActorId'] == f'player_{submitted_player_id}'
+    assert update['flags']['offTurnSubmission'] is True
+    assert result['combatContext']['currentTurn']['id'] == f'player_{active_player_id}'
+    assert result['combatContext']['nextActor']['id'] == f'player_{submitted_player_id}'
+
+
+def test_combat_turn_advance_skips_enemy_block_to_next_player_round():
+    enemy_1 = instantiate_creature(core_creature('bandit_thug'), instance_id='enemy_bandit_1')
+    enemy_2 = instantiate_creature(core_creature('wolf'), instance_id='enemy_wolf_1')
+    state = {
+        'currentScene': {'sceneType': 'combat', 'combatState': 'active'},
+        'combat': {
+            'status': 'active',
+            'round': 1,
+            'turnIndex': 1,
+            'participants': [
+                _player_participant(1, 'Loki'),
+                _player_participant(2, 'Himeros'),
+                enemy_1,
+                enemy_2,
+            ],
+            'flags': {
+                'activeActorId': 'player_2',
+                'submittedActorId': 'player_2',
+                'offTurnSubmission': False,
+            },
+        },
+    }
+    turn = DmTurn(turn_id=44, session_id=1, campaign_id=1, player_id=2, player_input='Himeros attacks.')
+
+    change = combat_turn_advance_change(state=state, turn=turn, actor_id='player_2')
+
+    assert change is not None
+    assert change['type'] == 'combat.update'
+    assert change['turnIndex'] == 0
+    assert change['round'] == 2
+    assert change['flags']['activeActorId'] == 'player_1'
+    assert change['flags']['lastResolvedActorId'] == 'player_2'
+    assert change['flags']['lastEnemyTurnBlock'] == ['enemy_bandit_1', 'enemy_wolf_1']
+
+
+def test_direct_hostile_action_pattern_covers_thrown_or_smashing_attacks():
+    assert DIRECT_HOSTILE_ACTION_PATTERN.search('I throw a javelin at The Thunderer now')
+    assert DIRECT_HOSTILE_ACTION_PATTERN.search('I smash the champion with both fists')
+    assert DIRECT_HOSTILE_ACTION_PATTERN.search('I leap and try to smack Thor')
+    assert DIRECT_HOSTILE_ACTION_PATTERN.search('I grab his head and try to crush it')
+
+
+def test_default_encounter_request_prefers_hostile_scene_npc_over_weapon_phrase(app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        session_obj = db.session.get(Session, ids['session_id'])
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        assert session_obj is not None
+        assert campaign is not None
+        state = {
+            'currentScene': {
+                'name': 'Colosseum arena',
+                'sceneType': 'combat',
+                'combatState': 'active',
+                'characterPositions': {'thunderer': 'near'},
+            },
+            'playerCharacters': [_player()],
+            'npcs': [
+                {
+                    'id': 'thunderer',
+                    'name': 'The Thunderer',
+                    'disposition': 'hostile',
+                    'status': 'met',
+                    'locationId': 'colosseum',
+                }
+            ],
+        }
+
+        request = default_request_from_session(
+            session_obj=session_obj,
+            campaign=campaign,
+            state=state,
+            player_message='I throw another javelin at the thunderes head',
+        )
+
+    assert request['allowGeneration'] is False
+    creature = request['encounterDefinedCreatures'][0]
+    assert creature['id'] == 'thunderer'
+    assert creature['name'] == 'The Thunderer'
+    assert 'thunderer' in creature['aliases']
+
+
+def test_prepare_combat_starts_known_thunderer_npc_instead_of_generated_thrower(app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        session_obj = db.session.get(Session, ids['session_id'])
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        assert session_obj is not None
+        assert campaign is not None
+        state = {
+            'currentScene': {
+                'name': 'Colosseum arena',
+                'sceneType': 'combat',
+                'combatState': 'active',
+                'characterPositions': {'thunderer': 'near'},
+            },
+            'playerCharacters': [_player()],
+            'npcs': [
+                {
+                    'id': 'thunderer',
+                    'name': 'The Thunderer',
+                    'disposition': 'hostile',
+                    'status': 'met',
+                    'locationId': 'colosseum',
+                }
+            ],
+            'combat': {
+                'status': 'ended',
+                'round': 1,
+                'participants': [
+                    _player_participant(1, 'Kael'),
+                    {
+                        **instantiate_creature(core_creature('bandit_thug'), instance_id='enemy_old_thrower_1'),
+                        'name': 'Thunder Javelin Thrower',
+                        'definitionId': 'thunder_javelin_thrower',
+                        'conditions': ['fled'],
+                        'isAlive': False,
+                    },
+                ],
+            },
+        }
+        turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            player_input='I grab his head and try to crush it',
+        )
+        db.session.add(turn)
+        db.session.flush()
+
+        result = prepare_combat_for_turn(
+            state=state,
+            session_obj=session_obj,
+            campaign=campaign,
+            turn=turn,
+            player_message='I grab his head and try to crush it',
+            workspace_id=campaign.workspace_id,
+        )
+
+    start = next(change for change in result['changes'] if change['type'] == 'combat.start')
+    enemies = [participant for participant in start['combat']['participants'] if participant.get('team') == 'enemy']
+    assert len(enemies) == 1
+    assert enemies[0]['definitionId'] == 'thunderer'
+    assert enemies[0]['name'] == 'The Thunderer'
+    assert 'thunderer' in enemies[0]['aliases']
+    assert 'Thunder Javelin Thrower' not in result['combatContext']['turnOrderText']
 
 
 def test_core_bestiary_entries_validate_and_balance():
@@ -362,7 +621,16 @@ def test_intent_planner_goblin_flees_zombie_attacks_bandit_negotiates_and_wolf_h
     assert goblin_plan['intents'][0]['intentType'] == 'retreat'
     assert goblin_plan['intents'][0]['selectionMethod'] == 'deterministic_scoring'
     assert isinstance(goblin_plan['intents'][0]['selectionScore'], int)
+    assert goblin_plan['intents'][0]['candidateId'].startswith('turn_1.goblin_1.cand_')
+    assert goblin_plan['intents'][0]['resolver']['resolverType'] == 'engine_intent_bundle_v1'
+    assert goblin_plan['intents'][0]['dryRun']['canResolveNow'] is True
     assert goblin_plan['intentCandidates']['goblin_1'][0]['intentType'] == 'retreat'
+    assert goblin_plan['intentCandidates']['goblin_1'][0]['isFallbackCandidate'] is True
+    assert goblin_plan['intentCandidates']['goblin_1'][0]['candidateId'] == goblin_plan['intents'][0]['candidateId']
+    assert goblin_plan['intentCandidates']['goblin_1'][0]['resolverType'] == 'engine_intent_bundle_v1'
+    assert 'resolver' not in goblin_plan['intentCandidates']['goblin_1'][0]
+    assert isinstance(goblin_plan['intentCandidates']['goblin_1'][0]['matcherScore'], float)
+    assert 'base_deterministic_score' in goblin_plan['intentCandidates']['goblin_1'][0]['matcherSignals']
     assert any(candidate['intentType'] == 'attack' for candidate in goblin_plan['intentCandidates']['goblin_1'])
     assert zombie_plan['intents'][0]['intentType'] == 'attack'
     assert bandit_plan['intents'][0]['intentType'] == 'negotiate'
@@ -554,20 +822,21 @@ def test_sentient_enemy_brain_uses_helper_contract_when_enabled(app, monkeypatch
     class FakeBrainProvider:
         def generate(self, request):
             requests.append(request)
+            match = re.search(r'LEGAL_CANDIDATE_SELECTION_INPUT:\n(\{.*\})', request.prompt, re.S)
+            assert match
+            selector_input = json.loads(match.group(1))
+            candidate_id = selector_input['legal_candidates'][0]['candidate_id']
             return type(
                 'Response',
                 (),
                 {
-                    'text': (
-                        '{"enemy_id":"bandit_1","goal":"survive and pressure the caster",'
-                        '"current_emotion":"calculating","morale":61,'
-                        '"target":{"id":"player_1","reason":"reachable wounded target"},'
-                        '"movement_intent":{"goal":"hold near cover","rangeBand":"near"},'
-                        '"action_intent":{"intentType":"use_ability","abilityId":"bandit_thug_club",'
-                        '"requiresRoll":true,"preferredRoll":"attack vs AC"},'
-                        '"reasoning_summary":"Use pressure without overextending.",'
-                        '"requires_roll":true,"preferred_roll":"attack vs AC",'
-                        '"fallback_if_blocked":"reposition"}'
+                    'text': json.dumps(
+                        {
+                            'selected_candidate_id': candidate_id,
+                            'backup_candidate_ids': [],
+                            'reasoning_summary': 'Use the best legal engine-authored candidate.',
+                            'confidence': 0.82,
+                        }
                     ),
                     'provider': 'fake',
                     'model': 'deepseek-v4-pro',
@@ -577,6 +846,7 @@ def test_sentient_enemy_brain_uses_helper_contract_when_enabled(app, monkeypatch
     monkeypatch.setattr(enemy_brain_module, 'get_helper_provider', lambda task=None: FakeBrainProvider())
     bandit = instantiate_creature(core_creature('bandit_thug'), instance_id='bandit_1')
     combat = _combat_with(bandit)
+    combat['flags'] = {'combatDifficultyAI': {'forceSentientEnemyBrain': True}}
 
     with app.app_context():
         app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_IN_TESTS'] = True
@@ -584,11 +854,636 @@ def test_sentient_enemy_brain_uses_helper_contract_when_enabled(app, monkeypatch
         plan = plan_enemy_intents(combat)
 
     assert requests
-    assert 'Return one JSON object' in requests[0].prompt
-    assert plan['intents'][0]['selectionMethod'] == 'sentient_enemy_brain'
+    assert 'Select exactly one already-legal candidate' in requests[0].prompt
+    assert 'target_id' in requests[0].prompt
+    assert plan['intents'][0]['selectionMethod'] == 'sentient_enemy_brain_candidate_selector'
     assert plan['intents'][0]['brainSource'] == 'deepseek-v4-pro'
-    assert plan['intents'][0]['targetId'] == 'player_1'
-    assert plan['intents'][0]['brain']['preferred_roll'] == 'attack vs AC'
+    assert plan['intents'][0]['candidateSelection']['selectedCandidateId'] == plan['intents'][0]['candidateId']
+    assert plan['intents'][0]['resolver']['resolverType'] == 'engine_intent_bundle_v1'
+    assert plan['intentCandidates']['bandit_1'][0]['candidateId'] == plan['intents'][0]['candidateId']
+    assert 'resolver' not in plan['intentCandidates']['bandit_1'][0]
+
+
+def test_sentient_enemy_brain_selector_can_choose_non_baseline_engine_candidate(app, monkeypatch):
+    requests = []
+
+    class FakeBrainProvider:
+        def generate(self, request):
+            requests.append(request)
+            match = re.search(r'LEGAL_CANDIDATE_SELECTION_INPUT:\n(\{.*\})', request.prompt, re.S)
+            assert match
+            selector_input = json.loads(match.group(1))
+            pressure_candidate = next(
+                candidate
+                for candidate in selector_input['legal_candidates']
+                if 'pressure_target' in candidate['intent_tags']
+            )
+            fallback_id = selector_input['deterministic_baseline']['fallback_candidate_id']
+            return type(
+                'Response',
+                (),
+                {
+                    'text': json.dumps(
+                        {
+                            'selected_candidate_id': pressure_candidate['candidate_id'],
+                            'backup_candidate_ids': [fallback_id],
+                            'reasoning_summary': 'Breaking repetition with a legal pressure attack.',
+                            'confidence': 0.77,
+                        }
+                    ),
+                    'provider': 'fake',
+                    'model': 'deepseek-v4-pro',
+                },
+            )()
+
+    monkeypatch.setattr(enemy_brain_module, 'get_helper_provider', lambda task=None: FakeBrainProvider())
+    mercenary = instantiate_creature(core_creature('mercenary'), instance_id='mercenary_1')
+    combat = _combat_with(mercenary)
+    combat['battlefield']['cover'] = [{'id': 'stone_pillar', 'name': 'Stone Pillar', 'coverType': 'half'}]
+    combat['flags'] = {
+        'combatDifficultyAI': {
+            'tacticalLevel': 'smart',
+            'allowSentientEnemyBrain': True,
+            'forceSentientEnemyBrain': True,
+        }
+    }
+
+    with app.app_context():
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_IN_TESTS'] = True
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_ENABLED'] = 'true'
+        plan = plan_enemy_intents(combat)
+
+    assert requests
+    intent = plan['intents'][0]
+    assert intent['selectionMethod'] == 'sentient_enemy_brain_candidate_selector'
+    assert intent['intentType'] == 'attack'
+    assert intent['targetId'] == 'player_1'
+    assert intent['candidateSelection']['changedDeterministicBaseline'] is True
+    assert intent['candidateSelection']['backupCandidateIds'] == [intent['candidateSelection']['fallbackCandidateId']]
+    assert intent['resolver']['actionBundle'][-1]['target_id'] == 'player_1'
+
+
+def test_sentient_enemy_brain_rejects_executable_fields_and_falls_back(app, monkeypatch):
+    class FakeBrainProvider:
+        def generate(self, request):
+            match = re.search(r'LEGAL_CANDIDATE_SELECTION_INPUT:\n(\{.*\})', request.prompt, re.S)
+            assert match
+            selector_input = json.loads(match.group(1))
+            candidate_id = selector_input['legal_candidates'][0]['candidate_id']
+            return type(
+                'Response',
+                (),
+                {
+                    'text': json.dumps(
+                        {
+                            'selected_candidate_id': candidate_id,
+                            'backup_candidate_ids': [],
+                            'reasoning_summary': 'Maliciously attempts to override the target.',
+                            'confidence': 0.9,
+                            'target_id': 'invented_player',
+                        }
+                    ),
+                    'provider': 'fake',
+                    'model': 'deepseek-v4-pro',
+                },
+            )()
+
+    monkeypatch.setattr(enemy_brain_module, 'get_helper_provider', lambda task=None: FakeBrainProvider())
+    bandit = instantiate_creature(core_creature('bandit_thug'), instance_id='bandit_1')
+    combat = _combat_with(bandit)
+    combat['flags'] = {'combatDifficultyAI': {'forceSentientEnemyBrain': True}}
+
+    with app.app_context():
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_IN_TESTS'] = True
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_ENABLED'] = 'true'
+        plan = plan_enemy_intents(combat)
+
+    intent = plan['intents'][0]
+    assert intent['selectionMethod'] == 'deterministic_scoring'
+    assert intent['brainSource'] == 'deterministic_fallback'
+    assert intent['targetId'] == 'player_1'
+
+
+def test_clear_deterministic_candidate_skips_sentient_selector(app, monkeypatch):
+    calls = []
+
+    class FakeBrainProvider:
+        def generate(self, request):
+            calls.append(request)
+            raise AssertionError('clear deterministic winner should not call sentient selector')
+
+    monkeypatch.setattr(enemy_brain_module, 'get_helper_provider', lambda task=None: FakeBrainProvider())
+    goblin = instantiate_creature(core_creature('goblin_skirmisher'), instance_id='goblin_1')
+    goblin['hp']['current'] = 1
+    combat = _combat_with(goblin)
+    combat['flags'] = {
+        'combatDifficultyAI': {
+            'allowSentientEnemyBrain': True,
+            'skipLlmWhenTopCandidateMarginExceeds': 0.05,
+        }
+    }
+
+    with app.app_context():
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_IN_TESTS'] = True
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_ENABLED'] = 'true'
+        plan = plan_enemy_intents(combat)
+
+    assert calls == []
+    assert plan['intents'][0]['intentType'] == 'retreat'
+    assert plan['intents'][0]['selectorSkippedReason'] == 'deterministic_top_candidate_clear'
+
+
+def test_sentient_selector_respects_round_call_budget(app, monkeypatch):
+    calls = []
+
+    class FakeBrainProvider:
+        def generate(self, request):
+            calls.append(request)
+            match = re.search(r'LEGAL_CANDIDATE_SELECTION_INPUT:\n(\{.*\})', request.prompt, re.S)
+            assert match
+            selector_input = json.loads(match.group(1))
+            candidate_id = selector_input['legal_candidates'][0]['candidate_id']
+            return type(
+                'Response',
+                (),
+                {
+                    'text': json.dumps(
+                        {
+                            'selected_candidate_id': candidate_id,
+                            'backup_candidate_ids': [],
+                            'reasoning_summary': 'Budgeted selector call.',
+                            'confidence': 0.8,
+                        }
+                    ),
+                    'provider': 'fake',
+                    'model': 'deepseek-v4-pro',
+                },
+            )()
+
+    monkeypatch.setattr(enemy_brain_module, 'get_helper_provider', lambda task=None: FakeBrainProvider())
+    enemy_ids = ['bandit_1', 'bandit_2', 'bandit_3', 'bandit_4']
+    enemies = [instantiate_creature(core_creature('bandit_thug'), instance_id=enemy_id) for enemy_id in enemy_ids]
+    combat = {
+        'status': 'active',
+        'round': 1,
+        'participants': [player_combat_participant(_player()), *enemies],
+        'battlefield': {'environmentType': 'forest', 'lighting': 'bright', 'visibility': 'clear'},
+        'flags': {
+            'combatDifficultyAI': {
+                'allowSentientEnemyBrain': True,
+                'forceSentientEnemyBrain': True,
+                'maxLlmCallsPerRound': 2,
+            }
+        },
+    }
+
+    with app.app_context():
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_IN_TESTS'] = True
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_ENABLED'] = 'true'
+        plan = intent_planner_module.plan_enemy_intents(combat)
+
+    assert len(calls) == 2
+    assert [intent['selectionMethod'] for intent in plan['intents'][:2]] == [
+        'sentient_enemy_brain_candidate_selector',
+        'sentient_enemy_brain_candidate_selector',
+    ]
+    assert [intent['selectorSkippedReason'] for intent in plan['intents'][2:]] == [
+        'llm_round_budget_reserved_elsewhere',
+        'llm_round_budget_reserved_elsewhere',
+    ]
+
+
+def test_resolution_revalidation_uses_helper_backup_when_selected_candidate_goes_stale():
+    bandit = instantiate_creature(core_creature('bandit_thug'), instance_id='bandit_1')
+    combat = _combat_with(bandit)
+    target = combat['participants'][0]
+    candidates = [
+        intent_planner_module._candidate(
+            intent_planner_module._intent(
+                bandit,
+                'attack',
+                target=target,
+                ability=bandit['abilities'][0],
+                reason='Attack the visible target.',
+                confidence=0.7,
+            ),
+            70,
+        ),
+        intent_planner_module._candidate(
+            intent_planner_module._intent(
+                bandit,
+                'retreat',
+                reason='Back away when the target is no longer available.',
+                confidence=0.8,
+                movement_goal='nearest safe exit or cover',
+            ),
+            55,
+        ),
+    ]
+    intent_planner_module._attach_candidate_contracts(candidates, enemy=bandit, combat=combat)
+    selected = deepcopy(candidates[0]['intent'])
+    selected['selectionMethod'] = 'sentient_enemy_brain_candidate_selector'
+    selected['candidateSelection'] = {
+        'selectedCandidateId': candidates[0]['candidateId'],
+        'backupCandidateIds': [candidates[1]['candidateId']],
+        'fallbackCandidateId': candidates[0]['candidateId'],
+        'reasoningSummary': 'Attack unless the target disappears.',
+        'confidence': 0.8,
+        'changedDeterministicBaseline': False,
+    }
+    stale_combat = deepcopy(combat)
+    stale_combat['stateVersion'] = 'combat_after_player_removed'
+    stale_combat['participants'] = [participant for participant in stale_combat['participants'] if participant.get('team') != 'player']
+
+    resolved = intent_planner_module.resolve_selected_candidate_for_current_state(selected, candidates, bandit, stale_combat)
+
+    assert resolved['candidateId'] == candidates[1]['candidateId']
+    assert resolved['intentType'] == 'retreat'
+    assert resolved['resolutionSource'] == 'backup_candidate'
+    assert resolved['candidateSelection']['resolvedCandidateId'] == candidates[1]['candidateId']
+    assert resolved['candidateSelection']['resolutionFallbackUsed'] is True
+    assert resolved['resolutionValidation']['staleCandidateVersion'] is True
+
+
+def test_resolution_revalidation_uses_deterministic_fallback_when_no_backup_is_valid():
+    bandit = instantiate_creature(core_creature('bandit_thug'), instance_id='bandit_1')
+    combat = _combat_with(bandit)
+    target = combat['participants'][0]
+    candidates = [
+        intent_planner_module._candidate(
+            intent_planner_module._intent(
+                bandit,
+                'attack',
+                target=target,
+                ability=bandit['abilities'][0],
+                reason='Attack the visible target.',
+                confidence=0.7,
+            ),
+            70,
+        ),
+        intent_planner_module._candidate(
+            intent_planner_module._intent(
+                bandit,
+                'retreat',
+                reason='Use deterministic fallback when target vanishes.',
+                confidence=0.8,
+                movement_goal='nearest safe exit or cover',
+            ),
+            55,
+        ),
+    ]
+    intent_planner_module._attach_candidate_contracts(candidates, enemy=bandit, combat=combat)
+    selected = deepcopy(candidates[0]['intent'])
+    selected['selectionMethod'] = 'sentient_enemy_brain_candidate_selector'
+    selected['candidateSelection'] = {
+        'selectedCandidateId': candidates[0]['candidateId'],
+        'backupCandidateIds': [],
+        'fallbackCandidateId': candidates[0]['candidateId'],
+        'reasoningSummary': 'No backup was provided.',
+        'confidence': 0.8,
+        'changedDeterministicBaseline': False,
+    }
+    stale_combat = deepcopy(combat)
+    stale_combat['stateVersion'] = 'combat_after_player_removed'
+    stale_combat['participants'] = [participant for participant in stale_combat['participants'] if participant.get('team') != 'player']
+
+    resolved = intent_planner_module.resolve_selected_candidate_for_current_state(selected, candidates, bandit, stale_combat)
+
+    assert resolved['candidateId'] == candidates[1]['candidateId']
+    assert resolved['intentType'] == 'retreat'
+    assert resolved['resolutionSource'] == 'deterministic_resolution_fallback'
+    assert resolved['candidateSelection']['resolvedCandidateId'] == candidates[1]['candidateId']
+    assert resolved['candidateSelection']['resolutionFallbackUsed'] is True
+    assert candidates[0]['candidateId'] in resolved['resolutionRejectedCandidates']
+
+
+def test_combat_helper_evaluation_summarizes_candidate_decisions():
+    bandit = instantiate_creature(core_creature('bandit_thug'), instance_id='bandit_1')
+    combat = _combat_with(bandit)
+    combat['flags'] = {'combatDifficultyAI': {'allowSentientEnemyBrain': False}}
+    plan = plan_enemy_intents(combat)
+
+    summary = summarize_combat_helper_plan(plan)
+
+    assert summary['metrics']['total_decisions'] == 1
+    assert summary['metrics']['helper_assisted'] == 0
+    assert summary['metrics']['average_candidate_count'] >= 1
+    assert summary['records'][0]['actor_id'] == 'bandit_1'
+    assert summary['records'][0]['fallback_candidate_id'] == plan['intentCandidates']['bandit_1'][0]['candidateId']
+    assert summary['records'][0]['executed_candidate_id'] == plan['intents'][0]['candidateId']
+
+
+def test_combat_helper_evaluation_runs_fixed_snapshots():
+    bandit = instantiate_creature(core_creature('bandit_thug'), instance_id='bandit_1')
+    wolf = instantiate_creature(core_creature('wolf'), instance_id='wolf_1')
+    bandit_snapshot = _combat_with(bandit)
+    wolf_snapshot = _combat_with(wolf)
+    bandit_snapshot['flags'] = {'combatDifficultyAI': {'allowSentientEnemyBrain': False}}
+    wolf_snapshot['flags'] = {'combatDifficultyAI': {'allowSentientEnemyBrain': False}}
+
+    result = run_combat_helper_evaluation([bandit_snapshot, wolf_snapshot])
+
+    assert result['snapshot_count'] == 2
+    assert len(result['runs']) == 2
+    assert result['metrics']['total_decisions'] == 2
+    assert result['metrics']['average_candidate_count'] >= 1
+
+
+def test_parallel_enemy_intents_preserve_order_and_worker_app_context(app, monkeypatch):
+    enemy_ids = ['bandit_1', 'bandit_2', 'bandit_3']
+    enemies = [instantiate_creature(core_creature('bandit_thug'), instance_id=enemy_id) for enemy_id in enemy_ids]
+    combat = {
+        'status': 'active',
+        'round': 1,
+        'participants': [player_combat_participant(_player()), *enemies],
+        'battlefield': {'environmentType': 'forest', 'lighting': 'bright', 'visibility': 'clear'},
+        'flags': {'combatDifficultyAI': {'allowBossTacticsHelper': False, 'allowSentientEnemyBrain': True, 'forceSentientEnemyBrain': True}},
+    }
+    calls = []
+    active = {'current': 0, 'max': 0}
+    lock = threading.Lock()
+
+    class FakeBrainProvider:
+        def generate(self, request):
+            enemy_id = next(candidate for candidate in enemy_ids if candidate in request.prompt)
+            with lock:
+                active['current'] += 1
+                active['max'] = max(active['max'], active['current'])
+                calls.append({'enemy_id': enemy_id, 'has_app_context': has_app_context()})
+            try:
+                time.sleep(0.05)
+                return type(
+                    'Response',
+                    (),
+                    {
+                        'text': json.dumps(
+                            {
+                                'enemy_id': enemy_id,
+                                'target': {'id': 'player_1', 'reason': 'reachable target'},
+                                'action_intent': {'intentType': 'attack', 'confidence': 0.8},
+                                'reasoning_summary': f'{enemy_id} attacks in parallel.',
+                            }
+                        ),
+                        'provider': 'fake',
+                        'model': 'deepseek-v4-pro',
+                    },
+                )()
+            finally:
+                with lock:
+                    active['current'] -= 1
+
+    provider = FakeBrainProvider()
+    monkeypatch.setattr(enemy_brain_module, 'get_helper_provider', lambda task=None: provider)
+
+    with app.app_context():
+        app.config['AIDM_ENEMY_INTENT_PARALLEL'] = True
+        app.config['AIDM_ENEMY_INTENT_MAX_WORKERS'] = 3
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_IN_TESTS'] = True
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_ENABLED'] = 'true'
+        plan = intent_planner_module.plan_enemy_intents(combat)
+
+    assert [intent['enemyId'] for intent in plan['intents']] == enemy_ids
+    assert list(plan['intentCandidates'].keys()) == enemy_ids
+    assert list(plan['combatFactsByEnemy'].keys()) == enemy_ids
+    assert all(call['has_app_context'] for call in calls)
+    assert active['max'] > 1
+
+
+def test_parallel_enemy_intents_respects_single_worker_fast_path(app, monkeypatch):
+    enemies = [
+        instantiate_creature(core_creature('bandit_thug'), instance_id='bandit_1'),
+        instantiate_creature(core_creature('bandit_thug'), instance_id='bandit_2'),
+    ]
+    combat = {
+        'status': 'active',
+        'round': 1,
+        'participants': [player_combat_participant(_player()), *enemies],
+        'battlefield': {'environmentType': 'forest', 'lighting': 'bright', 'visibility': 'clear'},
+        'flags': {'combatDifficultyAI': {'allowBossTacticsHelper': False, 'allowSentientEnemyBrain': False}},
+    }
+
+    def fail_thread_pool(*args, **kwargs):
+        raise AssertionError('ThreadPoolExecutor should not be used for a single-worker plan.')
+
+    monkeypatch.setattr(intent_planner_module, 'ThreadPoolExecutor', fail_thread_pool)
+
+    with app.app_context():
+        app.config['AIDM_ENEMY_INTENT_PARALLEL'] = True
+        app.config['AIDM_ENEMY_INTENT_MAX_WORKERS'] = 1
+        plan = intent_planner_module.plan_enemy_intents(combat)
+
+    assert [intent['enemyId'] for intent in plan['intents']] == ['bandit_1', 'bandit_2']
+
+
+def test_boss_tactics_helper_success_skips_second_sentient_brain_call(app, monkeypatch):
+    boss_requests = []
+    brain_requests = []
+
+    class FakeBossProvider:
+        def generate(self, request):
+            boss_requests.append(request)
+            match = re.search(r'BOSS_CANDIDATE_SELECTION_INPUT:\n(\{.*\})', request.prompt, re.S)
+            assert match
+            selector_input = json.loads(match.group(1))
+            environment_candidate = next(
+                candidate
+                for candidate in selector_input['legal_candidates']
+                if 'use_environment' in candidate['intent_tags']
+            )
+            fallback_id = selector_input['deterministic_baseline']['fallback_candidate_id']
+            return type(
+                'Response',
+                (),
+                {
+                    'text': json.dumps(
+                        {
+                            'selected_candidate_id': environment_candidate['candidate_id'],
+                            'backup_candidate_ids': [fallback_id],
+                            'reasoning_summary': 'The boss uses the battlefield as a weapon.',
+                            'confidence': 0.88,
+                        }
+                    ),
+                    'provider': 'fake',
+                    'model': 'deepseek-v4-pro',
+                },
+            )()
+
+    class FakeBrainProvider:
+        def generate(self, request):
+            brain_requests.append(request)
+            return type(
+                'Response',
+                (),
+                {
+                    'text': json.dumps(
+                        {
+                            'enemy_id': 'enemy_cult_leader_1',
+                            'target': {'id': 'player_1'},
+                            'action_intent': {'intentType': 'attack'},
+                            'reasoning_summary': 'This should not be called after boss tactics succeeds.',
+                        }
+                    ),
+                    'provider': 'fake',
+                    'model': 'deepseek-v4-pro',
+                },
+            )()
+
+    monkeypatch.setattr(boss_tactics_module, 'get_helper_provider', lambda task=None: FakeBossProvider())
+    monkeypatch.setattr(enemy_brain_module, 'get_helper_provider', lambda task=None: FakeBrainProvider())
+
+    boss = instantiate_creature(core_creature('cult_leader'), instance_id='enemy_cult_leader_1')
+    combat = _combat_with(boss)
+    combat['battlefield']['hazards'] = [{'id': 'ritual_fire', 'name': 'Ritual Fire'}]
+    combat['flags'] = {
+        'combatDifficultyAI': {
+            'allowBossTacticsHelper': True,
+            'allowSentientEnemyBrain': True,
+        }
+    }
+
+    with app.app_context():
+        app.config['AIDM_BOSS_TACTICS_HELPER_IN_TESTS'] = True
+        app.config['AIDM_BOSS_TACTICS_HELPER_ENABLED'] = 'true'
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_IN_TESTS'] = True
+        app.config['AIDM_SENTIENT_ENEMY_BRAIN_HELPER_ENABLED'] = 'true'
+        plan = intent_planner_module.plan_enemy_intents(combat)
+
+    assert len(boss_requests) == 1
+    assert brain_requests == []
+    assert plan['intents'][0]['tacticSource'] == 'deepseek-v4-pro'
+    assert plan['intents'][0]['intentType'] == 'use_environment'
+    assert plan['intents'][0]['selectionMethod'] == 'boss_tactics_candidate_selector'
+    assert plan['intents'][0]['bossTacticsSelection']['selectedCandidateId'] == plan['intents'][0]['candidateId']
+
+
+def test_boss_tactics_rejects_executable_fields_and_falls_back(app, monkeypatch):
+    class FakeBossProvider:
+        def generate(self, request):
+            match = re.search(r'BOSS_CANDIDATE_SELECTION_INPUT:\n(\{.*\})', request.prompt, re.S)
+            assert match
+            selector_input = json.loads(match.group(1))
+            candidate_id = selector_input['legal_candidates'][0]['candidate_id']
+            return type(
+                'Response',
+                (),
+                {
+                    'text': json.dumps(
+                        {
+                            'selected_candidate_id': candidate_id,
+                            'backup_candidate_ids': [],
+                            'reasoning_summary': 'Attempts to smuggle an ability override.',
+                            'confidence': 0.9,
+                            'ability_id': 'invented_boss_power',
+                        }
+                    ),
+                    'provider': 'fake',
+                    'model': 'deepseek-v4-pro',
+                },
+            )()
+
+    monkeypatch.setattr(boss_tactics_module, 'get_helper_provider', lambda task=None: FakeBossProvider())
+    boss = instantiate_creature(core_creature('cult_leader'), instance_id='enemy_cult_leader_1')
+    combat = _combat_with(boss)
+    combat['battlefield']['hazards'] = [{'id': 'ritual_fire', 'name': 'Ritual Fire'}]
+    combat['flags'] = {'combatDifficultyAI': {'allowBossTacticsHelper': True}}
+
+    with app.app_context():
+        app.config['AIDM_BOSS_TACTICS_HELPER_IN_TESTS'] = True
+        app.config['AIDM_BOSS_TACTICS_HELPER_ENABLED'] = 'true'
+        plan = intent_planner_module.plan_enemy_intents(combat)
+
+    assert plan['intents'][0]['tacticSource'] == 'deterministic_fallback'
+    assert plan['intents'][0]['selectionMethod'] == 'deterministic_scoring'
+    assert plan['intents'][0]['intentType'] == 'use_environment'
+
+
+def test_warm_boss_planner_biases_candidate_matching_without_authoring_actions(app, monkeypatch):
+    planner_requests = []
+
+    class FakePlannerProvider:
+        def generate(self, request):
+            planner_requests.append(request)
+            assert 'BOSS_ADVISORY_PLANNER_INPUT' in request.prompt
+            assert 'Do not choose a candidate ID' in request.prompt
+            return type(
+                'Response',
+                (),
+                {
+                    'text': json.dumps(
+                        {
+                            'tactical_goal': 'Protect the ritual instead of chasing damage.',
+                            'desired_intent_type': 'complete_objective',
+                            'preferred_tags': ['objective_support', 'complete_ritual'],
+                            'risk_posture': 'balanced',
+                            'objective_priority': 'protect_objective',
+                            'reasoning_summary': 'The ritual is the boss objective this turn.',
+                        }
+                    ),
+                    'provider': 'fake',
+                    'model': 'deepseek-v4-pro',
+                },
+            )()
+
+    monkeypatch.setattr(boss_tactics_module, 'get_helper_provider', lambda task=None: FakePlannerProvider())
+    boss = instantiate_creature(core_creature('cult_leader'), instance_id='enemy_cult_leader_1')
+    combat = _combat_with(boss)
+    combat['flags'] = {
+        'combatDifficultyAI': {
+            'allowBossTacticsHelper': True,
+            'allowBossWarmPlanner': True,
+            'allowDeterministicCandidateMatcher': True,
+        }
+    }
+
+    with app.app_context():
+        app.config['AIDM_BOSS_TACTICS_PLANNER_IN_TESTS'] = True
+        app.config['AIDM_BOSS_TACTICS_PLANNER_ENABLED'] = 'true'
+        app.config['AIDM_BOSS_TACTICS_HELPER_ENABLED'] = 'false'
+        plan = intent_planner_module.plan_enemy_intents(combat)
+
+    assert planner_requests
+    assert plan['intents'][0]['intentType'] == 'complete_objective'
+    assert plan['intents'][0]['selectionMethod'] == 'deterministic_matcher'
+    assert plan['intents'][0]['bossPlanner']['source'] == 'deepseek-v4-pro'
+    assert 'objective_support' in plan['intents'][0]['bossPlanner']['matchedTags']
+
+
+def test_cached_boss_planner_biases_next_turn_without_provider_call(app, monkeypatch):
+    class FailingPlannerProvider:
+        def generate(self, request):
+            raise AssertionError('cached boss planner should avoid provider call')
+
+    monkeypatch.setattr(boss_tactics_module, 'get_helper_provider', lambda task=None: FailingPlannerProvider())
+    boss = instantiate_creature(core_creature('cult_leader'), instance_id='enemy_cult_leader_1')
+    boss['currentIntent'] = {
+        'intentType': 'complete_objective',
+        'bossPlanner': {
+            'source': 'deepseek-v4-pro',
+            'preferredTags': ['objective_support', 'complete_ritual'],
+            'desiredIntentType': 'complete_objective',
+            'riskPosture': 'balanced',
+            'reasoningSummary': 'Continue defending the ritual.',
+            'expiresAfterTurns': 2,
+        },
+    }
+    combat = _combat_with(boss)
+    combat['flags'] = {
+        'combatDifficultyAI': {
+            'allowBossTacticsHelper': True,
+            'allowBossWarmPlanner': True,
+            'allowDeterministicCandidateMatcher': True,
+        }
+    }
+
+    with app.app_context():
+        app.config['AIDM_BOSS_TACTICS_PLANNER_IN_TESTS'] = True
+        app.config['AIDM_BOSS_TACTICS_PLANNER_ENABLED'] = 'true'
+        app.config['AIDM_BOSS_TACTICS_HELPER_ENABLED'] = 'false'
+        plan = intent_planner_module.plan_enemy_intents(combat)
+
+    assert plan['intents'][0]['intentType'] == 'complete_objective'
+    assert plan['intents'][0]['bossPlanner']['source'] == 'deepseek-v4-pro:cached'
+    assert plan['intents'][0]['bossPlanner']['expiresAfterTurns'] == 1
 
 
 def test_combat_state_changes_validate_and_apply():
@@ -866,7 +1761,7 @@ def test_boss_tactics_and_difficulty_settings_drive_intent_choice():
     assert plan['difficultyAI']['tacticalLevel'] == 'smart'
     assert plan['intents'][0]['intentType'] == 'use_environment'
     assert plan['intents'][0]['tacticSource'] == 'deterministic'
-    assert plan['intents'][0]['selectionScore'] == 86
+    assert plan['intents'][0]['selectionScore'] == 90
     assert plan['intentCandidates']['enemy_cult_leader_1'][0]['intentType'] == 'use_environment'
 
 

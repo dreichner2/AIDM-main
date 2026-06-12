@@ -471,6 +471,10 @@ def normalize_state_change(raw_change: Any, *, fallback_actor_id: str, fallback_
         change['itemName'] = change.pop('item_name')
     if 'item_id' in change and 'itemId' not in change:
         change['itemId'] = change.pop('item_id')
+    if 'source_actor_id' in change and 'sourceActorId' not in change:
+        change['sourceActorId'] = change.pop('source_actor_id')
+    if 'sourceActorID' in change and 'sourceActorId' not in change:
+        change['sourceActorId'] = change.pop('sourceActorID')
     if 'equipment_slot' in change and 'slot' not in change:
         change['slot'] = change.pop('equipment_slot')
     if 'equipmentSlot' in change and 'slot' not in change:
@@ -517,7 +521,7 @@ def normalize_state_change(raw_change: Any, *, fallback_actor_id: str, fallback_
         if weight is None:
             return None
         change['weight'] = weight
-    if change_type == 'inventory.add':
+    if change_type in {'inventory.add', 'scene.item.add'}:
         raw_item = change.get('item')
         if isinstance(raw_item, dict):
             item = dict(raw_item)
@@ -582,6 +586,9 @@ def _state_change_has_required_fields(change: dict[str, Any]) -> bool:
             )
         if change_type == 'scene.move_location':
             return bool(str(change.get('locationId') or change.get('name') or '').strip())
+        if change_type in {'scene.item.add', 'scene.item.remove'}:
+            item = change.get('item') if isinstance(change.get('item'), dict) else {}
+            return bool(str(change.get('itemId') or change.get('itemName') or item.get('name') or '').strip()) and 'quantity' in change
         if change_type in {'location.discover', 'location.update'}:
             return bool(str(change.get('locationId') or change.get('name') or '').strip())
         if change_type == 'location.connect':

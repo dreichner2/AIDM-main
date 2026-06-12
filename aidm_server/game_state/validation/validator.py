@@ -286,8 +286,12 @@ def _validate_inventory_transfer(
 ) -> dict[str, Any]:
     item_name = str(_action_value(action, 'itemName', 'item_name') or '').strip()
     quantity = max(1, int_or_default(action.get('quantity'), default=1))
+    source_action = {
+        **action,
+        'actorId': _action_value(action, 'fromActorId', 'from_actor_id') or _action_value(action, 'actorId', 'actor_id'),
+    }
     actor, item, resolution = _resolve_action_item(
-        action=action,
+        action=source_action,
         state=state,
         item_name=item_name,
         current_turn=current_turn,
@@ -907,6 +911,44 @@ def _valid_location_label(value: Any) -> bool:
     return len(label) <= 90 and len(words) <= 10
 
 
+def _scene_items(state: dict[str, Any]) -> list[dict[str, Any]]:
+    scene = state.get('currentScene') if isinstance(state.get('currentScene'), dict) else {}
+    items = scene.get('items') if isinstance(scene.get('items'), list) else []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _scene_item_payload(change: dict[str, Any]) -> dict[str, Any]:
+    item = change.get('item') if isinstance(change.get('item'), dict) else {}
+    name = _text(item.get('name') or change.get('itemName') or change.get('item_name'))
+    item_id = _text(item.get('id') or item.get('itemId') or change.get('itemId') or change.get('item_id') or stable_slug(name))
+    quantity = max(1, int_or_default(item.get('quantity', change.get('quantity')), default=1))
+    payload = {
+        **item,
+        'id': item_id,
+        'name': name,
+        'quantity': quantity,
+        'type': item.get('type') or change.get('itemType') or change.get('item_type') or 'misc',
+    }
+    source_actor_id = _text(change.get('sourceActorId') or change.get('fromActorId') or item.get('sourceActorId'))
+    if source_actor_id:
+        payload['sourceActorId'] = source_actor_id
+    return payload
+
+
+def _find_scene_item(state: dict[str, Any], change: dict[str, Any]) -> dict[str, Any] | None:
+    requested_id = _text(change.get('itemId') or change.get('item_id'))
+    item_payload = change.get('item') if isinstance(change.get('item'), dict) else {}
+    requested_name = normalize_item_name(change.get('itemName') or change.get('item_name') or item_payload.get('name'))
+    for item in _scene_items(state):
+        if requested_id and _text(item.get('id')) == requested_id:
+            return item
+    if requested_name:
+        for item in _scene_items(state):
+            if normalize_item_name(item.get('name')) == requested_name:
+                return item
+    return None
+
+
 def _turn_value(change: dict[str, Any]) -> int | None:
     if change.get('turnId') is None and change.get('turn_id') is None:
         return None
@@ -925,6 +967,30 @@ def _normalize_world_change(change: dict[str, Any], state: dict[str, Any]) -> tu
         scene_type = _text(normalized.get('sceneType'))
         mood = _text(normalized.get('mood'))
         combat_state = _text(normalized.get('combatState'))
+        if (normalized.get('locationId') or normalized.get('name')) and not _valid_location_label(
+            normalized.get('name') or normalized.get('locationId')
+        ):
+            has_other_scene_fields = any(
+                key in normalized
+                for key in (
+                    'sceneType',
+                    'dangerLevel',
+                    'mood',
+                    'combatState',
+                    'description',
+                    'activeNpcIds',
+                    'activeQuestIds',
+                    'playerPositions',
+                    'playerZones',
+                    'characterPositions',
+                    'characterZones',
+                    'musicTag',
+                )
+            )
+            if not has_other_scene_fields:
+                return 'rejected', 'Scene update location must be a short place name.', None
+            normalized.pop('locationId', None)
+            normalized.pop('name', None)
         if scene_type and scene_type not in SCENE_TYPES:
             return 'rejected', f"Unsupported scene type '{scene_type}'.", None
         if mood and mood not in SCENE_MOODS:
@@ -964,6 +1030,30 @@ def _normalize_world_change(change: dict[str, Any], state: dict[str, Any]) -> tu
                 return 'rejected', 'Scene movement dangerLevel must be a non-negative number.', None
             normalized['dangerLevel'] = danger_level
         return 'accepted', 'Scene movement is valid.', normalized
+
+    if change_type == 'scene.item.add':
+        item_payload = _scene_item_payload(normalized)
+        if not item_payload.get('name'):
+            return 'rejected', 'Scene item add requires an item name.', None
+        normalized['item'] = item_payload
+        normalized['itemId'] = item_payload.get('id')
+        normalized['itemName'] = item_payload.get('name')
+        normalized['quantity'] = item_payload.get('quantity')
+        return 'accepted', 'Scene item add is valid.', normalized
+
+    if change_type == 'scene.item.remove':
+        scene_item = _find_scene_item(state, normalized)
+        if not scene_item:
+            return 'rejected', 'Scene item was not found.', None
+        quantity = max(1, int_or_default(normalized.get('quantity'), default=1))
+        available = max(1, int_or_default(scene_item.get('quantity'), default=1))
+        if quantity > available:
+            return 'rejected', f"Not enough {scene_item.get('name')} in scene. Available: {available}.", None
+        normalized['itemId'] = scene_item.get('id')
+        normalized['itemName'] = scene_item.get('name')
+        normalized['quantity'] = quantity
+        normalized['item'] = {**scene_item, 'quantity': quantity}
+        return 'accepted', 'Scene item remove is valid.', normalized
 
     if change_type in {'location.discover', 'location.update'}:
         if not _valid_location_label(normalized.get('name') or normalized.get('locationName') or normalized.get('locationId')):
@@ -1151,6 +1241,17 @@ def _resolve_combat_participant_id(state: dict[str, Any], participant_id: str) -
     unique_matches = {match for match in matches if match}
     if len(unique_matches) == 1:
         return next(iter(unique_matches))
+    enemy_ids = [
+        _text(participant.get('id'))
+        for participant in combat.get('participants') or []
+        if isinstance(participant, dict)
+        and participant.get('team') == 'enemy'
+        and participant.get('isAlive') is not False
+        and _text(participant.get('id'))
+    ]
+    requested_keys = _combat_reference_keys(requested)
+    if len(enemy_ids) == 1 and not any(key.startswith('player_') or key.startswith('player ') for key in requested_keys):
+        return enemy_ids[0]
     return None
 
 

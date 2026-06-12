@@ -13,7 +13,7 @@
   }
 
   .turn-card {
-    grid-template-columns: 150px minmax(0, 1fr) 72px 38px;
+    grid-template-columns: 150px minmax(0, 1fr) auto 72px auto;
   }
 
   .dm-response-card {
@@ -507,10 +507,29 @@
     padding: 12px;
   }
 
-  .turn-expand {
+  .turn-actions {
+    grid-column: 1;
+    grid-row: auto;
+    grid-template-columns: 1fr;
+    justify-self: stretch;
+    width: 100%;
+    min-height: 36px;
+  }
+
+  .turn-actions.has-dismiss {
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+
+  .turn-expand,
+  .turn-dismiss {
     min-height: 36px;
     border-top: 1px solid var(--line-strong);
     border-left: 0;
+  }
+
+  .turn-actions.has-dismiss .turn-expand {
+    border-left: 1px solid var(--line-strong);
   }
 
   .turn-card time {
@@ -1159,7 +1178,8 @@
     max-width: 100%;
   }
 
-  .turn-expand {
+  .turn-expand,
+  .turn-dismiss {
     min-height: 32px;
   }
 

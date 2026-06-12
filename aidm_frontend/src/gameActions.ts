@@ -158,6 +158,33 @@ export function stripComposerCommand(value: string) {
   return next
 }
 
+function normalizedWords(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+function includesItemName(message: string, itemName: string) {
+  const itemWords = normalizedWords(itemName)
+  if (!itemWords) return false
+  return normalizedWords(message).includes(itemWords)
+}
+
+function itemActionRegex(inventoryAction: InventoryAction) {
+  if (inventoryAction === 'pick_up') return /\b(?:pick up|picks up|picked up|grab|grabs|take|takes|collect|collects)\b/i
+  if (inventoryAction === 'buy') return /\b(?:buy|buys|bought|purchase|purchases)\b/i
+  if (inventoryAction === 'equip') return /\b(?:equip|equips|wield|wields|wear|wears|don|dons|ready|readies|draw|draws)\b/i
+  if (inventoryAction === 'unequip') return /\b(?:unequip|unequips|doff|doffs|stow|stows|sheathe|sheathes|take off|takes off|remove|removes)\b/i
+  if (inventoryAction === 'drop') return /\b(?:drop|drops|dropped|discard|discards|set down|sets down)\b/i
+  if (inventoryAction === 'give') return /\b(?:give|gives|gave|hand|hands|offer|offers|pass|passes)\b/i
+  if (inventoryAction === 'sell') return /\b(?:sell|sells|sold|trade|trades)\b/i
+  return /\b(?:use|uses|used|attack|attacks|swing|swings|stab|stabs|slash|slashes|draw|draws|brandish|brandishes)\b/i
+}
+
+function shouldAttachItemIntent(message: string, itemName: string, inventoryAction: InventoryAction) {
+  if (!itemName.trim()) return false
+  if (!includesItemName(message, itemName)) return false
+  return itemActionRegex(inventoryAction).test(message)
+}
+
 export function composerModeLabel(mode: ComposerMode, die: string) {
   if (mode === 'admin') return 'Admin Override'
   if (mode === 'ooc') return 'Out of Character'
@@ -480,6 +507,10 @@ export function buildActionIntent({
   }
   if (mode === 'item') {
     const resolvedItemName = (itemName || item?.name || '').trim()
+    if (!shouldAttachItemIntent(message, resolvedItemName, inventoryAction)) {
+      intent.kind = 'message'
+      return intent
+    }
     intent.item = {
       name: resolvedItemName,
       quantity: parsePositiveInteger(itemQuantity || item?.quantity || '1'),

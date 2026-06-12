@@ -267,10 +267,14 @@ async function submitAccountSession(
     headers,
     body: JSON.stringify({
       username: form.username.trim(),
-      first_name: form.firstName.trim(),
-      last_name: form.lastName.trim(),
       password: form.password,
       intent: options.intent,
+      ...(options.intent === 'signup'
+        ? {
+            first_name: form.firstName.trim(),
+            last_name: form.lastName.trim(),
+          }
+        : {}),
       ...(options.legacyClaim ? { legacy_claim: true } : {}),
     }),
   })

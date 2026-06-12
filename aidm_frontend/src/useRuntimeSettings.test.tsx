@@ -322,6 +322,8 @@ describe('useRuntimeSettings', () => {
       username: 'Missing',
       intent: 'login',
     })
+    expect(requestBodies[0].first_name).toBeUndefined()
+    expect(requestBodies[0].last_name).toBeUndefined()
     expect(result.current.runtimeSettingsError).toBe('Username not found. Please sign up.')
 
     act(() => {
@@ -343,6 +345,8 @@ describe('useRuntimeSettings', () => {
 
     expect(requestBodies[1]).toMatchObject({
       username: 'Danny',
+      first_name: 'Danny',
+      last_name: 'Reichner',
       intent: 'signup',
     })
     expect(result.current.runtimeSettingsError).toBe('Username is already taken. Please sign in.')

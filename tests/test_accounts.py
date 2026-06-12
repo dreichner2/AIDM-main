@@ -425,6 +425,21 @@ def test_login_and_signup_intents_return_specific_username_errors(tmp_path, monk
     )
     assert existing_login.status_code == 200
 
+    stale_name_login = _login(
+        client,
+        username='Danny',
+        first_name='Test',
+        last_name='Test',
+        password='secret',
+        intent='login',
+    )
+    assert stale_name_login.status_code == 200
+    assert stale_name_login.get_json()['account']['display_name'] == 'Danny Reichner'
+    with app.app_context():
+        account = Account.query.filter_by(username='danny').one()
+        assert account.first_name == 'Danny'
+        assert account.last_name == 'Reichner'
+
 
 def test_existing_password_account_requires_password_even_with_saved_session(tmp_path, monkeypatch):
     app = _build_account_runtime(tmp_path, monkeypatch)

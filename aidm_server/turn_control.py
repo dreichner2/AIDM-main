@@ -61,7 +61,8 @@ TURN_CONDUCTOR_SYSTEM_MESSAGE = (
     'You are AI-DM turn conductor. Decide table flow only; do not narrate. '
     'Return JSON only with decision, mode, activePlayerId, participantPlayerIds, '
     'focusType, reason, and confidence. Prefer spotlight for shared conversations, '
-    'free for low-pressure play, and structured for combat, chase scenes, interrupts, traps, or timing-sensitive actions. '
+    'free for low-pressure play, and structured only for active combat, chases, traps, explicit interrupts, or concrete timing-critical hazards. '
+    'Do not use structured just because an action is magical, unusual, or might hypothetically need a check. '
     'A player joining the same conversation should usually be add_participant, not queued.'
 )
 
@@ -290,7 +291,7 @@ def _build_turn_conductor_prompt(
         'rules': [
             'Do not choose a player id outside activePlayers or actingPlayerId.',
             'Use add_participant when an outside player naturally joins the same spotlight conversation.',
-            'Use switch_to_structured for violent, interrupting, timing-sensitive, chase, trap, or combat actions.',
+            'Use switch_to_structured only for violent, interrupting, chase, trap, combat, or concrete timing-critical hazard actions.',
             'Use queue when an outside player tries to take unrelated focus during spotlight.',
             'Use allow when current flow already permits the action.',
         ],
@@ -392,6 +393,7 @@ def _apply_ai_conductor_decision(
     turn_control: dict,
     decision: dict,
     player_id: int,
+    message: str,
     action_intent: dict | None,
     has_pending_roll: bool,
     active_player_ids: list[int],
@@ -446,6 +448,8 @@ def _apply_ai_conductor_decision(
         return True, None, updated, True, decision
 
     if decision_name == 'switch_to_structured':
+        if not _allows_structured_switch(message, action_intent, has_pending_roll=has_pending_roll):
+            return None
         participants = decision.get('participantPlayerIds') or active_player_ids or [player_id]
         active_player_id = decision.get('activePlayerId') or player_id
         updated = set_session_turn_control(
@@ -531,6 +535,29 @@ def _requires_structured_flow(message: str, action_intent: dict | None) -> bool:
     return bool(_STRUCTURED_ACTION_RE.search(message or ''))
 
 
+def _allows_structured_switch(message: str, action_intent: dict | None, *, has_pending_roll: bool) -> bool:
+    if has_pending_roll:
+        return True
+    return _requires_structured_flow(message, action_intent)
+
+
+def _structured_context_still_active(session_obj: Session) -> bool:
+    snapshot = safe_json_loads(session_obj.state_snapshot, {})
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    combat = snapshot.get('combat') if isinstance(snapshot.get('combat'), dict) else {}
+    if str(combat.get('status') or '').strip().lower() in {'starting', 'active'}:
+        return True
+    scene = snapshot.get('currentScene') if isinstance(snapshot.get('currentScene'), dict) else {}
+    if str(scene.get('combatState') or '').strip().lower() in {'pending', 'active'}:
+        return True
+    if str(scene.get('sceneType') or '').strip().lower() == 'combat':
+        return True
+    try:
+        return int(scene.get('dangerLevel') or 0) >= 7
+    except (TypeError, ValueError):
+        return False
+
+
 def conduct_turn_submission(
     session_obj: Session,
     *,
@@ -567,6 +594,7 @@ def conduct_turn_submission(
             decision=ai_decision,
             player_id=player_id,
             action_intent=action_intent,
+            message=message,
             has_pending_roll=has_pending_roll,
             active_player_ids=active_ids,
         )
@@ -642,6 +670,31 @@ def advance_structured_turn(session_obj: Session, *, current_player_id: int | No
     active_player_id = turn_control.get('activePlayerId')
     if active_player_id and current_player_id and active_player_id != current_player_id:
         return None
+
+    if turn_control.get('source') in {'ai', 'auto'} and not _structured_context_still_active(session_obj):
+        if len(unique_active_ids) <= 1:
+            return set_session_turn_control(
+                session_obj,
+                mode='free',
+                active_player_id=None,
+                participant_player_ids=[],
+                updated_by_player_id=current_player_id,
+                source='auto',
+                focus_type=None,
+                reason='Auto flow returned to free play after structured timing resolved.',
+                confidence=0.82,
+            )
+        return set_session_turn_control(
+            session_obj,
+            mode='spotlight',
+            active_player_id=current_player_id or active_player_id or unique_active_ids[0],
+            participant_player_ids=unique_active_ids,
+            updated_by_player_id=current_player_id,
+            source='auto',
+            focus_type='conversation',
+            reason='Auto flow returned to spotlight after structured timing resolved.',
+            confidence=0.82,
+        )
 
     next_player_id = unique_active_ids[0]
     if current_player_id in unique_active_ids:

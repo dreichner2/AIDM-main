@@ -57,13 +57,17 @@ def _item_payload(change: dict[str, Any]) -> dict[str, Any]:
     name = str(raw_item.get('name') or change.get('itemName') or change.get('item_name') or '').strip()
     quantity = max(1, int_or_default(raw_item.get('quantity', change.get('quantity')), default=1))
     item_id = str(raw_item.get('id') or raw_item.get('itemId') or change.get('itemId') or stable_item_id(name)).strip()
-    return {
+    payload = {
         **raw_item,
         'id': item_id,
         'name': name,
         'quantity': quantity,
         'type': raw_item.get('type') or change.get('itemType') or change.get('item_type') or 'misc',
     }
+    source_actor_id = str(change.get('sourceActorId') or change.get('fromActorId') or raw_item.get('sourceActorId') or '').strip()
+    if source_actor_id:
+        payload['sourceActorId'] = source_actor_id
+    return payload
 
 
 def _merge_item(items: list[dict[str, Any]], incoming: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +83,13 @@ def _merge_item(items: list[dict[str, Any]], incoming: dict[str, Any]) -> dict[s
         return existing
     items.append(incoming)
     return incoming
+
+
+def _merge_scene_item(items: list[dict[str, Any]], incoming: dict[str, Any]) -> dict[str, Any]:
+    item = _merge_item(items, incoming)
+    if incoming.get('sourceActorId') and not item.get('sourceActorId'):
+        item['sourceActorId'] = incoming.get('sourceActorId')
+    return item
 
 
 def _remove_item(items: list[dict[str, Any]], change: dict[str, Any]) -> dict[str, Any] | None:
@@ -339,6 +350,14 @@ def _ensure_scene(state: dict[str, Any]) -> dict[str, Any]:
     scene.setdefault('activeNpcIds', [])
     scene.setdefault('activeQuestIds', [])
     return scene
+
+
+def _scene_items(scene: dict[str, Any]) -> list[dict[str, Any]]:
+    items = scene.get('items')
+    if isinstance(items, list):
+        return items
+    scene['items'] = []
+    return scene['items']
 
 
 def _apply_scene_fields(scene: dict[str, Any], change: dict[str, Any]) -> None:
@@ -759,6 +778,25 @@ def _sync_actor_health_to_combat_participant(state: dict[str, Any], actor: dict[
         participant['isConscious'] = current > 0
 
 
+def _sync_player_actor_from_combat_participant(state: dict[str, Any], participant: dict[str, Any]) -> None:
+    if participant.get('team') != 'player':
+        return
+    actor = find_actor(state, participant.get('id'))
+    if not actor:
+        return
+
+    hp = participant.get('hp') if isinstance(participant.get('hp'), dict) else {}
+    if hp:
+        health = actor.setdefault('health', {})
+        current = max(0, int_or_default(hp.get('current', hp.get('currentHp')), default=health.get('currentHp') or 0))
+        maximum = max(current, int_or_default(hp.get('max', hp.get('maxHp')), default=health.get('maxHp') or current))
+        health['currentHp'] = current
+        health['maxHp'] = maximum
+        health['tempHp'] = max(0, int_or_default(hp.get('temp', hp.get('tempHp')), default=health.get('tempHp') or 0))
+    if 'conditions' in participant:
+        actor.setdefault('health', {})['conditions'] = _string_list(participant.get('conditions'))
+
+
 def _sync_actor_level_to_combat_participant(state: dict[str, Any], actor: dict[str, Any]) -> None:
     combat = state.get('combat') if isinstance(state.get('combat'), dict) else None
     if not combat:
@@ -841,6 +879,7 @@ def _apply_combat_participant_update(state: dict[str, Any], change: dict[str, An
     for key in ('isAlive', 'isConscious'):
         if key in change:
             participant[key] = bool(change[key])
+    _sync_player_actor_from_combat_participant(state, participant)
     return participant
 
 
@@ -1137,6 +1176,23 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
             location = _apply_scene_move(next_state, change)
             applied_change['locationId'] = location.get('id')
             applied_change['locationName'] = location.get('name')
+        elif change_type == 'scene.item.add':
+            scene = _ensure_scene(next_state)
+            item = _merge_scene_item(_scene_items(scene), _item_payload(change))
+            applied_change['itemId'] = item.get('id')
+            applied_change['itemName'] = item.get('name')
+            applied_change['actualAmount'] = max(1, int_or_default(change.get('quantity', item.get('quantity')), default=1))
+            if change.get('sourceActorId') or change.get('fromActorId'):
+                applied_change['sourceActorId'] = change.get('sourceActorId') or change.get('fromActorId')
+        elif change_type == 'scene.item.remove':
+            scene = _ensure_scene(next_state)
+            removed = _remove_item(_scene_items(scene), change)
+            if not removed:
+                skipped.append({'change': change, 'reason': 'Scene item missing during removal.'})
+                continue
+            applied_change['itemId'] = _change_value(change, 'itemId', 'item_id') or removed.get('id')
+            applied_change['itemName'] = _change_value(change, 'itemName', 'item_name') or removed.get('name')
+            applied_change['actualAmount'] = max(1, int_or_default(change.get('quantity'), default=1))
         elif change_type in {'location.discover', 'location.update'}:
             payload = _location_payload(change, status='discovered' if change_type == 'location.discover' else None)
             location = _merge_location(next_state, payload)

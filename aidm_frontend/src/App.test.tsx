@@ -1220,6 +1220,34 @@ describe('App user workflow regressions', () => {
     )
   })
 
+  it('lets users dismiss a stuck pending local message from history', async () => {
+    await renderLoadedApp()
+
+    expect(screen.queryByRole('button', { name: 'Delete pending message' })).not.toBeInTheDocument()
+
+    const pendingMessage = 'This pending message should be removable from history.'
+    const actionInput = screen.getByLabelText(/Your Action/i)
+    fireEvent.change(actionInput, { target: { value: pendingMessage } })
+    socketMock.socket.emit.mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: /Send/i }))
+
+    await waitFor(() =>
+      expect(socketMock.socket.emit).toHaveBeenCalledWith(
+        'send_message',
+        expect.objectContaining({
+          message: pendingMessage,
+        }),
+      ),
+    )
+    expect(screen.getByText(pendingMessage)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete pending message' }))
+
+    expect(screen.queryByText(pendingMessage)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Delete pending message' })).not.toBeInTheDocument()
+  })
+
   it('keeps a pending player message below the previous DM while log refreshes settle', async () => {
     const rendered = await renderLoadedApp()
     const pendingMessage = 'I sprint through the smoke before the echo fades.'
@@ -2685,6 +2713,56 @@ describe('App user workflow regressions', () => {
     )
   })
 
+  it('shows refreshed level and XP when state-applied XP crosses a level threshold', async () => {
+    const { container } = await renderLoadedApp()
+    expect(container.querySelector('.level-stack strong')).toHaveTextContent('2')
+
+    playerDetails[30] = {
+      ...playerDetails[30],
+      level: 3,
+      stats: {
+        ...(playerDetails[30].stats as Record<string, unknown>),
+        xp: 1700,
+        experience: 1700,
+        next_level_at: 2700,
+        nextLevelAt: 2700,
+      },
+    }
+
+    await act(async () => {
+      socketHandler<{
+        session_id: number
+        turn_id: number
+        status: string
+        details: {
+          player_id: number
+          character_state_changes_applied: Array<{ change_type: string; xp_delta: number }>
+        }
+      }>('turn_status')({
+        session_id: 20,
+        turn_id: 9,
+        status: 'state_applied',
+        details: {
+          player_id: 30,
+          character_state_changes_applied: [{ change_type: 'xp.add', xp_delta: 1400 }],
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(container.querySelector('.level-stack strong')).toHaveTextContent('3')
+    })
+    expect(screen.getByText('1.7K / 2.7K XP')).toBeInTheDocument()
+    expect(fetchCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: 'GET',
+          path: '/api/players/30',
+        }),
+      ]),
+    )
+  })
+
   it('refreshes session state when a state_applied turn reports world snapshot changes', async () => {
     await renderLoadedApp()
     const sessionStateFetchesBefore = fetchCalls.filter(
@@ -3103,6 +3181,27 @@ describe('App user workflow regressions', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'DM Response' }))
     expect(screen.getAllByText(/Full narrator ending remains visible/i).length).toBeGreaterThan(0)
+  })
+
+  it('keeps the latest DM response expanded when a state update arrives after it', async () => {
+    sessionLogs[20] = [
+      ...sessionLogs[20],
+      {
+        id: 4,
+        entry_type: 'system',
+        message: 'State updated: thunderer took 8 damage.',
+        metadata: { source: 'state_update' },
+        timestamp: '2026-06-06T10:43:00.000Z',
+      },
+    ]
+
+    const rendered = await renderLoadedApp()
+
+    expect(screen.getByText(/State updated: thunderer took 8 damage/i)).toBeInTheDocument()
+    const currentResponse = rendered.container.querySelector<HTMLElement>('.turn-row.current .dm-response-card')
+    expect(currentResponse).not.toBeNull()
+    expect(currentResponse as HTMLElement).toHaveTextContent(/Latest Response/i)
+    expect(currentResponse as HTMLElement).toHaveTextContent(/Full narrator ending remains visible/i)
   })
 
   it('expands prior turns so long historical responses can be read', async () => {

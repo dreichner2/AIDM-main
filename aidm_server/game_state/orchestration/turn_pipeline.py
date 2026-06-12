@@ -7,6 +7,7 @@ from typing import Any
 from aidm_server.canon_inventory import append_drop_all_inventory_changes_from_text, inventory_change_from_intent_outcome
 from aidm_server.canon_text import int_or_default
 from aidm_server.combat.pipeline import (
+    combat_turn_advance_change,
     prepare_combat_for_turn,
     prepare_combat_from_dm_response,
     record_combat_debug_from_outcome,
@@ -106,6 +107,16 @@ def _recent_context_strings(recent_timeline: list[dict[str, Any]]) -> list[str]:
 def _safe_pre_dm_immediate_change(change: dict[str, Any]) -> bool:
     change_type = str(change.get('type') or '').strip()
     return change_type in SAFE_PRE_DM_IMMEDIATE_CHANGE_TYPES and not bool(change.get('visible', True))
+
+
+def _merge_validation_results(*validations: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {'accepted': [], 'modified': [], 'rejected': []}
+    for validation in validations:
+        if not isinstance(validation, dict):
+            continue
+        for key in ('accepted', 'modified', 'rejected'):
+            merged[key].extend([item for item in (validation.get(key) or []) if isinstance(item, dict)])
+    return merged
 
 
 def _item_reference_terms(item_name: Any) -> set[str]:
@@ -878,6 +889,23 @@ def post_dm_pipeline(
         post_apply = apply_state_changes(state_before_dm, post_changes)
         final_state = post_apply['nextState']
         applied_post = post_apply['appliedChanges']
+        turn_advance_change = combat_turn_advance_change(state=final_state, turn=turn, actor_id=actor_id)
+        if turn_advance_change:
+            advance_validation = validate_state_changes(state=final_state, changes=[turn_advance_change])
+            advance_changes = validated_changes_for_application(advance_validation)
+            advance_apply = apply_state_changes(final_state, advance_changes)
+            final_state = advance_apply['nextState']
+            applied_post = [*applied_post, *advance_apply['appliedChanges']]
+            post_validation = _merge_validation_results(post_validation, advance_validation)
+            post_extraction = deepcopy(post_extraction)
+            post_extraction['proposedChanges'] = [
+                *(post_extraction.get('proposedChanges') or []),
+                turn_advance_change,
+            ]
+            notes = list(post_extraction.get('notes') or [])
+            if 'combat_turn_roster_advanced' not in notes:
+                notes.append('combat_turn_roster_advanced')
+            post_extraction['notes'] = notes
         if applied_post:
             persist_state_to_database(session_obj=session_obj, state=final_state, players_by_id=players_by_id)
         else:

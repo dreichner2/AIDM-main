@@ -246,6 +246,7 @@ def instantiate_creature(
         'kind': 'boss' if creature.get('challengeTier') == 'boss' else 'creature',
         'creatureType': creature.get('creatureType'),
         'definitionId': creature['id'],
+        'aliases': deepcopy(creature.get('aliases') or []),
         'level': creature.get('level'),
         'challengeTier': creature.get('challengeTier'),
         'xpReward': creature.get('xpReward'),
@@ -328,8 +329,149 @@ def ensure_combat_state(state: dict[str, Any]) -> dict[str, Any]:
     return combat
 
 
+def _participant_can_take_turn(participant: dict[str, Any]) -> bool:
+    hp = participant.get('hp') if isinstance(participant.get('hp'), dict) else {}
+    current_hp = int_or_default(hp.get('current'), default=1)
+    return (
+        participant.get('isAlive') is not False
+        and participant.get('isConscious') is not False
+        and current_hp > 0
+        and participant.get('team') in {'player', 'ally', 'enemy'}
+    )
+
+
+def _turn_order_entry(participant: dict[str, Any], order_index: int) -> dict[str, Any]:
+    hp = participant.get('hp') if isinstance(participant.get('hp'), dict) else {}
+    return {
+        'id': participant.get('id'),
+        'name': participant.get('name') or participant.get('id'),
+        'team': participant.get('team'),
+        'kind': participant.get('kind'),
+        'order': order_index,
+        'hp': {
+            'current': hp.get('current'),
+            'max': hp.get('max'),
+        },
+    }
+
+
+def combat_turn_order(combat: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized = normalize_combat_state(combat)
+    participants = [
+        participant
+        for participant in normalized.get('participants') or []
+        if isinstance(participant, dict) and participant.get('id') and _participant_can_take_turn(participant)
+    ]
+    ordered = [
+        *[participant for participant in participants if participant.get('team') in {'player', 'ally'}],
+        *[participant for participant in participants if participant.get('team') == 'enemy'],
+    ]
+    return [_turn_order_entry(participant, index) for index, participant in enumerate(ordered)]
+
+
+def _turn_index_for_actor(order: list[dict[str, Any]], actor_id: str | None) -> int | None:
+    actor_id = str(actor_id or '').strip()
+    if not actor_id:
+        return None
+    for index, entry in enumerate(order):
+        if str(entry.get('id') or '') == actor_id:
+            return index
+    return None
+
+
+def _turn_index_from_combat(combat: dict[str, Any], order: list[dict[str, Any]]) -> int | None:
+    if not order:
+        return None
+    raw_index = combat.get('turnIndex')
+    if raw_index is None:
+        flags = combat.get('flags') if isinstance(combat.get('flags'), dict) else {}
+        actor_index = _turn_index_for_actor(order, flags.get('activeActorId'))
+        if actor_index is not None:
+            return actor_index
+    return int_or_default(raw_index, default=0) % len(order)
+
+
+def combat_turn_context(combat: dict[str, Any], active_actor_id: str | None = None) -> dict[str, Any]:
+    normalized = normalize_combat_state(combat)
+    order = combat_turn_order(normalized)
+    if not order:
+        return {
+            'mode': 'players_then_enemies',
+            'turnOrder': [],
+            'turnOrderIds': [],
+            'turnOrderText': '',
+            'turnIndex': None,
+            'currentActor': None,
+            'immediateNextActor': None,
+            'enemyTurnBlock': [],
+            'handoffActor': None,
+            'nextTurnIndex': None,
+            'nextRound': normalized.get('round') or 1,
+            'turnInstruction': 'No eligible combat participants can take a turn.',
+        }
+
+    actor_index = _turn_index_for_actor(order, active_actor_id)
+    current_index = actor_index if actor_index is not None else _turn_index_from_combat(normalized, order)
+    if current_index is None:
+        current_index = 0
+
+    count = len(order)
+    current_actor = order[current_index]
+    immediate_next_index = (current_index + 1) % count
+    immediate_next_actor = order[immediate_next_index]
+    enemy_turn_block: list[dict[str, Any]] = []
+    handoff_index = immediate_next_index
+
+    if immediate_next_actor.get('team') == 'enemy':
+        cursor = immediate_next_index
+        visited = 0
+        while visited < count and order[cursor].get('team') == 'enemy':
+            enemy_turn_block.append(order[cursor])
+            cursor = (cursor + 1) % count
+            visited += 1
+        if visited < count:
+            handoff_index = cursor
+
+    handoff_actor = order[handoff_index]
+    steps_to_handoff = (handoff_index - current_index) % count
+    if steps_to_handoff == 0:
+        steps_to_handoff = count
+    next_round = max(1, int_or_default(normalized.get('round'), default=1))
+    if current_index + steps_to_handoff >= count:
+        next_round += 1
+
+    order_text = ' -> '.join(str(entry.get('name') or entry.get('id')) for entry in order)
+    if enemy_turn_block:
+        enemy_text = ', '.join(str(entry.get('name') or entry.get('id')) for entry in enemy_turn_block)
+        turn_instruction = (
+            f"Resolve only {current_actor.get('name')}'s submitted action first. Then resolve enemy turns in order: "
+            f"{enemy_text}. After those enemy turns, hand the next player turn to {handoff_actor.get('name')}."
+        )
+    else:
+        turn_instruction = (
+            f"Resolve only {current_actor.get('name')}'s submitted action. Do not take enemy turns yet. "
+            f"Hand the next combat turn to {handoff_actor.get('name')}."
+        )
+
+    return {
+        'mode': 'players_then_enemies',
+        'turnOrder': order,
+        'turnOrderIds': [entry.get('id') for entry in order],
+        'turnOrderText': order_text,
+        'turnIndex': current_index,
+        'currentActor': current_actor,
+        'immediateNextActor': immediate_next_actor,
+        'enemyTurnBlock': enemy_turn_block,
+        'handoffActor': handoff_actor,
+        'nextTurnIndex': handoff_index,
+        'nextRound': next_round,
+        'turnInstruction': turn_instruction,
+    }
+
+
 def combat_summary_for_dm(combat: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_combat_state(combat)
+    turn_context = combat_turn_context(normalized)
     participants_by_id = {
         str(participant.get('id')): participant
         for participant in normalized.get('participants') or []
@@ -384,4 +526,12 @@ def combat_summary_for_dm(combat: dict[str, Any]) -> dict[str, Any]:
         'enemyRequiredActions': required_actions[:6],
         'enemyTelegraphs': telegraphs[:6],
         'encounterGoal': normalized.get('encounterGoal'),
+        'turnOrderMode': turn_context.get('mode'),
+        'turnOrder': turn_context.get('turnOrder'),
+        'turnOrderText': turn_context.get('turnOrderText'),
+        'currentTurn': turn_context.get('currentActor'),
+        'nextActor': turn_context.get('immediateNextActor'),
+        'enemyTurnBlock': turn_context.get('enemyTurnBlock'),
+        'handoffActor': turn_context.get('handoffActor'),
+        'turnInstruction': turn_context.get('turnInstruction'),
     }

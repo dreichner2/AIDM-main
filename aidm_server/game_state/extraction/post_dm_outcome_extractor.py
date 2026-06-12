@@ -100,6 +100,21 @@ ITEM_LOSS_PATTERN = re.compile(
     r'(?:the|a|an|some|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
     re.IGNORECASE,
 )
+DROP_TO_SCENE_PATTERN = re.compile(
+    r'\b(?:drop|drops|dropped|fall|falls|fell|fallen|tumble|tumbles|tumbled|clatter|clatters|clattered|'
+    r'land|lands|landed|slide|slides|slid)\b[^.!?\n]{0,100}\b(?:ground|floor|path|dirt|sand|stone|shells?|road|deck|scene)\b|'
+    r'\b(?:ground|floor|path|dirt|sand|stone|shells?|road|deck)\b[^.!?\n]{0,100}\b(?:drop|drops|dropped|fall|falls|fell|fallen|lying|lies|rests?|resting|clatter|clatters|clattered)\b',
+    re.IGNORECASE,
+)
+SCENE_PICKUP_PATTERN = re.compile(
+    r'\b(?:take|takes|took|pick up|picks up|picked up|grab|grabs|grabbed|collect|collects|collected|'
+    r'claim|claims|claimed|pocket|pockets|pocketed|lift|lifts|lifted|carry|carries|carrying|hold|holds|holding)\b',
+    re.IGNORECASE,
+)
+SCENE_ITEM_HELD_PATTERN = re.compile(
+    r'\b(?:has|have|gets?|got|is carrying|starts carrying|ends up carrying|is holding|holds|gets? .{0,40}\bup)\b',
+    re.IGNORECASE,
+)
 ITEM_EQUIP_PATTERN = re.compile(
     r'\b(?:you\s+)?(?:equip|equips|equipped|wield|wields|wielded|ready|readies|readied|wear|wears|wore|don|dons|donned|put on|puts on|strap on|straps on|strapped on|draw|draws|drew)\s+'
     r'(?:the|a|an|some|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
@@ -195,9 +210,9 @@ HIGH_DANGER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 MODERATE_DANGER_PATTERN = re.compile(
-    r'\b(?:dangerous|threat(?:en(?:s|ed|ing)?)?|hazard(?:ous)?|trap|stalk(?:s|ed|ing)?|'
-    r'watch(?:es|ing)\s+you|growl(?:s|ing)?|snarl(?:s|ing)?|unstable|narrow\s+ledge|'
-    r'fresh\s+blood|ominous|peril(?:ous)?)\b',
+    r'\b(?:immediate\s+danger|active\s+threat|threat(?:en(?:s|ed|ing)?)?\s+(?:you|the party|them)|'
+    r'hazard(?:ous)?|trap|stalk(?:s|ed|ing)\s+(?:you|the party|them)|growl(?:s|ing)?|snarl(?:s|ing)?|'
+    r'unstable|narrow\s+ledge|fresh\s+blood|peril(?:ous)?\s+(?:drop|crossing|path|ledge))\b',
     re.IGNORECASE,
 )
 LOWER_DANGER_PATTERN = re.compile(
@@ -232,6 +247,15 @@ COMBAT_CONDITIONS = {
 COMBAT_END_PATTERN = re.compile(
     r'\b(?:combat ends?|fight is over|battle ends?|no immediate threat|last enemy falls|enemies (?:fall|flee|surrender)|'
     r'all enemies (?:are )?(?:defeated|gone|fled|surrendered))\b',
+    re.IGNORECASE,
+)
+EXPLICIT_LEARN_MAGIC_PATTERN = re.compile(
+    r'\b(?:learn|learns|learned|master|masters|mastered|unlock|unlocks|unlocked|teach|teaches|taught|'
+    r'copy|copies|copied|read|reads|studies|studied|new spell|new cantrip|new ritual|new magical technique)\b',
+    re.IGNORECASE,
+)
+TRANSFORM_ONLY_PATTERN = re.compile(
+    r'\b(?:turns?\s+into|transforms?\s+into|shapeshifts?\s+into|form\s+ripples|form\s+shifts)\b',
     re.IGNORECASE,
 )
 LARGE_THREAT_PATTERN = re.compile(
@@ -367,6 +391,13 @@ def _already_applied_signature(change: dict[str, Any]) -> tuple[Any, ...] | None
     if change_type == 'spell.learn':
         spell = change.get('spell') if isinstance(change.get('spell'), dict) else {}
         return (change_type, str(change.get('actorId') or ''), normalize_item_name(change.get('spellName') or spell.get('name')))
+    if change_type in {'scene.item.add', 'scene.item.remove'}:
+        item = change.get('item') if isinstance(change.get('item'), dict) else {}
+        return (
+            change_type,
+            normalize_item_name(change.get('itemId') or item.get('id')),
+            normalize_item_name(change.get('itemName') or item.get('name')),
+        )
     if change_type in {'scene.update', 'scene.move_location'}:
         return (
             change_type,
@@ -527,6 +558,175 @@ def _item_extraction_sentences(text: str) -> list[str]:
     return [sentence.strip() for sentence in re.split(r'(?<=[.!?])\s+|\n+', text or '') if sentence.strip()]
 
 
+def _actor_by_id(state: dict[str, Any], actor_id: Any) -> dict[str, Any] | None:
+    requested = str(actor_id or '').strip()
+    if not requested:
+        return None
+    for actor in state.get('playerCharacters') or []:
+        if isinstance(actor, dict) and str(actor.get('id') or '').strip() == requested:
+            return actor
+    return None
+
+
+def _actor_item(actor: dict[str, Any] | None, item_name: Any) -> dict[str, Any] | None:
+    requested = normalize_item_name(item_name)
+    if not isinstance(actor, dict) or not requested:
+        return None
+    inventory = actor.get('inventory') if isinstance(actor.get('inventory'), dict) else {}
+    for item in inventory.get('items') or []:
+        if isinstance(item, dict) and normalize_item_name(item.get('name')) == requested:
+            return item
+    return None
+
+
+def _current_scene_items(state_before_dm: dict[str, Any]) -> list[dict[str, Any]]:
+    scene = _current_scene(state_before_dm)
+    items = scene.get('items') if isinstance(scene.get('items'), list) else []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _sentence_mentions_label(sentence: str, label: Any) -> bool:
+    pattern = _target_label_regex(str(label or ''))
+    return bool(pattern and re.search(pattern, normalize_item_name(sentence), re.IGNORECASE))
+
+
+def _item_payload_from_actor(item: dict[str, Any], *, quantity: int, source_actor_id: str | None = None) -> dict[str, Any]:
+    payload = dict(item)
+    payload['quantity'] = quantity
+    payload.setdefault('type', item.get('type') or 'misc')
+    if source_actor_id:
+        payload['sourceActorId'] = source_actor_id
+    return payload
+
+
+def _has_change(changes: list[dict[str, Any]], *, change_type: str, actor_id: str | None = None, item_name: str | None = None) -> bool:
+    requested_item = normalize_item_name(item_name)
+    for change in changes:
+        if not isinstance(change, dict) or str(change.get('type') or '').strip() != change_type:
+            continue
+        if actor_id and str(change.get('actorId') or '') != str(actor_id):
+            continue
+        item = change.get('item') if isinstance(change.get('item'), dict) else {}
+        candidate = normalize_item_name(change.get('itemName') or item.get('name'))
+        if requested_item and candidate != requested_item:
+            continue
+        return True
+    return False
+
+
+def _scene_item_grounding_changes(
+    *,
+    state_before_dm: dict[str, Any],
+    dm_response: str,
+    proposed_changes: list[dict[str, Any]],
+    actor_id: str,
+    turn_id: int,
+    already_applied_changes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    text = re.sub(r'\*+', '', dm_response or '')
+    if not text.strip():
+        return []
+    already = _already_applied([*already_applied_changes, *proposed_changes])
+    additions: list[dict[str, Any]] = []
+
+    for change in proposed_changes:
+        if not isinstance(change, dict) or str(change.get('type') or '') not in {'inventory.unequip', 'inventory.remove'}:
+            continue
+        source_actor_id = str(change.get('actorId') or actor_id or '').strip()
+        item_name = str(change.get('itemName') or '').strip()
+        if not source_actor_id or not item_name:
+            continue
+        dropped_sentence = next(
+            (
+                sentence
+                for sentence in _item_extraction_sentences(text)
+                if _sentence_mentions_label(sentence, item_name) and DROP_TO_SCENE_PATTERN.search(sentence)
+            ),
+            '',
+        )
+        if not dropped_sentence:
+            continue
+        actor = _actor_by_id(state_before_dm, source_actor_id)
+        source_item = _actor_item(actor, item_name) or {'name': item_name, 'quantity': change.get('quantity', 1), 'type': 'misc'}
+        quantity = max(1, int_or_default(change.get('quantity'), default=1))
+        if str(change.get('type')) == 'inventory.unequip' and not _has_change(
+            [*proposed_changes, *additions],
+            change_type='inventory.remove',
+            actor_id=source_actor_id,
+            item_name=item_name,
+        ):
+            _add_change(
+                additions,
+                turn_id=turn_id,
+                actor_id=source_actor_id,
+                change_type='inventory.remove',
+                itemId=source_item.get('id') or change.get('itemId'),
+                itemName=source_item.get('name') or item_name,
+                quantity=quantity,
+                reason=f"{source_item.get('name') or item_name} fell to the scene.",
+                already=already,
+            )
+        if not _has_change([*proposed_changes, *additions], change_type='scene.item.add', item_name=item_name):
+            _add_change(
+                additions,
+                turn_id=turn_id,
+                actor_id=source_actor_id,
+                change_type='scene.item.add',
+                itemId=source_item.get('id') or change.get('itemId'),
+                itemName=source_item.get('name') or item_name,
+                quantity=quantity,
+                sourceActorId=source_actor_id,
+                item=_item_payload_from_actor(source_item, quantity=quantity, source_actor_id=source_actor_id),
+                reason=f"{source_item.get('name') or item_name} is now loose in the scene.",
+                already=already,
+            )
+
+    for scene_item in _current_scene_items(state_before_dm):
+        item_name = str(scene_item.get('name') or '').strip()
+        if not item_name:
+            continue
+        pickup_sentence = next(
+            (
+                sentence
+                for sentence in _item_extraction_sentences(text)
+                if _sentence_mentions_label(sentence, item_name)
+                and (SCENE_PICKUP_PATTERN.search(sentence) or SCENE_ITEM_HELD_PATTERN.search(sentence))
+            ),
+            '',
+        )
+        if not pickup_sentence:
+            continue
+        quantity = max(1, int_or_default(scene_item.get('quantity'), default=1))
+        if not _has_change([*proposed_changes, *additions], change_type='scene.item.remove', item_name=item_name):
+            _add_change(
+                additions,
+                turn_id=turn_id,
+                actor_id=actor_id,
+                change_type='scene.item.remove',
+                itemId=scene_item.get('id'),
+                itemName=item_name,
+                quantity=quantity,
+                item={**scene_item, 'quantity': quantity},
+                reason=f"{item_name} was picked up from the scene.",
+                already=already,
+            )
+        if not _has_change([*proposed_changes, *additions], change_type='inventory.add', actor_id=actor_id, item_name=item_name):
+            _add_change(
+                additions,
+                turn_id=turn_id,
+                actor_id=actor_id,
+                change_type='inventory.add',
+                itemId=scene_item.get('id'),
+                itemName=item_name,
+                quantity=quantity,
+                item={**scene_item, 'quantity': quantity},
+                reason=f"DM confirmed {item_name} is now carried.",
+                already=already,
+            )
+
+    return additions
+
+
 def _is_conditional_item_context(sentence: str) -> bool:
     normalized = normalize_item_name(sentence)
     if not normalized:
@@ -578,12 +778,18 @@ def _add_change(
         'visible': True,
         **payload,
     }
-    if change_type == 'inventory.add':
+    if change_type in {'inventory.add', 'scene.item.add'}:
+        raw_item = payload.get('item') if isinstance(payload.get('item'), dict) else {}
         change['item'] = {
+            **raw_item,
             'name': payload.get('itemName'),
             'quantity': payload.get('quantity', 1),
-            'type': payload.get('itemType') or 'misc',
+            'type': raw_item.get('type') or payload.get('itemType') or 'misc',
         }
+        if payload.get('itemId'):
+            change['item']['id'] = payload.get('itemId')
+        if payload.get('sourceActorId'):
+            change['item']['sourceActorId'] = payload.get('sourceActorId')
     if change_type == 'spell.learn' and payload.get('spellName'):
         change['spell'] = {
             'name': payload.get('spellName'),
@@ -1273,6 +1479,55 @@ def _filter_misrouted_combat_health_changes(
     return filtered, removed
 
 
+def _filter_noncombat_ability_changes(
+    state_before_dm: dict[str, Any],
+    changes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    combat = state_before_dm.get('combat') if isinstance(state_before_dm, dict) else {}
+    combat_active = isinstance(combat, dict) and str(combat.get('status') or '').strip().lower() in {'starting', 'active'}
+    participants = combat.get('participants') if isinstance(combat, dict) else []
+    participant_ids = {
+        str(participant.get('id') or '').strip()
+        for participant in participants or []
+        if isinstance(participant, dict) and str(participant.get('id') or '').strip()
+    }
+    filtered: list[dict[str, Any]] = []
+    removed = 0
+    for change in changes:
+        if not isinstance(change, dict) or str(change.get('type') or '') != 'combat.ability.mark_used':
+            filtered.append(change)
+            continue
+        participant_id = str(change.get('participantId') or '').strip()
+        if combat_active and participant_id and participant_id in participant_ids:
+            filtered.append(change)
+            continue
+        removed += 1
+    return filtered, removed
+
+
+def _filter_transform_only_spell_learns(
+    dm_response: str,
+    changes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    text = re.sub(r'\*+', '', dm_response or '')
+    if EXPLICIT_LEARN_MAGIC_PATTERN.search(text) or not TRANSFORM_ONLY_PATTERN.search(text):
+        return changes, 0
+    filtered: list[dict[str, Any]] = []
+    removed = 0
+    for change in changes:
+        if not isinstance(change, dict) or str(change.get('type') or '') != 'spell.learn':
+            filtered.append(change)
+            continue
+        spell = change.get('spell') if isinstance(change.get('spell'), dict) else {}
+        spell_name = normalize_item_name(change.get('spellName') or spell.get('name'))
+        learned_from = str(change.get('learnedFrom') or '').strip()
+        if ('form' in spell_name or learned_from) and not EXPLICIT_LEARN_MAGIC_PATTERN.search(learned_from):
+            removed += 1
+            continue
+        filtered.append(change)
+    return filtered, removed
+
+
 def _add_combat_change(
     changes: list[dict[str, Any]],
     *,
@@ -1620,6 +1875,15 @@ def _heuristic_extract(
                     already=already,
                 )
 
+    scene_item_changes = _scene_item_grounding_changes(
+        state_before_dm=state_before_dm,
+        dm_response=dm_response,
+        proposed_changes=changes,
+        actor_id=actor_id,
+        turn_id=turn_id,
+        already_applied_changes=already_applied_changes,
+    )
+    changes.extend(scene_item_changes)
     scene_changes = _heuristic_scene_danger_changes(
         state_before_dm=state_before_dm,
         dm_response=dm_response,
@@ -1653,6 +1917,8 @@ def _heuristic_extract(
     notes = ['heuristic_post_dm'] if changes else []
     if scene_changes and 'heuristic_scene_danger' not in notes:
         notes.append('heuristic_scene_danger')
+    if scene_item_changes and 'scene_item_grounding' not in notes:
+        notes.append('scene_item_grounding')
     if active_npc_changes and 'heuristic_active_npcs' not in notes:
         notes.append('heuristic_active_npcs')
     if combat_changes and 'heuristic_combat_outcomes' not in notes:
@@ -1743,8 +2009,20 @@ def extract_post_dm_outcomes(
             state_before_dm,
             normalized.get('proposedChanges') or [],
         )
-        if filtered_count:
+        filtered_changes, filtered_ability_count = _filter_noncombat_ability_changes(state_before_dm, filtered_changes)
+        filtered_changes, filtered_spell_count = _filter_transform_only_spell_learns(dm_response, filtered_changes)
+        if filtered_count or filtered_ability_count or filtered_spell_count:
             normalized['proposedChanges'] = filtered_changes
+        scene_item_changes = _scene_item_grounding_changes(
+            state_before_dm=state_before_dm,
+            dm_response=dm_response,
+            proposed_changes=normalized.get('proposedChanges') or [],
+            actor_id=actor_id,
+            turn_id=turn_id,
+            already_applied_changes=already_applied_changes,
+        )
+        if scene_item_changes:
+            normalized['proposedChanges'] = [*(normalized.get('proposedChanges') or []), *scene_item_changes]
         scene_changes = _heuristic_scene_danger_changes(
             state_before_dm=state_before_dm,
             dm_response=dm_response,
@@ -1795,6 +2073,12 @@ def extract_post_dm_outcomes(
             notes.append('automatic_xp_award')
         if filtered_count and 'filtered_misrouted_combat_health' not in notes:
             notes.append('filtered_misrouted_combat_health')
+        if filtered_ability_count and 'filtered_noncombat_ability' not in notes:
+            notes.append('filtered_noncombat_ability')
+        if filtered_spell_count and 'filtered_transform_only_spell_learn' not in notes:
+            notes.append('filtered_transform_only_spell_learn')
+        if scene_item_changes and 'scene_item_grounding' not in notes:
+            notes.append('scene_item_grounding')
         if conflict_resolved and 'resolved_combat_scene_conflict' not in notes:
             notes.append('resolved_combat_scene_conflict')
         normalized['notes'] = notes

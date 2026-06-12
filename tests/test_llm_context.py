@@ -181,6 +181,16 @@ def test_build_dm_context_includes_compact_live_world_state_from_snapshot(app):
                         'description': 'A busy tavern full of dockside rumors.',
                         'activeNpcIds': ['captain_velra'],
                         'activeQuestIds': ['find_missing_sailor'],
+                        'items': [
+                            {
+                                'id': 'loose_map',
+                                'name': 'Loose Map',
+                                'quantity': 1,
+                                'type': 'misc',
+                                'sourceActorId': 'player_2',
+                                'privateNote': 'Hidden item note should not enter context.',
+                            }
+                        ],
                     },
                     'quests': [
                         {
@@ -254,6 +264,15 @@ def test_build_dm_context_includes_compact_live_world_state_from_snapshot(app):
     assert payload['campaign']['location'] == 'Campaign Seed Location'
     assert live_state['currentScene']['name'] == 'Blackwake Tavern'
     assert live_state['currentScene']['locationId'] == 'blackwake_tavern'
+    assert live_state['currentScene']['items'] == [
+        {
+            'id': 'loose_map',
+            'name': 'Loose Map',
+            'quantity': 1,
+            'type': 'misc',
+            'sourceActorId': 'player_2',
+        }
+    ]
     assert live_state['activeQuests'][0]['id'] == 'find_missing_sailor'
     assert live_state['activeQuests'][0]['objectives'][0]['id'] == 'talk_to_velra'
     assert [quest['id'] for quest in live_state['activeQuests']] == ['find_missing_sailor']
@@ -266,6 +285,7 @@ def test_build_dm_context_includes_compact_live_world_state_from_snapshot(app):
     assert 'stateChangeLedger' not in encoded_live_state
     assert 'playerCharacters' not in encoded_live_state
     assert 'Private NPC memory' not in encoded_live_state
+    assert 'Hidden item note' not in encoded_live_state
 
 
 def test_build_dm_context_live_world_state_is_bounded(app):
@@ -287,6 +307,10 @@ def test_build_dm_context_live_world_state_is_bounded(app):
                         'name': 'Location 0',
                         'activeQuestIds': [f'quest_{index}' for index in range(10)],
                         'activeNpcIds': [f'npc_{index}' for index in range(10)],
+                        'items': [
+                            {'id': f'item_{index}', 'name': f'Item {index}', 'quantity': index + 1}
+                            for index in range(20)
+                        ],
                     },
                     'quests': [
                         {
@@ -336,6 +360,7 @@ def test_build_dm_context_live_world_state_is_bounded(app):
     assert len(live_state['activeNpcs']) == 8
     assert len(live_state['recentKnownNpcs']) <= 8
     assert len(live_state['flags']) == 20
+    assert len(live_state['currentScene']['items']) == 12
 
 
 def test_build_dm_context_invalid_snapshot_keeps_existing_context_fields(app):

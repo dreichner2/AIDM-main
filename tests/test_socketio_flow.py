@@ -652,6 +652,73 @@ def test_ai_conductor_switches_spotlight_interrupt_to_structured(app, socketio, 
     assert start_payload['rules_hint']['turn_control']['activePlayerId'] == second_player_id
 
 
+def test_ai_conductor_does_not_structure_low_stakes_transformation(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        yield 'The transformation resolves without strict timing.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    ids = seed_world_campaign_player_session(app)
+    second_player_id = _seed_second_player(app, ids['campaign_id'])
+    provider = FakeConductorProvider(
+        json.dumps(
+            {
+                'decision': 'switch_to_structured',
+                'mode': 'structured',
+                'activePlayerId': second_player_id,
+                'participantPlayerIds': [ids['player_id'], second_player_id],
+                'focusType': 'high_stakes',
+                'reason': 'A magical transformation may require timing.',
+                'confidence': 0.94,
+            }
+        )
+    )
+    app.config['AIDM_TURN_CONDUCTOR_HELPER_IN_TESTS'] = True
+    monkeypatch.setattr(turn_control_module, 'get_helper_provider', lambda: provider)
+
+    first_client = socketio.test_client(app, flask_test_client=app.test_client())
+    second_client = socketio.test_client(app, flask_test_client=app.test_client())
+    first_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    second_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': second_player_id})
+    first_client.get_received()
+    second_client.get_received()
+
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        turn_control_module.set_session_turn_control(
+            session,
+            mode='spotlight',
+            active_player_id=ids['player_id'],
+            participant_player_ids=[ids['player_id'], second_player_id],
+            updated_by_player_id=second_player_id,
+            source='ai',
+            reason='Shared conversation.',
+        )
+        db.session.commit()
+
+    second_client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': second_player_id,
+            'message': 'I try to turn into a little finch.',
+        },
+    )
+    received = second_client.get_received()
+    start_payload = _event_payload(received, 'dm_response_start')
+
+    assert _event_payload(received, 'turn_control_updated') is None
+    assert start_payload['rules_hint']['turn_control']['mode'] == 'spotlight'
+
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        snapshot = safe_json_loads(session.state_snapshot, {})
+        assert snapshot['turnControl']['mode'] == 'spotlight'
+
+
 def test_ai_conductor_cannot_bypass_existing_structured_turn_lock(app, socketio, app_runtime, monkeypatch):
     socketio_module = app_runtime['modules']['socketio_events']
     monkeypatch.setattr(socketio_module, 'query_dm_function_stream', lambda *args, **kwargs: iter(['Should not run.']))
@@ -768,6 +835,69 @@ def test_structured_turn_control_advances_after_completed_turn(app, socketio, ap
         session = db.session.get(Session, ids['session_id'])
         snapshot = safe_json_loads(session.state_snapshot, {})
         assert snapshot['turnControl']['activePlayerId'] == second_player_id
+
+
+def test_ai_structured_turn_control_returns_to_spotlight_after_noncombat_turn(app, socketio, app_runtime, monkeypatch):
+    from aidm_server.rules import RuleHint
+
+    socketio_module = app_runtime['modules']['socketio_events']
+    turn_engine_module = app_runtime['modules']['turn_engine']
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        yield 'The tavern conversation continues without danger.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    monkeypatch.setattr(
+        turn_engine_module,
+        'classify_player_action',
+        lambda *args, **kwargs: RuleHint(False, None, None, 'No check needed.', 0.2),
+    )
+
+    ids = seed_world_campaign_player_session(app)
+    second_player_id = _seed_second_player(app, ids['campaign_id'])
+
+    first_client = socketio.test_client(app, flask_test_client=app.test_client())
+    second_client = socketio.test_client(app, flask_test_client=app.test_client())
+    first_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    second_client.emit('join_session', {'session_id': ids['session_id'], 'player_id': second_player_id})
+    first_client.get_received()
+    second_client.get_received()
+
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        turn_control_module.set_session_turn_control(
+            session,
+            mode='structured',
+            active_player_id=ids['player_id'],
+            participant_player_ids=[ids['player_id'], second_player_id],
+            updated_by_player_id=ids['player_id'],
+            source='ai',
+            reason='AI temporarily structured a timing-sensitive action.',
+        )
+        db.session.commit()
+
+    first_client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'I say hello and wait for an answer.',
+        },
+    )
+    received = first_client.get_received()
+    updated_payload = _event_payload(received, 'turn_control_updated')
+
+    assert updated_payload is not None
+    assert updated_payload['turn_control']['mode'] == 'spotlight'
+    assert updated_payload['turn_control']['source'] == 'auto'
+    assert set(updated_payload['turn_control']['participantPlayerIds']) == {ids['player_id'], second_player_id}
+
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        snapshot = safe_json_loads(session.state_snapshot, {})
+        assert snapshot['turnControl']['mode'] == 'spotlight'
 
 
 def test_structured_turn_control_waits_when_turn_creates_pending_roll_gate(app, socketio, app_runtime, monkeypatch):

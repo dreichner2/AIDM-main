@@ -23,6 +23,8 @@ PHASE_1_STATE_CHANGE_TYPES = {
 WORLD_STATE_CHANGE_TYPES = {
     'scene.update',
     'scene.move_location',
+    'scene.item.add',
+    'scene.item.remove',
     'location.discover',
     'location.update',
     'location.connect',

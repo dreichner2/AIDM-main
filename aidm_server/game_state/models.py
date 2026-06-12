@@ -375,6 +375,7 @@ def state_snapshot_for_session(
                 'playerZones': scene.get('playerZones') if isinstance(scene.get('playerZones'), dict) else {},
                 'characterPositions': scene.get('characterPositions') if isinstance(scene.get('characterPositions'), dict) else {},
                 'characterZones': scene.get('characterZones') if isinstance(scene.get('characterZones'), dict) else {},
+                'items': [dict(item) for item in (scene.get('items') or []) if isinstance(item, dict)],
                 'musicTag': scene.get('musicTag') or None,
                 'updatedAtTurn': scene.get('updatedAtTurn'),
             },
@@ -555,6 +556,18 @@ def compact_state_for_extraction(state: dict[str, Any]) -> dict[str, Any]:
             'playerZones': scene.get('playerZones') if isinstance(scene.get('playerZones'), dict) else {},
             'characterPositions': scene.get('characterPositions') if isinstance(scene.get('characterPositions'), dict) else {},
             'characterZones': scene.get('characterZones') if isinstance(scene.get('characterZones'), dict) else {},
+            'items': [
+                {
+                    'id': item.get('id'),
+                    'name': item.get('name'),
+                    'quantity': item.get('quantity'),
+                    'type': item.get('type'),
+                    'subtype': item.get('subtype'),
+                    'sourceActorId': item.get('sourceActorId'),
+                }
+                for item in (scene.get('items') or [])
+                if isinstance(item, dict)
+            ][:20],
         },
         'playerCharacters': players,
         'quests': quests,

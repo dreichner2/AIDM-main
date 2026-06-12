@@ -729,7 +729,7 @@
 
 .turn-card {
   display: grid;
-  grid-template-columns: 174px minmax(0, 1fr) auto 76px 42px;
+  grid-template-columns: 174px minmax(0, 1fr) auto 76px auto;
   align-items: center;
   min-height: 50px;
   margin-bottom: 6px;
@@ -829,19 +829,45 @@
   -webkit-line-clamp: unset;
 }
 
-.turn-expand {
+.turn-actions {
   grid-column: 5;
   grid-row: 1;
   display: grid;
+  grid-template-columns: 42px;
   justify-self: stretch;
   align-self: stretch;
+  width: 42px;
+  min-height: 50px;
+  height: 100%;
+}
+
+.turn-actions.has-dismiss {
+  grid-template-columns: 42px 42px;
+  width: 84px;
+}
+
+.turn-expand,
+.turn-dismiss {
+  display: grid;
   width: 100%;
   min-height: 50px;
   height: 100%;
   place-items: center;
   border-left: 1px solid var(--line-strong);
-  color: var(--heading);
   background: rgba(255, 255, 255, 0.025);
+}
+
+.turn-expand {
+  color: var(--heading);
+}
+
+.turn-dismiss {
+  color: var(--muted);
+}
+
+.turn-dismiss:hover {
+  color: #ff9b7a;
+  background: rgba(255, 107, 37, 0.08);
 }
 
 .turn-expand svg {

@@ -850,7 +850,7 @@ export function normalizeXp(value: unknown, level: number | string): XpProgress 
   const records = collectRecords(value)
   const current = numberValue(findValue(records, ['xp', 'experience', 'current_xp'])) ?? 0
   const max =
-    numberValue(findValue(records, ['xp_to_next', 'next_level_xp', 'max_xp'])) ??
+    numberValue(findValue(records, ['xp_to_next', 'next_level_at', 'nextLevelAt', 'next_level_xp', 'max_xp'])) ??
     Math.max(300, Number(level) * 300)
   const percent = max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0
   return {

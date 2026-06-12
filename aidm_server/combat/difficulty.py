@@ -14,6 +14,12 @@ DEFAULT_COMBAT_DIFFICULTY_AI = {
     'allowEnvironmentalHazards': True,
     'allowBossTacticsHelper': True,
     'allowSentientEnemyBrain': True,
+    'allowBossWarmPlanner': True,
+    'maxLlmCallsPerRound': 3,
+    'sentientSelectorMinCandidates': 2,
+    'skipLlmWhenTopCandidateMarginExceeds': 0.25,
+    'forceSentientEnemyBrain': False,
+    'allowDeterministicCandidateMatcher': True,
 }
 
 LEVEL_DEFAULTS = {
@@ -58,9 +64,23 @@ def normalize_combat_difficulty_ai(value: Any = None) -> dict[str, Any]:
         'allowEnvironmentalHazards',
         'allowBossTacticsHelper',
         'allowSentientEnemyBrain',
+        'allowBossWarmPlanner',
+        'forceSentientEnemyBrain',
+        'allowDeterministicCandidateMatcher',
     ):
         if key in raw:
             settings[key] = bool(raw[key])
+    for key in ('maxLlmCallsPerRound', 'sentientSelectorMinCandidates'):
+        if key in raw:
+            try:
+                settings[key] = max(0, int(raw[key]))
+            except (TypeError, ValueError):
+                pass
+    if 'skipLlmWhenTopCandidateMarginExceeds' in raw:
+        try:
+            settings['skipLlmWhenTopCandidateMarginExceeds'] = max(0.0, float(raw['skipLlmWhenTopCandidateMarginExceeds']))
+        except (TypeError, ValueError):
+            pass
     return settings
 
 

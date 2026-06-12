@@ -341,6 +341,25 @@ def _extract_from_action_intent(action_intent: dict[str, Any] | None, *, actor_i
             'notes': ['action_intent_pre_dm'],
         }
 
+    if inventory_action in {'drop', 'give', 'sell'}:
+        summary = f"Player attempts to {inventory_action} {item_name}."
+        if inventory_action == 'sell' and action_intent.get('cost_gold'):
+            summary = f"{summary} Asking price: {action_intent.get('cost_gold')} gold."
+        return {
+            'declaredActions': [
+                {
+                    'id': 'act_001',
+                    'type': 'generic.intent',
+                    'actorId': actor_id,
+                    'confidence': 0.92,
+                    'sourceText': player_message,
+                    'requiresDMResolution': True,
+                    'summary': summary,
+                }
+            ],
+            'notes': ['action_intent_pre_dm'],
+        }
+
     action_type = 'inventory.consume' if inventory_action == 'use' and 'potion' in normalize_item_name(item_name) else 'inventory.use'
     return {
         'declaredActions': [

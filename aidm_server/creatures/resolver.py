@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any
 
 from aidm_server.creatures.core_bestiary import core_bestiary
@@ -8,6 +9,7 @@ from aidm_server.creatures.generator import generate_new_creature
 from aidm_server.creatures.repository import list_bestiary_entries, save_bestiary_entry, should_save_generated_creature
 from aidm_server.creatures.schemas import normalize_creature_definition
 from aidm_server.creatures.variants import create_creature_variant
+from aidm_server.game_state.models import stable_slug
 from aidm_server.models import Campaign, Session
 
 
@@ -40,6 +42,20 @@ def _list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip().lower().replace(' ', '_').replace('-', '_')]
     return []
+
+
+def _reference_terms(value: Any) -> set[str]:
+    text = _text(value)
+    if not text:
+        return set()
+    normalized = re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
+    slug = stable_slug(text)
+    terms = {term for term in {normalized, slug, text.lower().strip()} if term}
+    for term in list(terms):
+        for article in ('the ', 'a ', 'an '):
+            if term.startswith(article):
+                terms.add(term[len(article) :].strip())
+    return {term for term in terms if term}
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -470,6 +486,132 @@ def _encounter_goal_type(purpose: str) -> str:
     }.get(purpose, 'custom')
 
 
+def _scene_npc_reference_ids(scene: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for raw_id in scene.get('activeNpcIds', scene.get('active_npc_ids')) or []:
+        ids.update(_reference_terms(raw_id))
+    for source_key in ('characterPositions', 'character_positions', 'characterZones', 'character_zones'):
+        source = scene.get(source_key)
+        if isinstance(source, dict):
+            for raw_id in source.keys():
+                ids.update(_reference_terms(raw_id))
+    return ids
+
+
+def _npc_is_hostile(npc: dict[str, Any]) -> bool:
+    disposition = str(npc.get('disposition') or '').strip().lower()
+    status = str(npc.get('status') or '').strip().lower()
+    return disposition in {'hostile', 'enemy', 'aggressive'} and status not in {'dead', 'defeated', 'fled'}
+
+
+def _npc_reference_terms(npc: dict[str, Any]) -> set[str]:
+    terms: set[str] = set()
+    for value in (
+        npc.get('id'),
+        npc.get('npcId'),
+        npc.get('name'),
+        npc.get('role'),
+        npc.get('title'),
+    ):
+        terms.update(_reference_terms(value))
+    for alias in npc.get('aliases') or []:
+        terms.update(_reference_terms(alias))
+    return terms
+
+
+def _display_name(value: Any, fallback: str) -> str:
+    text = _text(value)
+    if not text:
+        text = fallback
+    if text.islower() or '_' in text:
+        return text.replace('_', ' ').title()
+    return text
+
+
+def _npc_creature_definition(npc: dict[str, Any], *, party_level: int, difficulty: str) -> dict[str, Any]:
+    npc_id = _text(npc.get('id') or npc.get('npcId') or npc.get('name')) or 'npc_enemy'
+    name = _display_name(npc.get('name'), npc_id)
+    health = npc.get('health') if isinstance(npc.get('health'), dict) else {}
+    max_hp = _bounded_int(
+        health.get('maxHp', health.get('max', health.get('currentHp', health.get('current')))),
+        default=max(1, party_level) * 10,
+        minimum=1,
+        maximum=999,
+    )
+    aliases = sorted(_npc_reference_terms(npc) | {f'the {name.lower()}'})
+    return {
+        'id': stable_slug(npc_id or name),
+        'name': name,
+        'source': 'user_custom',
+        'descriptionShort': _text(npc.get('memory') or npc.get('role')) or f'{name} is a known hostile NPC.',
+        'descriptionLong': _text(npc.get('memory') or npc.get('role')) or f'{name} is a known hostile NPC in the current scene.',
+        'creatureType': 'custom',
+        'aliases': aliases,
+        'level': max(1, party_level),
+        'challengeTier': 'boss' if difficulty == 'boss' else 'standard',
+        'stats': {
+            'maxHp': max_hp,
+            'armorClass': _bounded_int((npc.get('stats') or {}).get('armorClass') if isinstance(npc.get('stats'), dict) else None, default=12, minimum=5, maximum=30),
+        },
+        'behavior': {
+            'intelligenceProfile': 'tactical',
+            'combatRole': 'boss' if difficulty == 'boss' else 'brute',
+            'primaryGoal': 'test_party',
+            'selfPreservation': 10,
+            'morale': 80,
+            'fleeThreshold': 0,
+            'surrenderThreshold': 0,
+            'targetPriority': ['last_damaged_by', 'nearest'],
+            'tactics': ['Fight as the established NPC from the scene; do not turn into a weapon-derived creature.'],
+            'personalityTags': ['named_npc'],
+            'survivalRules': {
+                'fightToDeath': True,
+                'fleeBelowHpPercent': 0,
+                'surrenderBelowHpPercent': 0,
+                'fleeIfLeaderDies': False,
+                'fleeIfAlone': False,
+                'notes': ['Named hostile NPC remains present unless narration explicitly ends the encounter.'],
+            },
+        },
+        'visualTags': ['named_npc', stable_slug(name)],
+        'aiNarrationHints': [f'Portray {name} as the established NPC already present in the scene.'],
+    }
+
+
+def _encounter_defined_creatures_from_scene_npcs(
+    *,
+    state: dict[str, Any],
+    player_message: str,
+    party_level: int,
+    difficulty: str,
+) -> list[dict[str, Any]]:
+    scene = state.get('currentScene') if isinstance(state.get('currentScene'), dict) else {}
+    npcs = state.get('npcs') if isinstance(state.get('npcs'), list) else []
+    scene_terms = _scene_npc_reference_ids(scene)
+    message_terms = _reference_terms(player_message)
+    candidates: list[dict[str, Any]] = []
+    message_matches: list[dict[str, Any]] = []
+    scene_matches: list[dict[str, Any]] = []
+    for npc in npcs:
+        if not isinstance(npc, dict) or not _npc_is_hostile(npc):
+            continue
+        npc_terms = _npc_reference_terms(npc)
+        if not npc_terms:
+            continue
+        if message_terms.intersection(npc_terms):
+            message_matches.append(npc)
+        if scene_terms.intersection(npc_terms):
+            scene_matches.append(npc)
+        if message_terms.intersection(npc_terms) or scene_terms.intersection(npc_terms):
+            candidates.append(npc)
+
+    selected = message_matches or (scene_matches if len(scene_matches) == 1 else candidates if len(candidates) == 1 else [])
+    return [
+        _npc_creature_definition(npc, party_level=party_level, difficulty=difficulty)
+        for npc in selected[:MAX_ENCOUNTER_GROUPS]
+    ]
+
+
 def resolve_creatures_for_encounter(
     request_payload: dict[str, Any],
     *,
@@ -594,18 +736,32 @@ def default_request_from_session(
         for token in str(value or '').lower().replace('-', ' ').split():
             if len(token) > 3:
                 tags.append(token)
-    return {
+    party_level = round(sum(levels) / len(levels)) if levels else 1
+    difficulty = 'standard'
+    encounter_defined_creatures = _encounter_defined_creatures_from_scene_npcs(
+        state=state,
+        player_message=player_message,
+        party_level=party_level,
+        difficulty=difficulty,
+    )
+    request = {
         'campaignId': campaign.campaign_id,
         'sessionId': session_obj.session_id,
         'regionId': scene.get('regionId') or scene.get('locationId'),
         'locationId': scene.get('locationId'),
         'encounterPurpose': purpose,
         'themeTags': tags[:8],
-        'partyLevel': round(sum(levels) / len(levels)) if levels else 1,
+        'partyLevel': party_level,
         'partySize': party_size,
-        'difficulty': 'standard',
+        'difficulty': difficulty,
         'descriptionHint': player_message,
         'allowGeneration': True,
         'allowVariants': True,
         'enemyCount': min(4, max(2, party_size)) if plural_signal else 1,
     }
+    if encounter_defined_creatures:
+        request['encounterDefinedCreatures'] = encounter_defined_creatures
+        request['allowGeneration'] = False
+        request['allowVariants'] = False
+        request['enemyCount'] = len(encounter_defined_creatures)
+    return request

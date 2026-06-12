@@ -102,6 +102,10 @@ def _change_message(change: dict[str, Any], *, status: str, reason: str | None =
         return 'Updated scene.'
     if change_type == 'scene.move_location':
         return f"Moved scene to {_location_name(change)}."
+    if change_type == 'scene.item.add':
+        return f"Placed {_item_name(change)} x{quantity} in the scene."
+    if change_type == 'scene.item.remove':
+        return f"Removed {_item_name(change)} x{quantity} from the scene."
     if change_type == 'location.discover':
         return f"Discovered location: {_location_name(change)}."
     if change_type == 'location.update':

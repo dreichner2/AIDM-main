@@ -436,10 +436,6 @@ def login_or_create_account():
                 if not token_is_valid_for_account:
                     token = generate_account_token()
                     account.account_token_hash = hash_secret(token)
-            if first_name:
-                account.first_name = first_name
-            if last_name:
-                account.last_name = last_name
 
         membership = ensure_account_workspace_membership(account, workspace_id) if workspace_id else None
         claimed_player_ids = claim_legacy_players_for_account(account, workspace_id) if workspace_id else []

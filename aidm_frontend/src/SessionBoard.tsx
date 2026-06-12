@@ -6,6 +6,7 @@ import {
   Download,
   MoreHorizontal,
   Share2,
+  Trash2,
   Upload,
 } from 'lucide-react'
 import { ActionComposer, type ActionComposerProps } from './ActionComposer'
@@ -111,6 +112,7 @@ type SessionBoardProps = {
   olderLogLoading: boolean
   loadOlderSessionLog: () => Promise<void>
   turnRows: TimelineEntry[]
+  dismissTimelineEntry: (turnId: string) => void
   expandedTurnIds: Set<string>
   setExpandedTurnIds: Dispatch<SetStateAction<Set<string>>>
   selectedPlayer: Player | null
@@ -149,6 +151,19 @@ function formatClock(value: string | null) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+function timelineMetadataString(entry: TimelineEntry, key: string) {
+  const value = entry.metadata[key]
+  return typeof value === 'string' ? value.trim().toLowerCase() : ''
+}
+
+function canDismissLocalTimelineEntry(entry: TimelineEntry) {
+  if (entry.role !== 'player') return false
+  const persistenceStatus = timelineMetadataString(entry, 'persistence_status')
+  const hasClientMessageId = Boolean(timelineMetadataString(entry, 'client_message_id'))
+  const localEntry = entry.id.startsWith('local-') || hasClientMessageId
+  return localEntry && (persistenceStatus === 'pending' || persistenceStatus === 'failed')
 }
 
 function RollWaitBanner({ notice }: { notice: PendingRollNotice }) {
@@ -280,6 +295,7 @@ export function SessionBoard({
   olderLogLoading,
   loadOlderSessionLog,
   turnRows,
+  dismissTimelineEntry,
   expandedTurnIds,
   setExpandedTurnIds,
   selectedPlayer,
@@ -533,6 +549,7 @@ export function SessionBoard({
             {turnRows.length ? (
               turnRows.map((turn, index) => {
                 const expanded = expandedTurnIds.has(turn.id)
+                const dismissible = canDismissLocalTimelineEntry(turn)
                 return (
                   <article className="turn-row" key={turn.id}>
                     <div className="turn-number">{turnNumber(turn, index)}</div>
@@ -546,15 +563,28 @@ export function SessionBoard({
                       ) : null}
                       <p>{expanded ? turn.text : truncateText(turn.text, 180)}</p>
                       <time>{formatClock(turn.timestamp)}</time>
-                      <button
-                        type="button"
-                        className="turn-expand"
-                        aria-label={expanded ? 'Collapse turn' : 'Expand turn'}
-                        aria-expanded={expanded}
-                        onClick={() => toggleTurnExpanded(turn.id)}
-                      >
-                        <ChevronDown size={18} />
-                      </button>
+                      <div className={`turn-actions ${dismissible ? 'has-dismiss' : ''}`}>
+                        {dismissible ? (
+                          <button
+                            type="button"
+                            className="turn-dismiss"
+                            aria-label="Delete pending message"
+                            title="Delete pending message"
+                            onClick={() => dismissTimelineEntry(turn.id)}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="turn-expand"
+                          aria-label={expanded ? 'Collapse turn' : 'Expand turn'}
+                          aria-expanded={expanded}
+                          onClick={() => toggleTurnExpanded(turn.id)}
+                        >
+                          <ChevronDown size={18} />
+                        </button>
+                      </div>
                     </div>
                   </article>
                 )

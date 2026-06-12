@@ -776,13 +776,35 @@ HELPER_TASK_DEFAULTS: dict[str, dict[str, Any]] = {
         'prefix': 'AIDM_SENTIENT_ENEMY_BRAIN_HELPER',
         'LLM_PROVIDER': 'deepseek',
         'LLM_MODEL': 'deepseek-v4-pro',
-        'LLM_MAX_TOKENS': 2048,
-        'LLM_TEMPERATURE': 0.35,
+        'LLM_MAX_TOKENS': 768,
+        'LLM_TEMPERATURE': 0.1,
         'LLM_TOP_P': 0.9,
         'DEEPSEEK_TIMEOUT_SECONDS': 90,
         'DEEPSEEK_THINKING': 'false',
         'DEEPSEEK_REASONING_EFFORT': 'medium',
-    }
+    },
+    'boss_tactics': {
+        'prefix': 'AIDM_BOSS_TACTICS_HELPER',
+        'LLM_PROVIDER': 'deepseek',
+        'LLM_MODEL': 'deepseek-v4-pro',
+        'LLM_MAX_TOKENS': 3072,
+        'LLM_TEMPERATURE': 0.55,
+        'LLM_TOP_P': 0.9,
+        'DEEPSEEK_TIMEOUT_SECONDS': 90,
+        'DEEPSEEK_THINKING': 'false',
+        'DEEPSEEK_REASONING_EFFORT': 'medium',
+    },
+    'boss_tactics_planner': {
+        'prefix': 'AIDM_BOSS_TACTICS_PLANNER_HELPER',
+        'LLM_PROVIDER': 'deepseek',
+        'LLM_MODEL': 'deepseek-v4-pro',
+        'LLM_MAX_TOKENS': 2048,
+        'LLM_TEMPERATURE': 0.6,
+        'LLM_TOP_P': 0.9,
+        'DEEPSEEK_TIMEOUT_SECONDS': 90,
+        'DEEPSEEK_THINKING': 'false',
+        'DEEPSEEK_REASONING_EFFORT': 'medium',
+    },
 }
 
 

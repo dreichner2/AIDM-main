@@ -51,6 +51,28 @@ def _clear_helper_env(monkeypatch):
         'AIDM_SENTIENT_ENEMY_BRAIN_HELPER_DEEPSEEK_READ_TIMEOUT_SECONDS',
         'AIDM_SENTIENT_ENEMY_BRAIN_HELPER_DEEPSEEK_THINKING',
         'AIDM_SENTIENT_ENEMY_BRAIN_HELPER_DEEPSEEK_REASONING_EFFORT',
+        'AIDM_BOSS_TACTICS_HELPER_LLM_PROVIDER',
+        'AIDM_BOSS_TACTICS_HELPER_LLM_MODEL',
+        'AIDM_BOSS_TACTICS_HELPER_LLM_FALLBACK_MODELS',
+        'AIDM_BOSS_TACTICS_HELPER_LLM_MAX_TOKENS',
+        'AIDM_BOSS_TACTICS_HELPER_LLM_TEMPERATURE',
+        'AIDM_BOSS_TACTICS_HELPER_LLM_TOP_P',
+        'AIDM_BOSS_TACTICS_HELPER_DEEPSEEK_TIMEOUT_SECONDS',
+        'AIDM_BOSS_TACTICS_HELPER_DEEPSEEK_CONNECT_TIMEOUT_SECONDS',
+        'AIDM_BOSS_TACTICS_HELPER_DEEPSEEK_READ_TIMEOUT_SECONDS',
+        'AIDM_BOSS_TACTICS_HELPER_DEEPSEEK_THINKING',
+        'AIDM_BOSS_TACTICS_HELPER_DEEPSEEK_REASONING_EFFORT',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_LLM_PROVIDER',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_LLM_MODEL',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_LLM_FALLBACK_MODELS',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_LLM_MAX_TOKENS',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_LLM_TEMPERATURE',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_LLM_TOP_P',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_DEEPSEEK_TIMEOUT_SECONDS',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_DEEPSEEK_CONNECT_TIMEOUT_SECONDS',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_DEEPSEEK_READ_TIMEOUT_SECONDS',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_DEEPSEEK_THINKING',
+        'AIDM_BOSS_TACTICS_PLANNER_HELPER_DEEPSEEK_REASONING_EFFORT',
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -277,8 +299,42 @@ def test_get_helper_provider_uses_pro_defaults_for_sentient_enemy_brain(monkeypa
     assert isinstance(provider, DeepSeekChatProvider)
     assert provider.api_key == 'deepseek-test'
     assert provider.model_name == 'deepseek-v4-pro'
+    assert provider.max_tokens == 768
+    assert provider.temperature == 0.1
+    assert provider.top_p == 0.9
+    assert provider.thinking_enabled is False
+    assert provider.reasoning_effort == 'medium'
+    assert provider.read_timeout_seconds == 90.0
+
+
+def test_get_helper_provider_uses_pro_defaults_for_boss_tactics(monkeypatch):
+    _clear_helper_env(monkeypatch)
+    monkeypatch.setenv('AIDM_DEEPSEEK_API_KEY', 'deepseek-test')
+
+    provider = get_helper_provider(task='boss_tactics')
+
+    assert isinstance(provider, DeepSeekChatProvider)
+    assert provider.api_key == 'deepseek-test'
+    assert provider.model_name == 'deepseek-v4-pro'
+    assert provider.max_tokens == 3072
+    assert provider.temperature == 0.55
+    assert provider.top_p == 0.9
+    assert provider.thinking_enabled is False
+    assert provider.reasoning_effort == 'medium'
+    assert provider.read_timeout_seconds == 90.0
+
+
+def test_get_helper_provider_uses_pro_defaults_for_boss_tactics_planner(monkeypatch):
+    _clear_helper_env(monkeypatch)
+    monkeypatch.setenv('AIDM_DEEPSEEK_API_KEY', 'deepseek-test')
+
+    provider = get_helper_provider(task='boss_tactics_planner')
+
+    assert isinstance(provider, DeepSeekChatProvider)
+    assert provider.api_key == 'deepseek-test'
+    assert provider.model_name == 'deepseek-v4-pro'
     assert provider.max_tokens == 2048
-    assert provider.temperature == 0.35
+    assert provider.temperature == 0.6
     assert provider.top_p == 0.9
     assert provider.thinking_enabled is False
     assert provider.reasoning_effort == 'medium'

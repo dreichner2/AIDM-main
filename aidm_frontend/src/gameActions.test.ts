@@ -184,6 +184,36 @@ describe('game action helpers', () => {
       item: { name: 'rope', quantity: 1 },
     })
 
+    const staleItemIntent = buildActionIntent({
+      mode: 'item',
+      message: 'i say: good morrow Vesra my name is Lin nice to meet you',
+      clientMessageId: 'stale-rapier',
+      inventoryAction: 'use',
+      itemName: 'Rapier',
+      itemQuantity: '1',
+    })
+
+    expect(staleItemIntent).toMatchObject({
+      kind: 'message',
+    })
+    expect(staleItemIntent.item).toBeUndefined()
+    expect(staleItemIntent.inventory_action).toBeUndefined()
+
+    const actualItemIntent = buildActionIntent({
+      mode: 'item',
+      message: 'Lin uses Rapier: cut the rope',
+      clientMessageId: 'use-rapier',
+      inventoryAction: 'use',
+      itemName: 'Rapier',
+      itemQuantity: '1',
+    })
+
+    expect(actualItemIntent).toMatchObject({
+      kind: 'item',
+      inventory_action: 'use',
+      item: { name: 'Rapier', quantity: 1 },
+    })
+
     const spellIntent = buildActionIntent({
       mode: 'spell',
       message: 'Ember casts Fire Bolt: light the sigil',

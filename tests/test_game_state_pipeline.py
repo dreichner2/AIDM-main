@@ -11,7 +11,7 @@ from aidm_server.game_state.extraction.post_dm_outcome_extractor import extract_
 from aidm_server.game_state.extraction.pre_dm_action_extractor import extract_pre_dm_actions
 from aidm_server.game_state.extraction.schemas import normalize_post_extraction
 from aidm_server.game_state.logging.state_log_builder import build_state_log
-from aidm_server.game_state.models import display_actor_id
+from aidm_server.game_state.models import compact_state_for_extraction, display_actor_id
 from aidm_server.game_state.orchestration.turn_pipeline import post_dm_pipeline
 from aidm_server.game_state.validation.inventory_validator import resolve_inventory_item_reference
 from aidm_server.game_state.validation.validator import (
@@ -128,6 +128,25 @@ def test_extract_equipment_actions_from_player_message(app):
     assert equip_result['declaredActions'][0]['itemName'] == 'greatsword'
     assert unequip_result['declaredActions'][0]['type'] == 'inventory.unequip'
     assert unequip_result['declaredActions'][0]['itemName'] == 'iron helmet'
+
+
+def test_item_action_intent_drop_uses_generic_resolution(app):
+    with app.app_context():
+        result = extract_pre_dm_actions(
+            current_state={},
+            player_message='I drop the wooden shield on the floor.',
+            recent_timeline=[],
+            actor_id='player_1',
+            action_intent={
+                'kind': 'item',
+                'item': {'name': 'Wooden Shield', 'quantity': 1},
+                'inventory_action': 'drop',
+            },
+        )
+
+    action = result['declaredActions'][0]
+    assert action['type'] == 'generic.intent'
+    assert action['summary'] == 'Player attempts to drop Wooden Shield.'
 
 
 def test_post_dm_extracts_equipment_outcomes(app):
@@ -275,6 +294,37 @@ def test_reject_consume_missing_item():
 
     assert result['validatedActions'][0]['status'] == 'invalid'
     assert 'does not have' in result['validatedActions'][0]['reason']
+
+
+def test_validate_transfer_uses_from_actor_inventory_for_pickups():
+    state = _two_player_state()
+    state['playerCharacters'][1]['inventory']['items'] = [
+        _item('Scimitar', item_id='starter_druid_scimitar', item_type='weapon', subtype='scimitar'),
+        _item('Wooden Shield', item_id='starter_druid_wooden_shield', item_type='armor', subtype='shield'),
+    ]
+
+    result = validate_declared_actions(
+        state=state,
+        declared_actions=[
+            {
+                'id': 'act_001',
+                'type': 'inventory.transfer',
+                'actorId': 'player_1',
+                'fromActorId': 'player_2',
+                'toActorId': 'player_1',
+                'itemName': 'Scimitar',
+                'quantity': 1,
+                'sourceText': 'I grab Horlicks dropped scimitar.',
+            }
+        ],
+        current_turn=12,
+    )
+
+    validated = result['validatedActions'][0]
+    assert validated['status'] == 'pending'
+    assert validated['normalizedAction']['fromActorId'] == 'player_2'
+    assert validated['normalizedAction']['itemId'] == 'starter_druid_scimitar'
+    assert 'Borin can give Scimitar x1 to Kael' in validated['reason']
 
 
 def test_generic_intent_summary_anchors_dm_context():
@@ -939,6 +989,109 @@ def test_scene_update_tracks_character_positions_and_zones():
     assert scene['characterZones']['Himeros'] == 'outside_colosseum'
 
 
+def test_scene_item_add_and_remove_updates_current_scene_items():
+    state = _state()
+    state['currentScene'] = {'locationId': 'road', 'name': 'Old Road'}
+    add_validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'scene_add_shield',
+                'type': 'scene.item.add',
+                'itemName': 'Wooden Shield',
+                'quantity': 1,
+                'sourceActorId': 'player_2',
+                'item': {'id': 'starter_druid_wooden_shield', 'name': 'Wooden Shield', 'quantity': 1, 'type': 'armor'},
+                'visible': True,
+            }
+        ],
+    )
+    added = apply_state_changes(state, validated_changes_for_application(add_validation))
+
+    scene_items = added['nextState']['currentScene']['items']
+    assert add_validation['rejected'] == []
+    assert scene_items == [
+        {
+            'id': 'starter_druid_wooden_shield',
+            'name': 'Wooden Shield',
+            'quantity': 1,
+            'type': 'armor',
+            'sourceActorId': 'player_2',
+        }
+    ]
+
+    remove_validation = validate_state_changes(
+        state=added['nextState'],
+        changes=[
+            {
+                'id': 'scene_remove_shield',
+                'type': 'scene.item.remove',
+                'itemName': 'Wooden Shield',
+                'quantity': 1,
+                'visible': True,
+            }
+        ],
+    )
+    removed = apply_state_changes(added['nextState'], validated_changes_for_application(remove_validation))
+
+    assert remove_validation['rejected'] == []
+    assert removed['nextState']['currentScene']['items'] == []
+
+
+def test_compact_state_preserves_current_scene_items():
+    state = _state()
+    state['currentScene'] = {
+        'locationId': 'old_road',
+        'name': 'Old Road',
+        'items': [
+            {
+                'id': 'starter_druid_wooden_shield',
+                'name': 'Wooden Shield',
+                'quantity': 1,
+                'type': 'armor',
+                'sourceActorId': 'player_2',
+                'privateNote': 'should not leak',
+            }
+        ],
+    }
+
+    compact = compact_state_for_extraction(state)
+
+    assert compact['currentScene']['items'] == [
+        {
+            'id': 'starter_druid_wooden_shield',
+            'name': 'Wooden Shield',
+            'quantity': 1,
+            'type': 'armor',
+            'subtype': None,
+            'sourceActorId': 'player_2',
+        }
+    ]
+
+
+def test_scene_update_ignores_sentence_length_location_but_keeps_mood():
+    state = _state()
+    state['currentScene'] = {'locationId': 'blackwake_tavern', 'name': 'Blackwake Tavern', 'mood': 'tense'}
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'scene_sentence_name',
+                'type': 'scene.update',
+                'name': 'Inside the tavern, Vesra has just accepted Lin offer and the patrons are watching with curiosity.',
+                'mood': 'calm',
+            }
+        ],
+    )
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+
+    scene = result['nextState']['currentScene']
+    assert validation['rejected'] == []
+    assert scene['locationId'] == 'blackwake_tavern'
+    assert scene['name'] == 'Blackwake Tavern'
+    assert scene['mood'] == 'calm'
+
+
 def test_scene_move_location_updates_scene_and_marks_location_visited():
     state = _state()
     state['currentScene'] = {'locationId': 'blackwake_tavern', 'name': 'Blackwake Tavern'}
@@ -1501,6 +1654,104 @@ def test_post_dm_extracts_confirmed_pickup_as_loot(app):
     )
 
 
+def test_post_dm_helper_dropped_equipment_becomes_scene_item_and_filters_noncombat_ability(app, monkeypatch):
+    class FakeProvider:
+        def generate(self, _request):
+            return ProviderResponse(
+                text=(
+                    '{"proposedChanges":['
+                    '{"type":"inventory.unequip","actorId":"player_1","itemName":"Wooden Shield"},'
+                    '{"type":"combat.ability.mark_used","participantId":"player_1","abilityName":"Primal Shift"}'
+                    '],"uncertainChanges":[],"notes":["helper saw shapeshift drop"]}'
+                ),
+                provider='fake',
+                model='fake-helper',
+            )
+
+    monkeypatch.setattr(post_extractor_module, 'get_helper_provider', lambda: FakeProvider())
+    state = _state(items=[_item('Wooden Shield', item_id='starter_druid_wooden_shield', item_type='armor', subtype='shield', equipped=True)])
+    state['currentScene'] = {'locationId': 'old_road', 'name': 'Old Road'}
+    state['combat'] = {'status': 'none', 'participants': []}
+
+    with app.app_context():
+        app.config['AIDM_STATE_PIPELINE_HELPER_IN_TESTS'] = True
+        result = extract_post_dm_outcomes(
+            state_before_dm=state,
+            player_message='I turn into a bird.',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response='The Wooden Shield drops from your arm and clatters onto the stone floor.',
+            recent_timeline=[],
+            actor_id='player_1',
+            turn_id=545,
+        )
+
+    change_types = [change['type'] for change in result['proposedChanges']]
+    assert 'inventory.unequip' in change_types
+    assert 'inventory.remove' in change_types
+    assert 'scene.item.add' in change_types
+    assert 'combat.ability.mark_used' not in change_types
+    scene_item = next(change for change in result['proposedChanges'] if change['type'] == 'scene.item.add')
+    assert scene_item['itemName'] == 'Wooden Shield'
+    assert scene_item['sourceActorId'] == 'player_1'
+    assert 'scene_item_grounding' in result['notes']
+    assert 'filtered_noncombat_ability' in result['notes']
+
+
+def test_post_dm_scene_item_pickup_adds_inventory_and_removes_scene_item(app):
+    state = _state()
+    state['currentScene'] = {
+        'locationId': 'old_road',
+        'name': 'Old Road',
+        'items': [
+            {'id': 'starter_druid_wooden_shield', 'name': 'Wooden Shield', 'quantity': 1, 'type': 'armor', 'sourceActorId': 'player_2'}
+        ],
+    }
+
+    with app.app_context():
+        result = extract_post_dm_outcomes(
+            state_before_dm=state,
+            player_message='I grab the shield.',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response='Kael grabs the Wooden Shield from the floor and carries it under one arm.',
+            recent_timeline=[],
+            actor_id='player_1',
+            turn_id=546,
+        )
+
+    assert any(change['type'] == 'scene.item.remove' and change.get('itemName') == 'Wooden Shield' for change in result['proposedChanges'])
+    assert any(change['type'] == 'inventory.add' and change.get('itemName') == 'Wooden Shield' for change in result['proposedChanges'])
+
+
+def test_post_dm_helper_does_not_learn_spell_for_transform_only_form_use(app, monkeypatch):
+    class FakeProvider:
+        def generate(self, _request):
+            return ProviderResponse(
+                text='{"proposedChanges":[{"type":"spell.learn","actorId":"player_1","spellName":"Finch Form"}],"uncertainChanges":[],"notes":[]}',
+                provider='fake',
+                model='fake-helper',
+            )
+
+    monkeypatch.setattr(post_extractor_module, 'get_helper_provider', lambda: FakeProvider())
+
+    with app.app_context():
+        app.config['AIDM_STATE_PIPELINE_HELPER_IN_TESTS'] = True
+        result = extract_post_dm_outcomes(
+            state_before_dm=_state(),
+            player_message='I turn into a little finch.',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response='Your form ripples and transforms into a little finch.',
+            recent_timeline=[],
+            actor_id='player_1',
+            turn_id=547,
+        )
+
+    assert not any(change['type'] == 'spell.learn' for change in result['proposedChanges'])
+    assert 'filtered_transform_only_spell_learn' in result['notes']
+
+
 def test_post_dm_extracts_scene_danger_increase(app):
     state = _state()
     state['currentScene'] = {
@@ -1764,6 +2015,112 @@ def test_post_dm_filters_helper_enemy_health_damage_and_updates_combat_participa
     assert not validation['rejected']
     assert player['health']['currentHp'] == 10
     assert enemy['hp']['current'] == 10
+
+
+def test_single_enemy_combat_participant_update_resolves_unknown_npc_alias():
+    state = _state(hp_current=10, hp_max=20)
+    state['combat'] = {
+        'status': 'active',
+        'round': 1,
+        'participants': [
+            {
+                'id': 'player_1',
+                'team': 'player',
+                'name': 'Kael',
+                'hp': {'current': 10, 'max': 20, 'temp': 0},
+                'conditions': [],
+                'isAlive': True,
+                'isConscious': True,
+            },
+            {
+                'id': 'enemy_thunderer_1',
+                'team': 'enemy',
+                'name': 'The Thunderer',
+                'kind': 'creature',
+                'hp': {'current': 20, 'max': 20, 'temp': 0},
+                'conditions': [],
+                'position': {'rangeBand': 'near'},
+                'abilities': [],
+                'morale': 80,
+                'isAlive': True,
+                'isConscious': True,
+            },
+        ],
+        'battlefield': {'environmentType': 'custom'},
+        'flags': {},
+    }
+
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'thor_bloodied',
+                'type': 'combat.participant.update',
+                'participantId': 'thor',
+                'conditions': ['bloodied'],
+            }
+        ],
+    )
+
+    assert not validation['rejected']
+    assert validation['accepted'][0]['change']['participantId'] == 'enemy_thunderer_1'
+
+
+def test_player_combat_participant_hp_update_syncs_actor_health():
+    state = _state(hp_current=17, hp_max=17)
+    state['combat'] = {
+        'status': 'active',
+        'round': 3,
+        'participants': [
+            {
+                'id': 'player_1',
+                'team': 'player',
+                'name': 'Kael',
+                'kind': 'player_character',
+                'hp': {'current': 17, 'max': 17, 'temp': 0},
+                'conditions': [],
+                'position': {'rangeBand': 'melee'},
+                'isAlive': True,
+                'isConscious': True,
+            },
+            {
+                'id': 'enemy_arena_champion_1',
+                'team': 'enemy',
+                'name': 'Arena Champion',
+                'kind': 'creature',
+                'hp': {'current': 20, 'max': 20, 'temp': 0},
+                'conditions': [],
+                'position': {'rangeBand': 'melee'},
+                'isAlive': True,
+                'isConscious': True,
+            },
+        ],
+        'battlefield': {},
+        'flags': {},
+    }
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'goliath_takes_8',
+                'type': 'combat.participant.update',
+                'participantId': 'player_1',
+                'hp': {'current': 9, 'max': 17},
+                'conditions': ['stunned'],
+            }
+        ],
+    )
+
+    applied = apply_state_changes(state, validated_changes_for_application(validation))
+
+    actor = applied['nextState']['playerCharacters'][0]
+    participant = applied['nextState']['combat']['participants'][0]
+    assert not validation['rejected']
+    assert actor['health']['currentHp'] == 9
+    assert actor['health']['maxHp'] == 17
+    assert actor['health']['conditions'] == ['stunned']
+    assert participant['hp']['current'] == 9
+    assert participant['conditions'] == ['stunned']
 
 
 def test_post_dm_filters_helper_enemy_actor_health_damage_at_combat_end(app, monkeypatch):
@@ -2942,6 +3299,79 @@ def test_post_dm_pipeline_skips_extraction_for_pending_roll_turn(app):
         assert result['postAppliedChanges'] == []
         assert item_names == ['Smooth Stone']
         assert TurnEvent.query.filter_by(turn_id=turn.turn_id, event_type='state_update').count() == 0
+
+
+def test_post_dm_pipeline_can_pick_up_scene_item_from_compact_state(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        player = db.session.get(Player, ids['player_id'])
+        session_obj = db.session.get(Session, ids['session_id'])
+        assert campaign is not None
+        assert player is not None
+        assert session_obj is not None
+
+        actor_id = f'player_{player.player_id}'
+        state = _state()
+        state['playerCharacters'][0]['id'] = actor_id
+        state['playerCharacters'][0]['playerId'] = player.player_id
+        state['currentScene'] = {
+            'locationId': 'old_road',
+            'name': 'Old Road',
+            'items': [
+                {
+                    'id': 'starter_druid_wooden_shield',
+                    'name': 'Wooden Shield',
+                    'quantity': 1,
+                    'type': 'armor',
+                    'sourceActorId': 'player_2',
+                }
+            ],
+        }
+        session_obj.state_snapshot = safe_json_dumps(state, {})
+        turn = DmTurn(
+            session_id=session_obj.session_id,
+            campaign_id=campaign.campaign_id,
+            player_id=player.player_id,
+            player_input='I grab the wooden shield from the ground.',
+            dm_output='Seraphina grabs the Wooden Shield from the ground and carries it under one arm.',
+            status='completed',
+            metadata_json=safe_json_dumps(
+                {
+                    STATE_PIPELINE_METADATA_KEY: {
+                        'version': STATE_PIPELINE_VERSION,
+                        'actorId': actor_id,
+                        'stateBeforeDm': state,
+                        'preDmValidation': {'validatedActions': [], 'immediateChanges': []},
+                        'immediateValidation': {'accepted': [], 'rejected': [], 'modified': []},
+                        'immediateAppliedChanges': [],
+                    }
+                },
+                {},
+            ),
+        )
+        db.session.add(turn)
+        db.session.commit()
+
+        result = post_dm_pipeline(
+            turn=turn,
+            session_obj=session_obj,
+            campaign=campaign,
+            player=player,
+            dm_response_text=turn.dm_output,
+        )
+        db.session.commit()
+
+        refreshed_session = db.session.get(Session, ids['session_id'])
+        refreshed_player = db.session.get(Player, ids['player_id'])
+        snapshot = safe_json_loads(refreshed_session.state_snapshot, {})
+        inventory = safe_json_loads(refreshed_player.inventory, [])
+
+        assert any(change['type'] == 'scene.item.remove' for change in result['postAppliedChanges'])
+        assert any(change['type'] == 'inventory.add' for change in result['postAppliedChanges'])
+        assert snapshot['currentScene']['items'] == []
+        assert any(item.get('name') == 'Wooden Shield' for item in inventory)
 
 
 def test_post_dm_pipeline_records_combat_outcome_debug_event(app):

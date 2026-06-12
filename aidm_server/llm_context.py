@@ -34,6 +34,7 @@ MAX_LIVE_ACTIVE_NPCS = 8
 MAX_LIVE_RECENT_KNOWN_NPCS = 8
 MAX_LIVE_FLAGS = 20
 MAX_LIVE_COMBAT_PARTICIPANTS = 12
+MAX_LIVE_SCENE_ITEMS = 12
 
 
 def _truncate_text(value: str | None, max_length: int) -> str:
@@ -122,6 +123,16 @@ def _compact_npc(npc: dict) -> dict:
         'status': _text_or_none(npc.get('status'), 80),
         'locationId': _text_or_none(npc.get('locationId'), 120),
         'questIds': _string_list(npc.get('questIds'), limit=8),
+    }
+
+
+def _compact_scene_item(item: dict) -> dict:
+    return {
+        'id': _text_or_none(item.get('id') or item.get('itemId'), 120),
+        'name': _text_or_none(item.get('name') or item.get('itemName'), 180),
+        'quantity': item.get('quantity') if isinstance(item.get('quantity'), (int, float)) else None,
+        'type': _text_or_none(item.get('type'), 80),
+        'sourceActorId': _text_or_none(item.get('sourceActorId'), 120),
     }
 
 
@@ -287,6 +298,11 @@ def _compact_live_world_state(snapshot: dict) -> dict:
             'description': _text_or_none(scene.get('description'), 520),
             'activeNpcIds': active_npc_ids,
             'activeQuestIds': active_quest_ids,
+            'items': [
+                _compact_scene_item(item)
+                for item in (scene.get('items') or [])
+                if isinstance(item, dict)
+            ][:MAX_LIVE_SCENE_ITEMS],
         },
         'activeQuests': compact_quests,
         'recentLocations': [_compact_location(location) for location in locations[:MAX_LIVE_RECENT_LOCATIONS]],
