@@ -68,7 +68,6 @@ TEXT_DAMAGE_PATTERN = re.compile(
     r'(acid|cold|fire|force|lightning|necrotic|poison|psychic|radiant|thunder|bludgeoning|piercing|slashing)\s+damage\b',
     re.IGNORECASE,
 )
-TARGET_AC_PATTERN = re.compile(r'\b(?:AC|armor\s+class)\s*(\d{1,2})\b', re.IGNORECASE)
 
 
 def _sentences(text: str) -> list[str]:
@@ -299,38 +298,13 @@ def _turn_level_pending_roll(turn: DmTurn, *, actor_id: str) -> dict[str, Any]:
     }
 
 
-def _attack_ac_from_pending_turn(turn_id: Any) -> int | None:
-    pending_turn_id = int_or_default(turn_id, default=0)
-    if pending_turn_id <= 0:
-        return None
-    pending_turn = db.session.get(DmTurn, pending_turn_id)
-    if pending_turn is None:
-        return None
-    for text in (pending_turn.dm_output, pending_turn.rules_hint):
-        match = TARGET_AC_PATTERN.search(text or '')
-        if match:
-            return int_or_default(match.group(1), default=0) or None
-    return None
-
-
-def _attack_roll_resolution_missed(turn: DmTurn) -> bool:
-    if getattr(turn, 'roll_value', None) is None:
+def _resolved_player_roll_should_defer_enemy(turn: DmTurn) -> bool:
+    if not _turn_resolves_player_roll(turn):
         return False
     rules_hint = safe_json_loads(turn.rules_hint, {})
     rules_hint = rules_hint if isinstance(rules_hint, dict) else {}
     roll_type = str(turn.rule_type or rules_hint.get('roll_type') or '').strip().lower()
-    if roll_type != 'attack':
-        return False
-    target_ac = _attack_ac_from_pending_turn(rules_hint.get('resolved_turn_id'))
-    if target_ac is None:
-        return False
-    return int_or_default(turn.roll_value, default=0) < target_ac
-
-
-def _resolved_player_roll_should_defer_enemy(turn: DmTurn) -> bool:
-    if not _turn_resolves_player_roll(turn):
-        return False
-    if _attack_roll_resolution_missed(turn):
+    if roll_type == 'attack':
         return False
     return True
 

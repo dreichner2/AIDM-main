@@ -187,7 +187,7 @@ def test_dm_context_defers_enemy_actions_when_player_roll_is_pending_or_resolved
     assert resolved_context['combatState']['enemyActionDeferredReason'] == 'player_roll_resolution'
 
 
-def test_attack_roll_miss_resolution_allows_enemy_action(app):
+def test_attack_roll_resolution_allows_enemy_action_on_hit_or_miss(app):
     ids = seed_world_campaign_player_session(app)
     with app.app_context():
         pending_turn = DmTurn(
@@ -242,7 +242,7 @@ def test_attack_roll_miss_resolution_allows_enemy_action(app):
         )
 
         assert turn_pipeline_module._resolved_player_roll_should_defer_enemy(miss_turn) is False
-        assert turn_pipeline_module._resolved_player_roll_should_defer_enemy(hit_turn) is True
+        assert turn_pipeline_module._resolved_player_roll_should_defer_enemy(hit_turn) is False
 
 
 def test_enemy_attack_rolls_infer_missing_generated_ability_mechanics():
