@@ -97,6 +97,8 @@ def _enemy_roll_test_state():
                 'name': 'Right-Flank Raider',
                 'team': 'enemy',
                 'armorClass': 12,
+                'level': 1,
+                'stats': {'strength': 10, 'dexterity': 14},
                 'abilities': [
                     {
                         'id': 'shortbow',
@@ -183,6 +185,91 @@ def test_dm_context_defers_enemy_actions_when_player_roll_is_pending_or_resolved
     assert resolved_context['combatState']['enemyResolvedActions'] == []
     assert resolved_context['combatState']['enemyRequiredActions'] == []
     assert resolved_context['combatState']['enemyActionDeferredReason'] == 'player_roll_resolution'
+
+
+def test_attack_roll_miss_resolution_allows_enemy_action(app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        pending_turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            player_input='I shoot the raider.',
+            dm_output='Roll Legoless longbow attack: `1d20 + 4` against AC 13.',
+            requires_roll=True,
+            rule_type='attack',
+            outcome_status='deferred',
+        )
+        db.session.add(pending_turn)
+        db.session.flush()
+        miss_turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            player_input='I roll a d20+4: 6 = 10',
+            requires_roll=True,
+            rule_type='attack',
+            roll_value=10,
+            outcome_status='resolved',
+            rules_hint=safe_json_dumps(
+                {
+                    'roll_type': 'attack',
+                    'roll_value': 10,
+                    'outcome_deferred': False,
+                    'resolved_turn_id': pending_turn.turn_id,
+                },
+                {},
+            ),
+        )
+        hit_turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            player_input='I roll a d20+4: 14 = 18',
+            requires_roll=True,
+            rule_type='attack',
+            roll_value=18,
+            outcome_status='resolved',
+            rules_hint=safe_json_dumps(
+                {
+                    'roll_type': 'attack',
+                    'roll_value': 18,
+                    'outcome_deferred': False,
+                    'resolved_turn_id': pending_turn.turn_id,
+                },
+                {},
+            ),
+        )
+
+        assert turn_pipeline_module._resolved_player_roll_should_defer_enemy(miss_turn) is False
+        assert turn_pipeline_module._resolved_player_roll_should_defer_enemy(hit_turn) is True
+
+
+def test_enemy_attack_rolls_infer_missing_generated_ability_mechanics():
+    state = _enemy_roll_test_state()
+    ability = state['combat']['participants'][1]['abilities'][0]
+    ability.pop('attackBonus')
+    ability.pop('damage')
+    ability['description'] = 'Makes one ranged weapon attack. On a hit, deals 1d6+2 piercing damage.'
+    rolls = iter([14, 5])
+
+    context = turn_pipeline_module._dm_context_packet(
+        state=state,
+        player_message='I wait.',
+        pre_validation={'validatedActions': [], 'pendingRolls': []},
+        applied_changes=[],
+        combat_context=_enemy_attack_combat_context(),
+        enemy_roller=lambda _sides: next(rolls),
+    )
+
+    resolved = context['combatState']['enemyResolvedActions'][0]
+    assert resolved['attackBonus'] == 4
+    assert resolved['attackTotal'] == 18
+    assert resolved['damageDice'] == '1d6+2'
+    assert resolved['damageRolls'] == [5]
+    assert resolved['damageBonus'] == 2
+    assert resolved['damageTotal'] == 7
+    assert resolved['damageType'] == 'piercing'
 
 
 def test_extract_consume_item_from_player_message(app):

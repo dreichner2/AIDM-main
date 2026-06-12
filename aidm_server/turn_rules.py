@@ -46,6 +46,10 @@ def _sentence_chunks(text: str) -> list[str]:
     return [chunk.strip() for chunk in re.split(r'(?<=[.!?])\s+|\n+', text or '') if chunk.strip()]
 
 
+def _normalize_roll_text(text: str) -> str:
+    return (text or '').replace('\u2018', "'").replace('\u2019', "'")
+
+
 def _resolved_roll_result_sentence(sentence: str) -> bool:
     if re.search(r'\b(?:please|need|needs|must|should|can you|send|what did you)\b.*\broll\b', sentence, re.IGNORECASE):
         return False
@@ -201,7 +205,7 @@ def build_roll_prompt(rule_hint: RuleHint, pending_turn_id: int | None = None) -
 
 
 def response_mentions_roll_request(text: str) -> bool:
-    for sentence in _sentence_chunks(text):
+    for sentence in _sentence_chunks(_normalize_roll_text(text)):
         if _resolved_roll_result_sentence(sentence):
             continue
         if any(pattern.search(sentence) for pattern in ROLL_REQUEST_PATTERNS):

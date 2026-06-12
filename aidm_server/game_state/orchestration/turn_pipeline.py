@@ -63,6 +63,12 @@ CURRENCY_TRANSFER_CONFIRMATION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 DAMAGE_DICE_PATTERN = re.compile(r'^\s*(?:(\d*)d(\d+))?\s*([+-]\s*\d+)?\s*$', re.IGNORECASE)
+TEXT_DAMAGE_PATTERN = re.compile(
+    r'\b(?:deals?|does|for)\s+(\d*d\d+(?:\s*[+-]\s*\d+)?)\s+'
+    r'(acid|cold|fire|force|lightning|necrotic|poison|psychic|radiant|thunder|bludgeoning|piercing|slashing)\s+damage\b',
+    re.IGNORECASE,
+)
+TARGET_AC_PATTERN = re.compile(r'\b(?:AC|armor\s+class)\s*(\d{1,2})\b', re.IGNORECASE)
 
 
 def _sentences(text: str) -> list[str]:
@@ -274,6 +280,59 @@ def _turn_resolves_player_roll(turn: DmTurn) -> bool:
     if not isinstance(rules_hint, dict):
         return False
     return rules_hint.get('roll_value') is not None and not bool(rules_hint.get('outcome_deferred'))
+
+
+def _turn_awaits_player_roll(turn: DmTurn) -> bool:
+    return bool(turn.requires_roll and getattr(turn, 'roll_value', None) is None)
+
+
+def _turn_level_pending_roll(turn: DmTurn, *, actor_id: str) -> dict[str, Any]:
+    rules_hint = safe_json_loads(turn.rules_hint, {})
+    rules_hint = rules_hint if isinstance(rules_hint, dict) else {}
+    roll_type = str(turn.rule_type or rules_hint.get('roll_type') or 'check').strip() or 'check'
+    return {
+        'type': f'{roll_type}_roll',
+        'actorId': actor_id,
+        'source': 'turn_rules',
+        'dcHint': rules_hint.get('dc_hint'),
+        'reason': rules_hint.get('reason') or 'Player roll required to resolve the current action.',
+    }
+
+
+def _attack_ac_from_pending_turn(turn_id: Any) -> int | None:
+    pending_turn_id = int_or_default(turn_id, default=0)
+    if pending_turn_id <= 0:
+        return None
+    pending_turn = db.session.get(DmTurn, pending_turn_id)
+    if pending_turn is None:
+        return None
+    for text in (pending_turn.dm_output, pending_turn.rules_hint):
+        match = TARGET_AC_PATTERN.search(text or '')
+        if match:
+            return int_or_default(match.group(1), default=0) or None
+    return None
+
+
+def _attack_roll_resolution_missed(turn: DmTurn) -> bool:
+    if getattr(turn, 'roll_value', None) is None:
+        return False
+    rules_hint = safe_json_loads(turn.rules_hint, {})
+    rules_hint = rules_hint if isinstance(rules_hint, dict) else {}
+    roll_type = str(turn.rule_type or rules_hint.get('roll_type') or '').strip().lower()
+    if roll_type != 'attack':
+        return False
+    target_ac = _attack_ac_from_pending_turn(rules_hint.get('resolved_turn_id'))
+    if target_ac is None:
+        return False
+    return int_or_default(turn.roll_value, default=0) < target_ac
+
+
+def _resolved_player_roll_should_defer_enemy(turn: DmTurn) -> bool:
+    if not _turn_resolves_player_roll(turn):
+        return False
+    if _attack_roll_resolution_missed(turn):
+        return False
+    return True
 
 
 def _state_change_signature(change: dict[str, Any]) -> tuple[Any, ...] | None:
@@ -595,12 +654,48 @@ def _target_armor_class(target: dict[str, Any] | None) -> int:
     return _bounded_int(target.get('armorClass', stats.get('armorClass')), default=10, minimum=1, maximum=40)
 
 
+def _ability_modifier(score: int) -> int:
+    return (int(score) - 10) // 2
+
+
+def _attack_stat_modifier(enemy: dict[str, Any] | None, ability: dict[str, Any] | None) -> int:
+    stats = enemy.get('stats') if isinstance(enemy, dict) and isinstance(enemy.get('stats'), dict) else {}
+    strength = int_or_default(stats.get('strength'), default=10)
+    dexterity = int_or_default(stats.get('dexterity'), default=10)
+    text = normalize_item_name(
+        ' '.join(
+            str(value or '')
+            for value in [
+                (ability or {}).get('name') if isinstance(ability, dict) else '',
+                (ability or {}).get('description') if isinstance(ability, dict) else '',
+                (ability or {}).get('range') if isinstance(ability, dict) else '',
+            ]
+        )
+    )
+    if re.search(r'\b(?:bow|crossbow|sling|dart|javelin|ranged|shot|arrow)\b', text):
+        return _ability_modifier(dexterity)
+    return max(_ability_modifier(strength), _ability_modifier(dexterity))
+
+
+def _proficiency_bonus(enemy: dict[str, Any] | None) -> int:
+    level = int_or_default((enemy or {}).get('level'), default=1) if isinstance(enemy, dict) else 1
+    return 2 + max(0, (level - 1) // 4)
+
+
+def _ability_attack_bonus(enemy: dict[str, Any] | None, ability: dict[str, Any] | None) -> int:
+    if isinstance(ability, dict):
+        explicit = ability.get('attackBonus', ability.get('toHitBonus'))
+        if explicit is not None:
+            return int_or_default(explicit, default=0)
+    return _proficiency_bonus(enemy) + _attack_stat_modifier(enemy, ability)
+
+
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     parsed = int_or_default(value, default=default)
     return max(minimum, min(maximum, parsed))
 
 
-def _ability_damage(ability: dict[str, Any] | None) -> dict[str, Any]:
+def _ability_damage(enemy: dict[str, Any] | None, ability: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(ability, dict):
         return {}
     damage = ability.get('damage')
@@ -608,7 +703,17 @@ def _ability_damage(ability: dict[str, Any] | None) -> dict[str, Any]:
         return damage
     if isinstance(damage, str):
         return {'dice': damage}
-    return {}
+    match = TEXT_DAMAGE_PATTERN.search(str(ability.get('description') or ''))
+    if match:
+        return {'dice': match.group(1).replace(' ', ''), 'type': match.group(2).lower()}
+    text = normalize_item_name(f"{ability.get('name') or ''} {ability.get('description') or ''} {ability.get('range') or ''}")
+    bonus = _attack_stat_modifier(enemy, ability)
+    bonus_suffix = f'+{bonus}' if bonus > 0 else str(bonus) if bonus < 0 else ''
+    if re.search(r'\b(?:bow|crossbow|sling|dart|ranged|shot|arrow)\b', text):
+        return {'dice': f'1d6{bonus_suffix}', 'type': 'piercing'}
+    if 'club' in text or 'slam' in text or 'bludgeon' in text:
+        return {'dice': f'1d6{bonus_suffix}', 'type': 'bludgeoning'}
+    return {'dice': f'1d6{bonus_suffix}', 'type': 'slashing'}
 
 
 def _resolve_enemy_required_actions(
@@ -649,12 +754,12 @@ def _resolve_enemy_required_actions(
         }
 
         if intent_type in {'attack', 'use_ability'} and ability:
-            attack_bonus = int_or_default((ability or {}).get('attackBonus', (ability or {}).get('toHitBonus')), default=0)
+            attack_bonus = _ability_attack_bonus(enemy, ability)
             attack_roll = _roll_die(20, roller)
             attack_total = attack_roll + attack_bonus
             target_ac = _target_armor_class(target)
             hit = attack_roll != 1 and (attack_roll == 20 or attack_total >= target_ac)
-            damage = _ability_damage(ability)
+            damage = _ability_damage(enemy, ability)
             damage_roll = (
                 _roll_damage_expression(damage.get('dice'), roller)
                 if hit
@@ -921,10 +1026,17 @@ def pre_dm_pipeline(
     dm_context = _dm_context_packet(
         state=state_before_dm,
         player_message=player_message,
-        pre_validation=pre_validation,
+        pre_validation=(
+            {
+                **pre_validation,
+                'pendingRolls': [_turn_level_pending_roll(turn, actor_id=actor_id)],
+            }
+            if _turn_awaits_player_roll(turn) and not (pre_validation.get('pendingRolls') or [])
+            else pre_validation
+        ),
         applied_changes=[*applied_immediate, *applied_combat],
         combat_context=combat_prepare.get('combatContext') if isinstance(combat_prepare.get('combatContext'), dict) else None,
-        resolved_player_roll=_turn_resolves_player_roll(turn),
+        resolved_player_roll=_turn_awaits_player_roll(turn) or _resolved_player_roll_should_defer_enemy(turn),
     )
     state_log = build_state_log(
         turn_id=turn.turn_id,

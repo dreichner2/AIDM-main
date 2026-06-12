@@ -90,6 +90,9 @@ def test_turn_rules_build_roll_prompt_and_detect_roll_requests():
     assert response_mentions_roll_request(
         'Roll a Longbow attack for Legoless: `d20 + 4` against AC 13.'
     )
+    assert response_mentions_roll_request(
+        'Roll Legoless\u2019s longbow attack: `1d20 + 4` against AC 13.'
+    )
     assert not response_mentions_roll_request(
         "The Right-Flank Raider's attack roll of 17 hits Legoless's AC 13."
     )
