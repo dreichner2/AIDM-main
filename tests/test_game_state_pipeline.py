@@ -4254,6 +4254,76 @@ def test_build_visible_state_log():
     assert state_log['lines'][0]['message'] == 'Removed Minor Healing Potion x1.'
 
 
+def test_post_dm_semantic_merge_dedupes_duplicate_combat_outcomes():
+    changes = turn_pipeline_module._merge_state_changes(
+        [
+            {
+                'id': 'helper_end',
+                'type': 'combat.end',
+                'reason': 'Combat ends after the scout is killed.',
+            },
+            {
+                'id': 'helper_participant',
+                'type': 'combat.participant.update',
+                'participantId': 'enemy_scout_1',
+                'hp': {'current': 0, 'max': 10},
+            },
+            {
+                'id': 'heuristic_participant',
+                'type': 'combat.participant.update',
+                'participantId': 'enemy_scout_1',
+                'hp': {'current': 0, 'max': 10, 'temp': 0},
+                'conditions': ['defeated'],
+                'isAlive': False,
+            },
+            {
+                'id': 'heuristic_end',
+                'type': 'combat.end',
+                'status': 'ended',
+                'summary': 'Combat ended from DM narration.',
+            },
+            {
+                'id': 'xp',
+                'type': 'xp.add',
+                'actorId': 'player_1',
+                'amount': 50,
+            },
+        ]
+    )
+
+    assert [change['id'] for change in changes] == ['helper_end', 'helper_participant', 'xp']
+
+
+def test_build_visible_state_log_names_combat_outcomes():
+    validation = {
+        'accepted': [
+            {
+                'change': {
+                    'id': 'participant',
+                    'type': 'combat.participant.update',
+                    'participantName': 'Hollow Arrowmark Scout',
+                    'participantId': 'enemy_scout_1',
+                    'hp': {'current': 0, 'max': 10},
+                },
+                'reason': 'ok',
+            },
+            {
+                'change': {'id': 'end', 'type': 'combat.end', 'status': 'ended'},
+                'reason': 'ok',
+            },
+        ],
+        'modified': [],
+        'rejected': [],
+    }
+
+    state_log = build_state_log(turn_id=1, post_validation=validation)
+
+    assert [line['message'] for line in state_log['lines']] == [
+        'Hollow Arrowmark Scout defeated.',
+        'Combat ended.',
+    ]
+
+
 def test_resolve_exact_item_name():
     result = resolve_inventory_item_reference(
         actor_inventory=[_item('Greatsword', item_type='weapon', subtype='sword'), _item('Longsword', item_type='weapon', subtype='sword')],

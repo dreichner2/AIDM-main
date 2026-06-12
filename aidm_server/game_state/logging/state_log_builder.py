@@ -36,6 +36,10 @@ def _flag_key(change: dict[str, Any]) -> str:
     return str(change.get('flagKey') or change.get('key') or 'flag')
 
 
+def _participant_name(change: dict[str, Any]) -> str:
+    return str(change.get('participantName') or change.get('participantId') or 'Combatant')
+
+
 def _transfer_message(change: dict[str, Any], *, quantity: int) -> str:
     from_name = str(change.get('fromActorName') or change.get('from_actor_name') or '').strip()
     to_name = str(change.get('toActorName') or change.get('to_actor_name') or '').strip()
@@ -112,6 +116,23 @@ def _change_message(change: dict[str, Any], *, status: str, reason: str | None =
         return f"Placed {_item_name(change)} x{quantity} in the scene."
     if change_type == 'scene.item.remove':
         return f"Removed {_item_name(change)} x{quantity} from the scene."
+    if change_type == 'combat.participant.update':
+        name = _participant_name(change)
+        hp = change.get('hp') if isinstance(change.get('hp'), dict) else {}
+        current_hp = int_or_default(hp.get('current', hp.get('currentHp')), default=-1)
+        max_hp = int_or_default(hp.get('max', hp.get('maxHp')), default=-1)
+        if current_hp == 0 or change.get('isAlive') is False:
+            return f"{name} defeated."
+        if current_hp >= 0 and max_hp > 0:
+            return f"{name} HP is now {current_hp}/{max_hp}."
+        return f"Updated {name}."
+    if change_type == 'combat.end':
+        return 'Combat ended.'
+    if change_type == 'combat.round.advance':
+        round_number = int_or_default(change.get('round'), default=0)
+        if round_number > 0:
+            return f"Combat advanced to round {round_number}."
+        return 'Combat round advanced.'
     if change_type == 'location.discover':
         return f"Discovered location: {_location_name(change)}."
     if change_type == 'location.update':

@@ -308,6 +308,15 @@ def _state_change_signature(change: dict[str, Any]) -> tuple[Any, ...] | None:
             normalize_item_name(change.get('locationId') or change.get('name')),
             normalize_item_name(change.get('sceneType') or change.get('mood') or change.get('combatState')),
         )
+    if change_type == 'combat.end':
+        return (change_type,)
+    if change_type == 'combat.participant.update':
+        return (
+            change_type,
+            normalize_item_name(change.get('participantId') or change.get('enemyId')),
+        )
+    if change_type == 'combat.round.advance':
+        return (change_type, int_or_default(change.get('round'), default=0))
     if change_type.startswith('location.'):
         return (
             change_type,
@@ -885,6 +894,19 @@ def post_dm_pipeline(
                 notes.append('intent_confirmed_post_dm')
             if confirmed_pre_dm_changes and 'pre_dm_confirmed_post_dm' not in notes:
                 notes.append('pre_dm_confirmed_post_dm')
+            post_extraction['notes'] = notes
+        proposed_before_dedupe = [
+            change
+            for change in (post_extraction.get('proposedChanges') or [])
+            if isinstance(change, dict)
+        ]
+        proposed_after_dedupe = _merge_state_changes(proposed_before_dedupe, seed_changes=already_applied)
+        if len(proposed_after_dedupe) != len(proposed_before_dedupe):
+            post_extraction = deepcopy(post_extraction)
+            post_extraction['proposedChanges'] = proposed_after_dedupe
+            notes = list(post_extraction.get('notes') or [])
+            if 'post_dm_semantic_dedupe' not in notes:
+                notes.append('post_dm_semantic_dedupe')
             post_extraction['notes'] = notes
         post_validation = validate_state_changes(state=state_before_dm, changes=post_extraction.get('proposedChanges') or [])
         post_changes = validated_changes_for_application(post_validation)
