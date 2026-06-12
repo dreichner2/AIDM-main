@@ -6,6 +6,7 @@ import hashlib
 import re
 from typing import Any, Iterable
 
+from aidm_server.armor_class import ARMOR_METADATA_KEYS, sync_actor_armor_class
 from aidm_server.canon_inventory import clean_inventory_item_name, item_weight_for_name
 from aidm_server.canon_text import int_or_default, normalized_name, positive_int
 from aidm_server.character_state import character_state_for_player
@@ -193,6 +194,10 @@ def normalize_inventory_item(raw_item: Any) -> dict[str, Any] | None:
         tags.append(item_type)
     if subtype and subtype not in aliases and subtype != normalize_item_name(name):
         aliases.append(subtype)
+    metadata = dict(raw_item.get('metadata')) if isinstance(raw_item.get('metadata'), dict) else {}
+    for key in ARMOR_METADATA_KEYS:
+        if key in raw_item and raw_item.get(key) not in (None, ''):
+            metadata.setdefault(key, raw_item.get(key))
 
     item: dict[str, Any] = {
         'id': item_id,
@@ -208,7 +213,7 @@ def normalize_inventory_item(raw_item: Any) -> dict[str, Any] | None:
         'lastEquippedAtTurn': raw_item.get('lastEquippedAtTurn', raw_item.get('last_equipped_at_turn')),
         'favorite': bool(raw_item.get('favorite')),
         'weight': raw_item.get('weight'),
-        'metadata': raw_item.get('metadata') if isinstance(raw_item.get('metadata'), dict) else {},
+        'metadata': metadata,
     }
     inferred_slot = infer_equipment_slot(item)
     if inferred_slot:
@@ -310,6 +315,8 @@ def player_character_from_model(player: Player) -> dict[str, Any]:
     stats = _as_record(player.stats)
     state = character_state_for_player(player)
     spellbook = state.get('spellbook') if isinstance(state.get('spellbook'), dict) else {}
+    ability_scores = dict(state.get('ability_scores') if isinstance(state.get('ability_scores'), dict) else {})
+    inventory_items = load_inventory_items(player.inventory)
     actor = {
         'id': display_actor_id(player.player_id),
         'playerId': player.player_id,
@@ -318,9 +325,9 @@ def player_character_from_model(player: Player) -> dict[str, Any]:
         'class': player.class_,
         'level': int(player.level or 1),
         'health': _health_from_player(player, stats),
-        'stats': state.get('ability_scores') if isinstance(state.get('ability_scores'), dict) else {},
+        'stats': ability_scores,
         'inventory': {
-            'items': load_inventory_items(player.inventory),
+            'items': inventory_items,
             'currency': currency_from_stats(stats),
             'carryingCapacity': int_or_default(stats.get('carrying_capacity'), default=0),
         },
@@ -332,6 +339,7 @@ def player_character_from_model(player: Player) -> dict[str, Any]:
             'defaultWeaponId': stats.get('default_weapon_id') or stats.get('defaultWeaponId'),
         },
     }
+    sync_actor_armor_class(actor)
     if spellbook.get('knownSpells'):
         actor['spellbook'] = spellbook
         actor['spells'] = known_spell_names(spellbook)
@@ -401,6 +409,7 @@ def compact_state_for_extraction(state: dict[str, Any]) -> dict[str, Any]:
             continue
         inventory = actor.get('inventory') if isinstance(actor.get('inventory'), dict) else {}
         health = actor.get('health') if isinstance(actor.get('health'), dict) else {}
+        stats = actor.get('stats') if isinstance(actor.get('stats'), dict) else {}
         spellbook = actor.get('spellbook') if isinstance(actor.get('spellbook'), dict) else {}
         players.append(
             {
@@ -415,6 +424,7 @@ def compact_state_for_extraction(state: dict[str, Any]) -> dict[str, Any]:
                     'maxHp': health.get('maxHp'),
                     'tempHp': health.get('tempHp'),
                 },
+                'armorClass': stats.get('armorClass'),
                 'xp': actor.get('xp') if isinstance(actor.get('xp'), dict) else {},
                 'spellbook': {
                     'knownSpells': [

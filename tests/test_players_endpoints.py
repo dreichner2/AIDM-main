@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from aidm_server.database import db
+from aidm_server.game_state.models import player_character_from_model
 from aidm_server.models import DmTurn, Player, PlayerAction, Session, TurnEvent, safe_json_dumps, safe_json_loads
 from tests.helpers import seed_world_campaign_player_session
 
@@ -62,6 +63,12 @@ def test_create_player_assigns_starting_inventory_from_class(client, app):
     assert inventory['Chain Mail']['slot'] == 'body_armor'
     assert inventory['Ration']['quantity'] == 5
     assert inventory['Torch']['quantity'] == 5
+
+    with app.app_context():
+        player = db.session.get(Player, player_id)
+        actor = player_character_from_model(player)
+        assert actor['stats']['armorClass'] == 18
+        assert actor['metadata']['armorClassBreakdown']['shieldBonus'] == 2
 
 
 def test_create_player_assigns_starting_inventory_from_extended_class(client, app):

@@ -1104,6 +1104,37 @@ def test_equipment_slots_allow_hood_under_helmet_but_replace_same_slot():
     assert items['hood_1']['equipped'] is True
 
 
+def test_equipping_armor_updates_actor_and_active_combat_armor_class():
+    state = _state(
+        items=[
+            _item('Leather Armor', item_id='leather_1', item_type='armor', subtype='light armor'),
+        ],
+    )
+    state['playerCharacters'][0]['stats'] = {'dexterity': 15, 'armorClass': 12}
+    state['combat'] = {
+        'status': 'active',
+        'participants': [
+            {'id': 'player_1', 'playerId': 1, 'name': 'Kael', 'team': 'player', 'armorClass': 12, 'stats': {'dexterity': 15, 'armorClass': 12}},
+        ],
+    }
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {'id': 'equip_leather', 'type': 'inventory.equip', 'actorId': 'player_1', 'itemId': 'leather_1'},
+        ],
+    )
+
+    result = apply_state_changes(state, validated_changes_for_application(validation))
+    actor = result['nextState']['playerCharacters'][0]
+    participant = result['nextState']['combat']['participants'][0]
+
+    assert validation['rejected'] == []
+    assert actor['stats']['armorClass'] == 13
+    assert actor['metadata']['armorClassBreakdown']['armorName'] == 'Leather Armor'
+    assert participant['armorClass'] == 13
+    assert participant['stats']['armorClass'] == 13
+
+
 def test_invalid_state_change_stress_rejects_without_partial_mutation():
     state = _two_player_state()
     state['playerCharacters'][0]['xp'] = {'current': 0, 'nextLevelAt': 300}

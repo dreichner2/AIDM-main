@@ -4,6 +4,7 @@ from copy import deepcopy
 import re
 from typing import Any
 
+from aidm_server.armor_class import sync_actor_armor_class
 from aidm_server.canon_text import int_or_default
 from aidm_server.combat.state import ensure_combat_state, normalize_battlefield, normalize_combat_state, normalize_participant, normalize_position
 from aidm_server.game_state.equipment import conflict_items, equipment_slot_label, infer_equipment_slot
@@ -140,6 +141,37 @@ def _unequip_item(items: list[dict[str, Any]], change: dict[str, Any]) -> dict[s
     item['equipped'] = False
     item['slot'] = item.get('slot') or infer_equipment_slot(item) or 'none'
     return item
+
+
+def _sync_actor_and_combat_armor_class(state: dict[str, Any], actor: dict[str, Any] | None) -> int:
+    armor_class = sync_actor_armor_class(actor)
+    if not isinstance(actor, dict):
+        return armor_class
+    combat = state.get('combat') if isinstance(state.get('combat'), dict) else {}
+    participants = combat.get('participants') if isinstance(combat.get('participants'), list) else []
+    actor_id = str(actor.get('id') or '')
+    player_id = parse_actor_player_id(actor_id) or actor.get('playerId')
+    participant_ids = {actor_id}
+    if player_id:
+        participant_ids.add(f'player_{player_id}')
+    breakdown = (actor.get('metadata') or {}).get('armorClassBreakdown') if isinstance(actor.get('metadata'), dict) else None
+    for participant in participants:
+        if not isinstance(participant, dict):
+            continue
+        participant_id = str(participant.get('id') or '')
+        participant_player_id = participant.get('playerId') or parse_actor_player_id(participant_id)
+        if participant_id not in participant_ids and (not player_id or str(participant_player_id) != str(player_id)):
+            continue
+        participant['armorClass'] = armor_class
+        stats = participant.setdefault('stats', {})
+        if not isinstance(stats, dict):
+            stats = {}
+            participant['stats'] = stats
+        stats['armorClass'] = armor_class
+        stats['armor_class'] = armor_class
+        if breakdown:
+            participant['armorClassBreakdown'] = breakdown
+    return armor_class
 
 
 def _apply_currency(actor: dict[str, Any], change: dict[str, Any], direction: int) -> int:
@@ -1001,6 +1033,7 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
             inventory = actor.setdefault('inventory', {})
             items = inventory.setdefault('items', [])
             item = _merge_item(items, _item_payload(change))
+            _sync_actor_and_combat_armor_class(next_state, actor)
             applied_change['itemId'] = item.get('id')
             applied_change['itemName'] = item.get('name')
             applied_change['actualAmount'] = max(1, int_or_default(change.get('quantity', item.get('quantity')), default=1))
@@ -1009,6 +1042,7 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
             if not removed:
                 skipped.append({'change': change, 'reason': 'Item missing during inventory removal.'})
                 continue
+            _sync_actor_and_combat_armor_class(next_state, actor)
             applied_change['itemId'] = _change_value(change, 'itemId', 'item_id') or (removed or {}).get('id')
             applied_change['itemName'] = _change_value(change, 'itemName', 'item_name') or (removed or {}).get('name')
             applied_change['actualAmount'] = max(1, int_or_default(change.get('quantity'), default=1))
@@ -1017,6 +1051,7 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
             if not item or not slot:
                 skipped.append({'change': change, 'reason': 'Item missing or not equippable during equip.'})
                 continue
+            _sync_actor_and_combat_armor_class(next_state, actor)
             applied_change['itemId'] = item.get('id')
             applied_change['itemName'] = item.get('name')
             applied_change['slot'] = slot
@@ -1028,6 +1063,7 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
             if not item:
                 skipped.append({'change': change, 'reason': 'Item missing during unequip.'})
                 continue
+            _sync_actor_and_combat_armor_class(next_state, actor)
             applied_change['itemId'] = item.get('id')
             applied_change['itemName'] = item.get('name')
             applied_change['slot'] = item.get('slot')

@@ -108,6 +108,65 @@ def test_player_combat_participant_uses_dexterity_ac_fallback():
     assert participant['armorClass'] == 12
 
 
+def test_player_combat_participant_uses_equipped_light_armor_over_stale_ac():
+    actor = _player()
+    actor['stats'] = {'strength': 15, 'dexterity': 15, 'armorClass': 12}
+    actor['inventory'] = {
+        'items': [
+            {'name': 'Leather Armor', 'type': 'armor', 'subtype': 'light armor', 'equipped': True, 'slot': 'body_armor'},
+        ],
+    }
+
+    participant = player_combat_participant(actor)
+
+    assert participant['armorClass'] == 13
+    assert participant['stats']['armorClass'] == 13
+    assert participant['armorClassBreakdown']['armorName'] == 'Leather Armor'
+
+
+def test_player_combat_participant_applies_medium_armor_dex_cap_and_shield():
+    actor = _player()
+    actor['stats'] = {'strength': 15, 'dexterity': 18}
+    actor['inventory'] = {
+        'items': [
+            {'name': 'Scale Mail', 'type': 'armor', 'subtype': 'medium armor', 'equipped': True, 'slot': 'body_armor'},
+            {'name': 'Shield', 'type': 'armor', 'subtype': 'shield', 'equipped': True, 'slot': 'off_hand'},
+        ],
+    }
+
+    participant = player_combat_participant(actor)
+
+    assert participant['armorClass'] == 18
+
+
+def test_player_combat_participant_applies_heavy_armor_without_dex_bonus():
+    actor = _player()
+    actor['stats'] = {'strength': 15, 'dexterity': 18}
+    actor['inventory'] = {
+        'items': [
+            {'name': 'Chain Mail', 'type': 'armor', 'subtype': 'heavy armor', 'equipped': True, 'slot': 'body_armor'},
+        ],
+    }
+
+    participant = player_combat_participant(actor)
+
+    assert participant['armorClass'] == 16
+
+
+def test_player_combat_participant_does_not_treat_helmet_as_body_armor():
+    actor = _player()
+    actor['stats'] = {'strength': 15, 'dexterity': 15}
+    actor['inventory'] = {
+        'items': [
+            {'name': 'Iron Helmet', 'type': 'armor', 'subtype': 'helmet', 'equipped': True, 'slot': 'helmet'},
+        ],
+    }
+
+    participant = player_combat_participant(actor)
+
+    assert participant['armorClass'] == 12
+
+
 def test_prepare_combat_uses_roster_turn_not_submitting_player_for_active_combat(app):
     ids = seed_world_campaign_player_session(app)
     with app.app_context():
