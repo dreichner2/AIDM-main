@@ -5,6 +5,7 @@ import json
 import pytest
 
 from aidm_server.contracts import ProviderRequest
+from aidm_server import codex_runtime
 from aidm_server.llm import (
     DeepSeekChatProvider,
     GeminiProvider,
@@ -18,6 +19,21 @@ from aidm_server.llm import (
 )
 from aidm_server.llm_providers import CodexCliProvider, get_helper_provider
 from aidm_server.provider_registry import provider_capabilities, provider_default_model, provider_runtime_model
+
+
+def test_codex_executable_resolves_mac_app_bundle(monkeypatch, tmp_path):
+    app_executable = tmp_path / 'Codex.app' / 'Contents' / 'Resources' / 'codex'
+    app_executable.parent.mkdir(parents=True)
+    app_executable.write_text('#!/bin/sh\n', encoding='utf-8')
+    app_executable.chmod(0o755)
+    monkeypatch.delenv('AIDM_CODEX_EXECUTABLE', raising=False)
+    monkeypatch.setattr(codex_runtime.shutil, 'which', lambda executable: None)
+    monkeypatch.setattr(codex_runtime, 'DEFAULT_CODEX_APP_EXECUTABLES', (app_executable,))
+
+    provider = CodexCliProvider(executable='codex')
+
+    assert codex_runtime.resolve_codex_executable('codex') == str(app_executable)
+    assert provider._resolved_executable() == str(app_executable)
 
 
 def _clear_helper_env(monkeypatch):
@@ -534,7 +550,7 @@ def test_codex_cli_provider_generate_uses_readonly_exec_and_output_file(monkeypa
             handle.write('{"selected_candidate_id":"candidate_2","confidence":0.8}')
         return type('Completed', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
 
-    monkeypatch.setattr(provider_module.shutil, 'which', fake_which)
+    monkeypatch.setattr(codex_runtime.shutil, 'which', fake_which)
     monkeypatch.setattr(provider_module.subprocess, 'run', fake_run)
 
     provider = CodexCliProvider(
@@ -625,7 +641,7 @@ def test_codex_cli_provider_stream_reads_app_server_deltas(monkeypatch, tmp_path
         fake_processes.append(process)
         return process
 
-    monkeypatch.setattr(provider_module.shutil, 'which', fake_which)
+    monkeypatch.setattr(codex_runtime.shutil, 'which', fake_which)
     monkeypatch.setattr(provider_module.subprocess, 'Popen', fake_popen)
     fake_ids = iter([FakeUuid('init_id'), FakeUuid('thread_id'), FakeUuid('turn_id')])
     monkeypatch.setattr(provider_module, 'uuid4', lambda: next(fake_ids))

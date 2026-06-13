@@ -581,6 +581,7 @@ def _mark_superseded_fact(
     fact_id: int | None = None,
     predicate: str | None = None,
     subject_entity_id: int | None = None,
+    incoming_turn_id: int | None = None,
 ) -> StoryFact | None:
     target_fact = None
 
@@ -607,6 +608,16 @@ def _mark_superseded_fact(
         elif predicate not in _GLOBAL_SINGLETON_FACTS:
             return None
         target_fact = query.order_by(StoryFact.fact_id.desc()).first()
+
+    if target_fact and predicate in _GLOBAL_SINGLETON_FACTS:
+        try:
+            target_turn_id = int(target_fact.source_turn_id) if target_fact.source_turn_id is not None else None
+            next_turn_id = int(incoming_turn_id) if incoming_turn_id is not None else None
+        except (TypeError, ValueError):
+            target_turn_id = None
+            next_turn_id = None
+        if target_turn_id is not None and next_turn_id is not None and next_turn_id < target_turn_id:
+            return None
 
     if target_fact:
         target_fact.fact_status = 'superseded'
@@ -649,6 +660,15 @@ def _existing_fact_subject_key(fact: StoryFact) -> str | None:
     if fact.subject_entity is None:
         return None
     return _normalized_name(fact.subject_entity.name)
+
+
+def _fact_source_turn_id(fact: StoryFact | None) -> int | None:
+    if fact is None or fact.source_turn_id is None:
+        return None
+    try:
+        return int(fact.source_turn_id)
+    except (TypeError, ValueError):
+        return None
 
 
 def validate_canon_patch(turn: DmTurn, campaign: Campaign, patch: dict) -> tuple[dict, list[dict]]:
@@ -755,6 +775,19 @@ def validate_canon_patch(turn: DmTurn, campaign: Campaign, patch: dict) -> tuple
 
         if duplicate:
             continue
+
+        if conflicting_fact and predicate in _GLOBAL_SINGLETON_FACTS:
+            existing_source_turn_id = _fact_source_turn_id(conflicting_fact)
+            if existing_source_turn_id is not None and turn.turn_id < existing_source_turn_id:
+                rejections.append(
+                    {
+                        'type': 'fact_conflict',
+                        'predicate': predicate,
+                        'existing_fact_id': conflicting_fact.fact_id,
+                        'reason': 'incoming singleton fact is older than the accepted source turn',
+                    }
+                )
+                continue
 
         if conflicting_fact and not replace_existing and change_type not in _ALLOWED_FACT_CHANGE_TYPES:
             rejections.append(
@@ -957,6 +990,7 @@ def apply_canon_patch(
                 fact_id=fact_payload.get('supersedes_fact_id'),
                 predicate=predicate,
                 subject_entity_id=subject.entity_id if subject else None,
+                incoming_turn_id=turn.turn_id,
             )
 
         fact = StoryFact(

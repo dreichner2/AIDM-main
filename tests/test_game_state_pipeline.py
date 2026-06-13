@@ -279,6 +279,37 @@ def _two_player_state():
     return state
 
 
+def _greenway_party_state():
+    state = _state(
+        items=[
+            _item('Longbow', item_id='aragorn_longbow', item_type='weapon', subtype='longbow', equipped=True),
+            _item('Arrow', item_id='aragorn_arrows', item_type='ammo', quantity=20),
+        ],
+        hp_current=10,
+        hp_max=10,
+    )
+    state['playerCharacters'][0].update(
+        {
+            'id': 'player_50',
+            'playerId': 50,
+            'name': 'Aragorn',
+            'health': {'currentHp': 10, 'maxHp': 10, 'tempHp': 0, 'conditions': []},
+        }
+    )
+    state['playerCharacters'].append(
+        {
+            'id': 'player_49',
+            'playerId': 49,
+            'name': 'Legoless',
+            'health': {'currentHp': 4, 'maxHp': 10, 'tempHp': 0, 'conditions': []},
+            'inventory': {'items': [], 'currency': {'pp': 0, 'gp': 0, 'ep': 0, 'sp': 0, 'cp': 0}},
+            'xp': {'current': 0, 'nextLevelAt': 300},
+            'metadata': {},
+        }
+    )
+    return state
+
+
 def _three_player_state():
     state = _two_player_state()
     state['playerCharacters'].append(
@@ -790,6 +821,31 @@ def test_reject_consume_missing_item():
     assert 'does not have' in result['validatedActions'][0]['reason']
 
 
+def test_validate_attack_resolves_generic_ranged_weapon_to_equipped_longbow():
+    state = _greenway_party_state()
+
+    result = validate_declared_actions(
+        state=state,
+        declared_actions=[
+            {
+                'id': 'act_attack',
+                'type': 'combat.attack',
+                'actorId': 'player_50',
+                'targetName': 'warg',
+                'weaponName': 'ranged weapon',
+                'sourceText': 'Aragorn fires a ranged weapon.',
+            }
+        ],
+        current_turn=899,
+    )
+
+    validated = result['validatedActions'][0]
+    assert validated['status'] == 'pending'
+    assert validated['normalizedAction']['weaponName'] == 'Longbow'
+    assert validated['normalizedAction']['weaponId'] == 'aragorn_longbow'
+    assert validated['normalizedAction']['resolution']['resolutionMethod'] == 'generic_ranged_weapon'
+
+
 def test_validate_transfer_uses_from_actor_inventory_for_pickups():
     state = _two_player_state()
     state['playerCharacters'][1]['inventory']['items'] = [
@@ -938,6 +994,71 @@ def test_apply_health_heal_caps_at_max():
     assert validation['modified'][0]['modifiedChange']['amount'] == 2
     assert result['nextState']['playerCharacters'][0]['health']['currentHp'] == 20
     assert result['appliedChanges'][0]['actualAmount'] == 2
+
+
+def test_post_dm_named_heal_targets_named_recipient_and_authorizes_cross_actor(app):
+    state = _greenway_party_state()
+
+    with app.app_context():
+        result = extract_post_dm_outcomes(
+            state_before_dm=state,
+            player_message='I cast Cure Wounds on Legoless.',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response="Legoless regains 5 HP from Aragorn's Cure Wounds.",
+            recent_timeline=[],
+            actor_id='player_50',
+            turn_id=903,
+        )
+
+    heal = next(change for change in result['proposedChanges'] if change['type'] == 'health.heal')
+    assert heal['actorId'] == 'player_49'
+    assert heal['amount'] == 5
+    assert heal['id'] in result['authorizedCrossActorChangeIds']
+
+    validation = validate_state_changes(
+        state=state,
+        changes=result['proposedChanges'],
+        expected_actor_id='player_50',
+        authorized_cross_actor_change_ids=result['authorizedCrossActorChangeIds'],
+    )
+    next_state = apply_state_changes(state, validated_changes_for_application(validation))['nextState']
+    legoless = next(actor for actor in next_state['playerCharacters'] if actor['id'] == 'player_49')
+
+    assert validation['rejected'] == []
+    assert legoless['health']['currentHp'] == 9
+
+
+def test_post_dm_helper_success_still_adds_named_heal_if_helper_misses_it(app, monkeypatch):
+    class FakeProvider:
+        def generate(self, _request):
+            return ProviderResponse(
+                text='{"proposedChanges":[],"uncertainChanges":[],"notes":["helper missed heal"]}',
+                provider='fake',
+                model='fake-helper',
+            )
+
+    monkeypatch.setattr(post_extractor_module, 'get_helper_provider', lambda: FakeProvider())
+    state = _greenway_party_state()
+
+    with app.app_context():
+        app.config['AIDM_STATE_PIPELINE_HELPER_IN_TESTS'] = True
+        result = extract_post_dm_outcomes(
+            state_before_dm=state,
+            player_message='I cast Cure Wounds on Legoless.',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response="Legoless regains 5 HP from Aragorn's Cure Wounds.",
+            recent_timeline=[],
+            actor_id='player_50',
+            turn_id=903,
+        )
+
+    heal = next(change for change in result['proposedChanges'] if change['type'] == 'health.heal')
+    assert result['debug']['source'] == 'helper'
+    assert heal['actorId'] == 'player_49'
+    assert heal['id'] in result['authorizedCrossActorChangeIds']
+    assert 'heuristic_health_heal' in result['notes']
 
 
 def test_apply_health_damage_uses_temp_hp_first():
@@ -2466,6 +2587,40 @@ def test_pack_encounter_combat_start_materializes_authored_enemies():
     assert combat['encounterGoal']['type'] == 'campaign_pack'
 
 
+def test_pack_combat_end_records_completed_encounter_id():
+    state = _campaign_pack_state()
+    start_validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'start_lantern_wraith',
+                'type': 'combat.start',
+                'source': 'post_dm',
+                'turnId': 36,
+                'campaignPackEncounterId': 'enc_lantern_wraith',
+                'combat': {'status': 'active', 'round': 1, 'participants': []},
+            }
+        ],
+    )
+    started = apply_state_changes(state, validated_changes_for_application(start_validation))['nextState']
+    end_validation = validate_state_changes(
+        state=started,
+        changes=[
+            {
+                'id': 'end_lantern_wraith',
+                'type': 'combat.end',
+                'status': 'ended',
+                'endReason': 'all_enemies_defeated',
+            }
+        ],
+    )
+    ended = apply_state_changes(started, validated_changes_for_application(end_validation))['nextState']
+
+    assert end_validation['rejected'] == []
+    assert ended['flags']['campaignPackCompletedEncounterIds'] == ['enc_lantern_wraith']
+    assert ended['combat']['flags']['campaignPackCompletedEncounterIds'] == ['enc_lantern_wraith']
+
+
 def test_pack_drift_tags_non_pack_combat_start_as_emergent_encounter():
     state = _campaign_pack_state()
     validation = validate_state_changes(
@@ -3015,6 +3170,60 @@ def test_post_dm_heuristic_ignores_metaphorical_non_mechanical_phrases(app):
                 turn_id=111,
             )
             assert result['proposedChanges'] == [], phrase
+
+
+def test_post_dm_heuristic_ignores_greenway_junk_item_phrases(app):
+    dm_response = (
+        'You take him by the collar. '
+        'You find a gap in the reeds. '
+        'A cough answers you. '
+        'You pick up the soft foot rhythm in the mud. '
+        'You take a piece of advice. '
+        'The shot goes wide.'
+    )
+
+    with app.app_context():
+        result = extract_post_dm_outcomes(
+            state_before_dm={},
+            player_message='I keep moving.',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response=dm_response,
+            recent_timeline=[],
+            actor_id='player_1',
+            turn_id=113,
+        )
+
+    assert not any(change['type'] == 'inventory.add' for change in result['proposedChanges'])
+
+
+def test_post_dm_extracts_spent_arrow_as_inventory_remove(app):
+    state = _greenway_party_state()
+
+    with app.app_context():
+        result = extract_post_dm_outcomes(
+            state_before_dm=state,
+            player_message='I fire at the warg.',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response='Aragorn spends 1 Arrow from his quiver.',
+            recent_timeline=[],
+            actor_id='player_50',
+            turn_id=899,
+        )
+
+    remove = next(change for change in result['proposedChanges'] if change['type'] == 'inventory.remove')
+    assert remove['actorId'] == 'player_50'
+    assert remove['itemName'] == 'arrow'
+    assert remove['quantity'] == 1
+
+    validation = validate_state_changes(state=state, changes=result['proposedChanges'], expected_actor_id='player_50')
+    next_state = apply_state_changes(state, validated_changes_for_application(validation))['nextState']
+    aragorn = next(actor for actor in next_state['playerCharacters'] if actor['id'] == 'player_50')
+    arrows = next(item for item in aragorn['inventory']['items'] if item['id'] == 'aragorn_arrows')
+
+    assert validation['rejected'] == []
+    assert arrows['quantity'] == 19
 
 
 def test_post_dm_extracts_confirmed_pickup_as_loot(app):

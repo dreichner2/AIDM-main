@@ -36,7 +36,7 @@ import {
   InspectorPanel,
   type InspectorTab,
 } from './InspectorPanel'
-import { ApiClientError, apiFetch, storedRuntimeAccessSnapshot } from './api'
+import { ApiClientError, WORKSPACE_ID_HEADER, apiFetch, storedRuntimeAccessSnapshot } from './api'
 import {
   POINT_BUY_ABILITIES,
   POINT_BUY_BUDGET,
@@ -243,6 +243,8 @@ function savedWorkspaceRoleLabel(workspace: AccountWorkspace) {
 function savedWorkspaceDisplayName(workspace: AccountWorkspace) {
   return workspace.table_name || workspace.workspace_name || workspace.workspace_id
 }
+
+const OWNER_WORKSPACE_ID = 'owner'
 
 function tableStatusDisplayName(account: RuntimeAccount, workspaceId: string) {
   const selectedWorkspaceId = account?.workspaceId || workspaceId
@@ -527,6 +529,15 @@ function App() {
   }, [])
 
   const auth = runtimeAccount?.requiresPasswordSetup ? '' : authToken.trim()
+  const canUseOwnerRuntimeConfig = Boolean(
+    runtimeAccount?.workspaces.some(
+      (workspace) => workspace.workspace_id === OWNER_WORKSPACE_ID && workspace.is_workspace_admin,
+    ),
+  )
+  const runtimeConfigHeaders = useMemo<HeadersInit | undefined>(
+    () => (canUseOwnerRuntimeConfig ? { [WORKSPACE_ID_HEADER]: OWNER_WORKSPACE_ID } : undefined),
+    [canUseOwnerRuntimeConfig],
+  )
   const storedSelectionScope = selectionStorageScope(auth)
   const {
     campaigns,
@@ -662,6 +673,7 @@ function App() {
     playerDetail?.stats,
     playerDetail?.character_sheet,
     selectedPlayerLevel,
+    playerDetail?.derived,
   )
   const inventoryRows = normalizeInventory(playerDetail?.inventory)
   const spellbook = normalizeSpellbook(playerDetail?.stats, playerDetail?.character_sheet)
@@ -905,6 +917,7 @@ function App() {
   } = useWorkspaceQueries({
     auth,
     baseUrl,
+    runtimeConfigHeaders,
     sessions,
     selectedCampaignId,
     selectedSessionId,
@@ -1736,6 +1749,7 @@ function App() {
           auth,
           {
             method: 'PATCH',
+            headers: runtimeConfigHeaders,
             body: JSON.stringify({ provider, model, persist: true }),
           },
         )
@@ -1754,7 +1768,7 @@ function App() {
         setRuntimePending(false)
       }
     },
-    [auth, baseUrl, pushError],
+    [auth, baseUrl, pushError, runtimeConfigHeaders],
   )
 
   useEffect(() => {

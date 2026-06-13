@@ -117,12 +117,18 @@ CURRENCY_LOSS_PATTERN = re.compile(
 )
 ITEM_GAIN_PATTERN = re.compile(
     r'\b(?:you\s+)?(?P<verb>find|finds|found|take|takes|took|pick up|picks up|picked up|receive|receives|received|loot|loots|looted|buy|buys|bought|purchase|purchases|purchased|add|adds|added)\s+'
-    r'(?:the|a|an|some)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
+    r'(?:(?:the|a|an|some)\s+)?(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|in|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
     re.IGNORECASE,
 )
 ITEM_LOSS_PATTERN = re.compile(
     r'\b(?:you\s+)?(?:drop|drops|dropped|consume|consumes|consumed|use up|uses up|used up|give|gives|gave|sell|sells|sold)\s+'
-    r'(?:the|a|an|some|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
+    r'(?:(?:the|a|an|some|your)\s+)?(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|in|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
+    re.IGNORECASE,
+)
+ITEM_SPEND_PATTERN = re.compile(
+    r'\b(?:you\s+)?(?:spend|spends|spent)\s+'
+    rf'(?P<quantity>{SMALL_NUMBER_PATTERN})\s+'
+    r'(?:(?:the|a|an|some|your|his|her)\s+)?(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|in|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
     re.IGNORECASE,
 )
 DROP_TO_SCENE_PATTERN = re.compile(
@@ -142,12 +148,12 @@ SCENE_ITEM_HELD_PATTERN = re.compile(
 )
 ITEM_EQUIP_PATTERN = re.compile(
     r'\b(?:you\s+)?(?:equip|equips|equipped|wield|wields|wielded|ready|readies|readied|wear|wears|wore|don|dons|donned|put on|puts on|strap on|straps on|strapped on|draw|draws|drew)\s+'
-    r'(?:the|a|an|some|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
+    r'(?:(?:the|a|an|some|your)\s+)?(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|in|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
     re.IGNORECASE,
 )
 ITEM_UNEQUIP_PATTERN = re.compile(
     r'\b(?:you\s+)?(?:unequip|unequips|unequipped|doff|doffs|doffed|stow|stows|stowed|sheathe|sheathes|sheathed|put away|puts away|take off|takes off|took off|remove|removes|removed)\s+'
-    r'(?:the|a|an|some|your)?\s*(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
+    r'(?:(?:the|a|an|some|your)\s+)?(?P<item>[a-z][a-z0-9\' -]{1,60}?)(?=\s+(?:and|from|to|in|into|under|onto|on|beside|before|after|with|without)\b|[.!?,;]|$)',
     re.IGNORECASE,
 )
 EXPLICIT_INVENTORY_STATE_PATTERN = re.compile(
@@ -170,19 +176,35 @@ CURRENCY_WORDS = {
 }
 NON_ITEM_PHRASES = {
     'breath',
+    'cough',
     'confidence',
     'courage',
     'cover',
     'focus',
+    'gap',
     'guard',
+    'he',
+    'her',
+    'him',
     'hp',
     'hit points',
     'damage',
+    'me',
+    'piece',
     'pieces',
     'coins',
+    'shot',
+    'soft foot',
     'it',
+    'us',
     'moment',
     'them',
+    'they',
+    'we',
+    'you',
+}
+NON_ITEM_PREFIXES = {
+    'soft foot',
 }
 NON_SPELL_NAMES = {
     'a spell',
@@ -596,12 +618,95 @@ def _looks_like_item(value: str) -> bool:
     text = _clean_item(value)
     if not text:
         return False
+    if text in NON_ITEM_PHRASES:
+        return False
+    if any(text.startswith(prefix) for prefix in NON_ITEM_PREFIXES):
+        return False
     tokens = text.split()
     if len(tokens) > 6:
         return False
     if text in CURRENCY_ONLY_ITEM_PHRASES:
         return False
     return not any(token in NON_ITEM_PHRASES for token in tokens)
+
+
+def _player_actors(state_before_dm: dict[str, Any]) -> list[dict[str, Any]]:
+    return [actor for actor in state_before_dm.get('playerCharacters') or [] if isinstance(actor, dict)]
+
+
+def _actor_labels(actor: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for value in (
+        actor.get('name'),
+        actor.get('characterName'),
+        actor.get('displayName'),
+        actor.get('id'),
+    ):
+        text = str(value or '').strip()
+        if text and text not in labels:
+            labels.append(text)
+    return labels
+
+
+def _named_player_actor_id(sentence: str, state_before_dm: dict[str, Any]) -> str | None:
+    matches: list[str] = []
+    for actor in _player_actors(state_before_dm):
+        actor_id = str(actor.get('id') or '').strip()
+        if not actor_id:
+            continue
+        if any(_sentence_mentions_label(sentence, label) for label in _actor_labels(actor)):
+            matches.append(actor_id)
+    unique_matches = list(dict.fromkeys(matches))
+    return unique_matches[0] if len(unique_matches) == 1 else None
+
+
+def _named_heal_target_actor_id(sentence: str, state_before_dm: dict[str, Any]) -> str | None:
+    local_match = HEAL_PATTERN.search(sentence)
+    if local_match:
+        prefix = sentence[:local_match.start()]
+        target_actor_id = _named_player_actor_id(prefix, state_before_dm)
+        if target_actor_id:
+            return target_actor_id
+        suffix = sentence[local_match.end():]
+        recipient_match = re.search(r'\b(?:to|for|on)\b(?P<recipient>.{0,80})', suffix, re.IGNORECASE)
+        if recipient_match:
+            target_actor_id = _named_player_actor_id(recipient_match.group('recipient'), state_before_dm)
+            if target_actor_id:
+                return target_actor_id
+    return _named_player_actor_id(sentence, state_before_dm)
+
+
+def _heuristic_heal_changes(
+    *,
+    state_before_dm: dict[str, Any],
+    dm_response: str,
+    actor_id: str,
+    turn_id: int,
+    already_applied_changes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    changes: list[dict[str, Any]] = []
+    authorized_ids: list[str] = []
+    already = _already_applied(already_applied_changes)
+    text = re.sub(r'\*+', '', dm_response or '')
+    for match in HEAL_PATTERN.finditer(text):
+        amount = _amount_text(match.group('amount'))
+        sentence = _sentence_around(text, match.start(), match.end())
+        target_actor_id = _named_heal_target_actor_id(sentence, state_before_dm) or actor_id
+        before_count = len(changes)
+        _add_change(
+            changes,
+            turn_id=turn_id,
+            actor_id=target_actor_id,
+            change_type='health.heal',
+            amount=amount,
+            reason=f'DM stated healing of {amount} HP.',
+            already=already,
+        )
+        if target_actor_id != actor_id and len(changes) > before_count:
+            change_id = str(changes[-1].get('id') or '').strip()
+            if change_id:
+                authorized_ids.append(change_id)
+    return changes, authorized_ids
 
 
 def _item_extraction_sentences(text: str) -> list[str]:
@@ -796,6 +901,19 @@ def _is_observed_only_item_context(sentence: str, verb: str) -> bool:
         OBSERVED_ONLY_ITEM_CONTEXT_PATTERN.search(sentence)
         and not ACQUIRED_ITEM_VERB_PATTERN.search(sentence)
     )
+
+
+def _should_extract_inventory_item(*, change_type: str, item_name: str, sentence: str) -> bool:
+    if not _looks_like_item(item_name):
+        return False
+    normalized_sentence = normalize_item_name(sentence)
+    normalized_item = normalize_item_name(item_name)
+    if change_type == 'inventory.add':
+        if normalized_item in {'him', 'her', 'them', 'you', 'me', 'us'}:
+            return False
+        if normalized_sentence.startswith('you take') and normalized_item in NON_ITEM_PHRASES:
+            return False
+    return True
 
 
 def _add_change(
@@ -2243,18 +2361,17 @@ def _heuristic_extract(
     changes: list[dict[str, Any]] = []
     already = _already_applied(already_applied_changes)
     text = re.sub(r'\*+', '', dm_response or '')
+    authorized_cross_actor_change_ids: list[str] = []
 
-    for match in HEAL_PATTERN.finditer(text):
-        amount = _amount_text(match.group('amount'))
-        _add_change(
-            changes,
-            turn_id=turn_id,
-            actor_id=actor_id,
-            change_type='health.heal',
-            amount=amount,
-            reason=f'DM stated healing of {amount} HP.',
-            already=already,
-        )
+    heal_changes, heal_authorized_ids = _heuristic_heal_changes(
+        state_before_dm=state_before_dm,
+        dm_response=dm_response,
+        actor_id=actor_id,
+        turn_id=turn_id,
+        already_applied_changes=already_applied_changes,
+    )
+    changes.extend(heal_changes)
+    authorized_cross_actor_change_ids.extend(heal_authorized_ids)
     for match in DAMAGE_PATTERN.finditer(text):
         amount = _amount_text(match.group('amount'))
         sentence = _sentence_around(text, match.start(), match.end())
@@ -2327,6 +2444,28 @@ def _heuristic_extract(
             reason=f'DM explicit state change for {item_name}.',
             already=already,
         )
+    for match in ITEM_SPEND_PATTERN.finditer(text):
+        item_name = _clean_item(match.group('item'))
+        if not _should_extract_inventory_item(change_type='inventory.remove', item_name=item_name, sentence=_sentence_around(text, match.start(), match.end())):
+            continue
+        quantity = _amount_text(match.group('quantity'))
+        if _inventory_change_already_applied(
+            change_type='inventory.remove',
+            actor_id=actor_id,
+            item_name=item_name,
+            already_applied_changes=already_applied_changes,
+        ):
+            continue
+        _add_change(
+            changes,
+            turn_id=turn_id,
+            actor_id=actor_id,
+            change_type='inventory.remove',
+            itemName=item_name,
+            quantity=quantity,
+            reason=f'DM stated inventory remove for {item_name}.',
+            already=already,
+        )
     for sentence in _item_extraction_sentences(text):
         if _is_conditional_item_context(sentence):
             continue
@@ -2356,7 +2495,7 @@ def _heuristic_extract(
                 if change_type == 'inventory.add' and _is_observed_only_item_context(sentence, match.group('verb')):
                     continue
                 item_name = _clean_item(match.group('item'))
-                if not _looks_like_item(item_name):
+                if not _should_extract_inventory_item(change_type=change_type, item_name=item_name, sentence=sentence):
                     continue
                 if _inventory_change_already_applied(
                     change_type=change_type,
@@ -2447,6 +2586,8 @@ def _heuristic_extract(
         notes.append('heuristic_form_state')
     if max_hp_changes and 'heuristic_max_hp' not in notes:
         notes.append('heuristic_max_hp')
+    if heal_changes and 'heuristic_health_heal' not in notes:
+        notes.append('heuristic_health_heal')
     if active_npc_changes and 'heuristic_active_npcs' not in notes:
         notes.append('heuristic_active_npcs')
     if combat_changes and 'heuristic_combat_outcomes' not in notes:
@@ -2463,11 +2604,18 @@ def _heuristic_extract(
         'proposedChanges': changes,
         'uncertainChanges': [],
         'notes': notes,
-        'authorizedCrossActorChangeIds': [
-            str(change.get('id'))
-            for change in xp_reward_changes
-            if isinstance(change, dict) and str(change.get('id') or '').strip()
-        ],
+        'authorizedCrossActorChangeIds': list(
+            dict.fromkeys(
+                [
+                    *authorized_cross_actor_change_ids,
+                    *[
+                        str(change.get('id'))
+                        for change in xp_reward_changes
+                        if isinstance(change, dict) and str(change.get('id') or '').strip()
+                    ],
+                ]
+            )
+        ),
     }
 
 
@@ -2586,6 +2734,18 @@ def extract_post_dm_outcomes(
         )
         if max_hp_changes:
             normalized['proposedChanges'] = [*(normalized.get('proposedChanges') or []), *max_hp_changes]
+        heal_changes, heal_authorized_ids = _heuristic_heal_changes(
+            state_before_dm=state_before_dm,
+            dm_response=dm_response,
+            actor_id=actor_id,
+            turn_id=turn_id,
+            already_applied_changes=[*already_applied_changes, *(normalized.get('proposedChanges') or [])],
+        )
+        if heal_changes:
+            normalized['proposedChanges'] = [*(normalized.get('proposedChanges') or []), *heal_changes]
+            normalized['authorizedCrossActorChangeIds'] = list(
+                dict.fromkeys([*(normalized.get('authorizedCrossActorChangeIds') or []), *heal_authorized_ids])
+            )
         scene_changes = _heuristic_scene_danger_changes(
             state_before_dm=state_before_dm,
             dm_response=dm_response,
@@ -2674,6 +2834,8 @@ def extract_post_dm_outcomes(
             notes.append('heuristic_form_state')
         if max_hp_changes and 'heuristic_max_hp' not in notes:
             notes.append('heuristic_max_hp')
+        if heal_changes and 'heuristic_health_heal' not in notes:
+            notes.append('heuristic_health_heal')
         if conflict_resolved and 'resolved_combat_scene_conflict' not in notes:
             notes.append('resolved_combat_scene_conflict')
         normalized['notes'] = notes

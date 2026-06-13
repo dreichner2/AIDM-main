@@ -1222,7 +1222,7 @@ def _apply_combat_ability_mark_used(state: dict[str, Any], change: dict[str, Any
         if ability.get('cooldown') in {'once_per_combat', 'short_rest', 'long_rest'}:
             ability['used'] = True
         return participant
-    return participant
+    return None
 
 
 def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1403,7 +1403,7 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
         elif change_type == 'combat.ability.mark_used':
             participant = _apply_combat_ability_mark_used(next_state, change)
             if not participant:
-                skipped.append({'change': change, 'reason': 'Combat participant missing during ability mark used.'})
+                skipped.append({'change': change, 'reason': 'Combat participant or ability missing during ability mark used.'})
                 continue
             applied_change['participantId'] = participant.get('id')
             applied_change['participantName'] = participant.get('name')
@@ -1437,8 +1437,28 @@ def apply_state_changes(previous_state: dict[str, Any], changes: list[dict[str, 
             combat = ensure_combat_state(next_state)
             combat['status'] = change.get('status') or 'ended'
             combat['lastRoundSummary'] = change.get('summary') or change.get('reason') or combat.get('lastRoundSummary')
+            flags = combat.setdefault('flags', {})
             if change.get('endReason'):
-                combat.setdefault('flags', {})['endReason'] = change.get('endReason')
+                flags['endReason'] = change.get('endReason')
+            encounter_id = _text(flags.get('campaignPackEncounterId') or flags.get('campaign_pack_encounter_id'))
+            end_reason = _text(flags.get('endReason') or flags.get('end_reason')).lower()
+            if encounter_id and end_reason in {
+                'all_enemies_defeated',
+                'enemies_fled',
+                'enemies_surrendered',
+                'negotiated_resolution',
+                'objective_completed',
+            }:
+                state_flags = next_state.setdefault('flags', {})
+                if not isinstance(state_flags, dict):
+                    state_flags = {}
+                    next_state['flags'] = state_flags
+                completed_encounter_ids = _merge_unique(
+                    state_flags.get('campaignPackCompletedEncounterIds'),
+                    [encounter_id],
+                )
+                state_flags['campaignPackCompletedEncounterIds'] = completed_encounter_ids
+                flags['campaignPackCompletedEncounterIds'] = completed_encounter_ids
             for participant in combat.get('participants') or []:
                 if not isinstance(participant, dict):
                     continue

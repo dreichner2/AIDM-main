@@ -19,6 +19,9 @@ def materialize_campaign_pack_combat_start(state: dict[str, Any], change: dict[s
     requested_encounter_id = _requested_encounter_id(change, checkpoint)
     if not requested_encounter_id:
         return change
+    combat = change.get('combat') if isinstance(change.get('combat'), dict) else {}
+    if _combat_already_materialized_for_encounter(combat, requested_encounter_id):
+        return change
     encounter = _pack_record(pack, 'encounters', requested_encounter_id)
     if not encounter:
         return change
@@ -75,6 +78,25 @@ def materialize_campaign_pack_combat_start(state: dict[str, Any], change: dict[s
     updated.setdefault('campaignPackEncounterId', _record_id(encounter))
     updated.setdefault('encounterId', _record_id(encounter))
     return updated
+
+
+def _combat_already_materialized_for_encounter(combat: dict[str, Any], encounter_id: str) -> bool:
+    encounter_key = _text(encounter_id)
+    if not encounter_key:
+        return False
+    enemies = [
+        participant
+        for participant in (combat.get('participants') or [])
+        if isinstance(participant, dict) and participant.get('team') == 'enemy'
+    ]
+    if not enemies:
+        return False
+    return all(
+        _text(enemy.get('source')) == 'campaign_pack'
+        and _text(enemy.get('campaignPackEncounterId')) == encounter_key
+        and _text(enemy.get('campaignPackEnemyId'))
+        for enemy in enemies
+    )
 
 
 def _active_checkpoint(state: dict[str, Any], pack: dict[str, Any]) -> dict[str, Any]:

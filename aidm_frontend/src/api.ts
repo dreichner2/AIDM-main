@@ -18,8 +18,8 @@ export function normalizeBaseUrl(value: string) {
 }
 
 const NGROK_BROWSER_WARNING_HEADER = 'ngrok-skip-browser-warning'
-const WORKSPACE_TOKEN_HEADER = 'X-AIDM-Workspace-Token'
-const WORKSPACE_ID_HEADER = 'X-AIDM-Workspace-Id'
+export const WORKSPACE_TOKEN_HEADER = 'X-AIDM-Workspace-Token'
+export const WORKSPACE_ID_HEADER = 'X-AIDM-Workspace-Id'
 
 export function storedWorkspaceToken() {
   return sessionStorage.getItem('aidm:workspaceToken') ?? ''
@@ -60,6 +60,7 @@ export function addNgrokBrowserWarningBypassHeader(headers: Headers, baseUrl: st
 }
 
 export function addWorkspaceTokenHeader(headers: Headers, workspaceToken = storedWorkspaceToken()) {
+  if (headers.has(WORKSPACE_TOKEN_HEADER) || headers.has(WORKSPACE_ID_HEADER)) return
   const token = workspaceToken.trim()
   if (token) {
     headers.set(WORKSPACE_TOKEN_HEADER, token)

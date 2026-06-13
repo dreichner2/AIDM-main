@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from sqlalchemy import case
+
 from aidm_server.database import db
 from aidm_server.models import (
     Campaign,
@@ -72,9 +74,13 @@ def _latest_location_fact(campaign_id: int) -> StoryFact | None:
         StoryFact.query.filter(
             StoryFact.campaign_id == campaign_id,
             StoryFact.predicate == 'current_location',
-            StoryFact.fact_status == 'accepted',
+            StoryFact.fact_status.in_(('accepted', 'superseded')),
         )
-        .order_by(StoryFact.fact_id.desc())
+        .order_by(
+            case((StoryFact.source_turn_id.is_(None), 1), else_=0).asc(),
+            StoryFact.source_turn_id.desc(),
+            StoryFact.fact_id.desc(),
+        )
         .limit(100)
         .all()
     )

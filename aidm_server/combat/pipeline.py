@@ -19,6 +19,7 @@ from aidm_server.combat.state import (
 from aidm_server.creatures.repository import record_combat_debug_event
 from aidm_server.creatures.resolver import default_request_from_session, resolve_creatures_for_encounter
 from aidm_server.database import db
+from aidm_server.game_state.campaign_pack_encounters import materialize_campaign_pack_combat_start
 from aidm_server.game_state.models import display_actor_id, stable_change_id, stable_slug
 from aidm_server.models import Campaign, CombatEncounter, DmTurn, Session, safe_json_dumps
 from aidm_server.time_utils import utc_now
@@ -341,6 +342,138 @@ def _encounter_flag_summary(encounter_resolution: dict[str, Any]) -> dict[str, A
     }
 
 
+def _combat_difficulty_ai(state: dict[str, Any]) -> dict[str, Any]:
+    settings = state.get('settings') if isinstance(state.get('settings'), dict) else {}
+    return normalize_combat_difficulty_ai(settings.get('combatDifficultyAI'))
+
+
+def _pack_enemy_group_flags(enemies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for enemy in enemies:
+        groups.append(
+            {
+                'label': enemy.get('campaignPackEnemyId') or enemy.get('definitionId') or enemy.get('name'),
+                'count': 1,
+                'creatureId': enemy.get('definitionId'),
+                'name': enemy.get('name'),
+                'creatureTypeName': enemy.get('creatureTypeName'),
+                'source': enemy.get('source'),
+                'resolutionMethod': 'campaign_pack',
+            }
+        )
+    return groups
+
+
+def _campaign_pack_resolution_summary(combat: dict[str, Any], enemies: list[dict[str, Any]]) -> dict[str, Any]:
+    flags = combat.get('flags') if isinstance(combat.get('flags'), dict) else {}
+    return {
+        'resolutionMethod': 'campaign_pack',
+        'resolutionMethods': ['campaign_pack'],
+        'sources': ['campaign_pack'],
+        'groups': _pack_enemy_group_flags(enemies),
+        'totalEnemies': len(enemies),
+        'generated': False,
+        'savedToBestiary': False,
+        'encounterGoal': combat.get('encounterGoal'),
+        'debug': {
+            'campaignPackId': flags.get('campaignPackId') or flags.get('packId'),
+            'campaignPackEncounterId': flags.get('campaignPackEncounterId'),
+            'campaignPackCheckpointIds': flags.get('campaignPackCheckpointIds') or [],
+        },
+    }
+
+
+def _prepare_campaign_pack_combat_start(
+    *,
+    working_state: dict[str, Any],
+    session_obj: Session,
+    campaign: Campaign,
+    turn: DmTurn,
+    submitted_actor_id: str,
+    actor_record: dict[str, Any],
+    combat_started_by: str,
+    initiative_required: bool,
+    reason: str,
+) -> dict[str, Any] | None:
+    scene = working_state.get('currentScene') if isinstance(working_state.get('currentScene'), dict) else {}
+    enemy_position = _scene_position_for_actor(working_state, actor_record) if actor_record else {'rangeBand': 'near'}
+    base_change = {
+        'id': stable_change_id(turn.turn_id, 'combat.start.campaign_pack', combat_started_by),
+        'turnId': turn.turn_id,
+        'type': 'combat.start',
+        'source': 'campaign_pack',
+        'combat': {
+            'status': 'active',
+            'round': 1,
+            'turnIndex': 0,
+            'participants': [],
+            'battlefield': default_battlefield(scene),
+            'encounterGoal': None,
+            'initiative': [],
+            'flags': {
+                'combatStartedBy': combat_started_by,
+                'initiativeRequired': initiative_required,
+                'combatDifficultyAI': _combat_difficulty_ai(working_state),
+            },
+        },
+        'reason': reason,
+        'visible': False,
+    }
+    materialized = materialize_campaign_pack_combat_start(working_state, base_change)
+    combat_payload = materialized.get('combat') if isinstance(materialized.get('combat'), dict) else {}
+    flags = combat_payload.get('flags') if isinstance(combat_payload.get('flags'), dict) else {}
+    enemies = [
+        participant
+        for participant in (combat_payload.get('participants') or [])
+        if isinstance(participant, dict) and participant.get('team') == 'enemy'
+    ]
+    if not flags.get('campaignPackEncounterId') or not enemies:
+        return None
+
+    for enemy in enemies:
+        enemy['position'] = dict(enemy_position or {'rangeBand': 'near'})
+    flags.update(
+        {
+            'combatStartedBy': combat_started_by,
+            'initiativeRequired': initiative_required,
+            'combatDifficultyAI': _combat_difficulty_ai(working_state),
+            'resolverMethod': 'campaign_pack',
+            'creatureSource': 'campaign_pack',
+            'enemyCount': len(enemies),
+            'enemyGroups': _pack_enemy_group_flags(enemies),
+        }
+    )
+    combat_payload['flags'] = flags
+    combat_payload = normalize_combat_state(combat_payload, scene)
+    turn_context = _sync_combat_turn_context(combat_payload, submitted_actor_id=submitted_actor_id, active_actor_id=submitted_actor_id)
+    intent_plan = plan_enemy_intents(combat_payload)
+    combat_payload = attach_intents_to_combat(combat_payload, intent_plan)
+    encounter = _ensure_encounter_record(session_obj=session_obj, campaign=campaign, combat=combat_payload)
+    materialized['combat'] = combat_payload
+    materialized['id'] = stable_change_id(
+        turn.turn_id,
+        'combat.start.campaign_pack',
+        flags.get('campaignPackEncounterId'),
+        combat_started_by,
+    )
+    materialized['reason'] = reason
+    materialized['visible'] = False
+    resolution = _campaign_pack_resolution_summary(combat_payload, enemies)
+    return {
+        'changes': [materialized],
+        'debug': {
+            'triggered': True,
+            'resolver': resolution,
+            'intentPlan': intent_plan,
+            'combatSummary': combat_summary_for_dm(combat_payload),
+            'combatEncounterId': encounter.combat_encounter_id,
+            'turnContext': turn_context,
+            'campaignPackEncounterId': flags.get('campaignPackEncounterId'),
+        },
+        'combatContext': combat_summary_for_dm(combat_payload),
+    }
+
+
 def _ensure_encounter_record(
     *,
     session_obj: Session,
@@ -509,13 +642,6 @@ def prepare_combat_for_turn(
         return {'changes': [], 'debug': debug, 'combatContext': None}
 
     debug['triggered'] = True
-    request = default_request_from_session(
-        session_obj=session_obj,
-        campaign=campaign,
-        state=working_state,
-        player_message=player_message,
-    )
-    encounter_resolution = resolve_creatures_for_encounter(request, workspace_id=workspace_id)
     actor_record = next(
         (
             actor
@@ -524,6 +650,27 @@ def prepare_combat_for_turn(
         ),
         {},
     )
+    pack_start = _prepare_campaign_pack_combat_start(
+        working_state=working_state,
+        session_obj=session_obj,
+        campaign=campaign,
+        turn=turn,
+        submitted_actor_id=submitted_actor_id,
+        actor_record=actor_record,
+        combat_started_by='player_hostile_action',
+        initiative_required=True,
+        reason='Campaign pack combat started from player hostile action.',
+    )
+    if pack_start:
+        return pack_start
+
+    request = default_request_from_session(
+        session_obj=session_obj,
+        campaign=campaign,
+        state=working_state,
+        player_message=player_message,
+    )
+    encounter_resolution = resolve_creatures_for_encounter(request, workspace_id=workspace_id)
     enemy_position = _scene_position_for_actor(working_state, actor_record) if actor_record else {'rangeBand': 'near'}
     enemies = _instantiate_enemy_groups(encounter_resolution, turn_id=turn.turn_id, position=enemy_position)
     participants = [*_player_participants(working_state), *enemies]
@@ -541,7 +688,7 @@ def prepare_combat_for_turn(
             **encounter_flags,
             'combatStartedBy': 'player_hostile_action',
             'initiativeRequired': True,
-            'combatDifficultyAI': normalize_combat_difficulty_ai((working_state.get('settings') or {}).get('combatDifficultyAI') if isinstance(working_state.get('settings'), dict) else None),
+            'combatDifficultyAI': _combat_difficulty_ai(working_state),
         },
     }
     _sync_combat_turn_context(combat_payload, submitted_actor_id=submitted_actor_id, active_actor_id=submitted_actor_id)
@@ -595,13 +742,6 @@ def prepare_combat_from_dm_response(
         return {'changes': [], 'debug': debug, 'combatContext': None}
 
     debug['triggered'] = True
-    request = default_request_from_session(
-        session_obj=session_obj,
-        campaign=campaign,
-        state=working_state,
-        player_message=f"{player_message}\n\nDM response: {dm_response}",
-    )
-    encounter_resolution = resolve_creatures_for_encounter(request, workspace_id=workspace_id)
     actor_record = next(
         (
             actor
@@ -610,6 +750,28 @@ def prepare_combat_from_dm_response(
         ),
         {},
     )
+    pack_start = _prepare_campaign_pack_combat_start(
+        working_state=working_state,
+        session_obj=session_obj,
+        campaign=campaign,
+        turn=turn,
+        submitted_actor_id=submitted_actor_id,
+        actor_record=actor_record,
+        combat_started_by='post_dm_adjudicator',
+        initiative_required=bool(re.search(r'\binitiative\b', dm_response or '', re.IGNORECASE)),
+        reason='Campaign pack combat started from DM response.',
+    )
+    if pack_start:
+        pack_start['debug']['adjudicationSource'] = 'post_dm_response'
+        return pack_start
+
+    request = default_request_from_session(
+        session_obj=session_obj,
+        campaign=campaign,
+        state=working_state,
+        player_message=f"{player_message}\n\nDM response: {dm_response}",
+    )
+    encounter_resolution = resolve_creatures_for_encounter(request, workspace_id=workspace_id)
     enemy_position = _scene_position_for_actor(working_state, actor_record) if actor_record else {'rangeBand': 'near'}
     enemies = _instantiate_enemy_groups(encounter_resolution, turn_id=turn.turn_id, position=enemy_position)
     participants = [*_player_participants(working_state), *enemies]
@@ -627,7 +789,7 @@ def prepare_combat_from_dm_response(
             **encounter_flags,
             'combatStartedBy': 'post_dm_adjudicator',
             'initiativeRequired': bool(re.search(r'\binitiative\b', dm_response or '', re.IGNORECASE)),
-            'combatDifficultyAI': normalize_combat_difficulty_ai((working_state.get('settings') or {}).get('combatDifficultyAI') if isinstance(working_state.get('settings'), dict) else None),
+            'combatDifficultyAI': _combat_difficulty_ai(working_state),
         },
     }
     debug['turnContext'] = _sync_combat_turn_context(combat_payload, submitted_actor_id=submitted_actor_id, active_actor_id=submitted_actor_id)

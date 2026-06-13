@@ -350,6 +350,7 @@ API_TYPE_CONTRACTS: tuple[TypeContract, ...] = (
             field('stats', 'unknown'),
             field('inventory', 'unknown'),
             field('character_sheet', 'unknown'),
+            field('derived', 'JsonRecord', optional=True),
         ),
     ),
     TypeContract('PlayerEquipmentUpdateResponse', alias='PlayerDetail & { snapshot_changed: boolean; equipment_update: JsonRecord }'),

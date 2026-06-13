@@ -48,6 +48,8 @@ SCENE_MOODS = {'calm', 'tense', 'eerie', 'heroic', 'sad', 'mysterious', 'dangero
 COMBAT_STATES = {'none', 'pending', 'active', 'resolved'}
 LOCATION_TYPES = {'tavern', 'town', 'dungeon', 'forest', 'road', 'shop', 'castle', 'ruins', 'cave', 'wilderness', 'other'}
 LOCATION_STATUSES = {'known', 'discovered', 'visited', 'hidden', 'inaccessible'}
+GENERIC_RANGED_WEAPON_NAMES = {'ranged weapon', 'ranged attack', 'ranged'}
+RANGED_WEAPON_LABELS = {'ranged', 'bow', 'longbow', 'shortbow', 'crossbow', 'sling'}
 QUEST_STATUSES = {'available', 'active', 'completed', 'failed', 'abandoned', 'hidden'}
 OBJECTIVE_STATUSES = {'open', 'completed', 'failed', 'optional'}
 NPC_DISPOSITIONS = {'friendly', 'neutral', 'hostile', 'suspicious', 'afraid', 'loyal', 'unknown'}
@@ -305,6 +307,54 @@ def _resolve_action_item(
     if resolution.get('status') == 'resolved':
         item = next((candidate for candidate in actor_items(actor) if candidate.get('id') == resolution.get('itemId')), None)
     return actor, item, resolution
+
+
+def _is_ranged_weapon(item: dict[str, Any]) -> bool:
+    if normalize_item_name(item.get('type')) != 'weapon':
+        return False
+    labels = {
+        normalize_item_name(item.get('name')),
+        normalize_item_name(item.get('subtype')),
+        *[normalize_item_name(alias) for alias in item.get('aliases') or []],
+        *[normalize_item_name(tag) for tag in item.get('tags') or []],
+    }
+    labels = {label for label in labels if label}
+    return any(label in RANGED_WEAPON_LABELS or 'bow' in label or 'ranged' in label for label in labels)
+
+
+def _resolve_generic_ranged_attack_weapon(actor: dict[str, Any], weapon_name: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    ranged_weapons = [item for item in actor_items(actor) if _is_ranged_weapon(item)]
+    equipped = [item for item in ranged_weapons if item.get('equipped')]
+    candidates = equipped or ranged_weapons
+    if len(candidates) == 1:
+        item = candidates[0]
+        return item, {
+            'status': 'resolved',
+            'itemId': item.get('id'),
+            'itemName': item.get('name'),
+            'resolutionMethod': 'generic_ranged_weapon',
+            'confidence': 0.9,
+            'needsClarification': False,
+        }
+    if len(candidates) > 1:
+        return None, {
+            'status': 'needs_clarification',
+            'reason': f"Multiple ranged weapons match '{weapon_name}'.",
+            'query': 'Which ranged weapon do you use?',
+            'options': [
+                {
+                    'itemId': item.get('id'),
+                    'label': item.get('name'),
+                    'description': 'Equipped' if item.get('equipped') else str(item.get('type') or 'weapon'),
+                }
+                for item in candidates
+            ],
+        }
+    return None, {
+        'status': 'missing',
+        'reason': f"No ranged weapon matches '{weapon_name}'.",
+        'searchedName': weapon_name,
+    }
 
 
 def _validate_consume_item(
@@ -637,6 +687,8 @@ def _validate_attack(
     )
     if not actor:
         return _invalid(action, resolution.get('reason') or 'Actor not found.')
+    if resolution.get('status') == 'missing' and normalize_item_name(weapon_name) in GENERIC_RANGED_WEAPON_NAMES:
+        item, resolution = _resolve_generic_ranged_attack_weapon(actor, weapon_name)
     if resolution.get('status') == 'needs_clarification':
         return _clarification(action, resolution)
     if resolution.get('status') == 'missing' or not item:
@@ -2291,6 +2343,14 @@ def _normalize_combat_change(change: dict[str, Any], state: dict[str, Any]) -> t
         ability_id = _text(normalized.get('abilityId') or normalized.get('ability_id'))
         if not ability_id:
             return 'rejected', 'Combat ability mark used requires abilityId.', None
+        participant = _combat_participant(state, resolved_participant_id)
+        ability_ids = {
+            _text(ability.get('id'))
+            for ability in (participant.get('abilities') if isinstance(participant, dict) else []) or []
+            if isinstance(ability, dict) and _text(ability.get('id'))
+        }
+        if ability_id not in ability_ids:
+            return 'rejected', f"Combat ability '{ability_id}' was not found for participant '{resolved_participant_id}'.", None
         normalized['abilityId'] = ability_id
         return 'accepted', 'Combat ability mark used is valid.', normalized
 

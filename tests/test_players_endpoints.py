@@ -90,6 +90,47 @@ def test_player_character_from_model_ignores_non_finite_persisted_armor_metadata
     assert actor['metadata']['armorClassBreakdown']['armorBase'] == 11
 
 
+def test_get_player_returns_derived_armor_class_without_overwriting_raw_stats(client, app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        assert player is not None
+        player.stats = safe_json_dumps({'dexterity': 14, 'ac': 12, 'armor_class': 12}, {})
+        player.inventory = safe_json_dumps(
+            [
+                {
+                    'id': 'scale_mail',
+                    'name': 'Scale Mail',
+                    'quantity': 1,
+                    'type': 'armor',
+                    'subtype': 'medium armor',
+                    'equipped': True,
+                    'slot': 'body_armor',
+                },
+                {
+                    'id': 'shield',
+                    'name': 'Shield',
+                    'quantity': 1,
+                    'type': 'armor',
+                    'subtype': 'shield',
+                    'equipped': True,
+                    'slot': 'off_hand',
+                },
+            ],
+            [],
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/players/{ids['player_id']}")
+    assert response.status_code == 200
+    payload = response.get_json()
+
+    assert payload['stats'] == {'dexterity': 14, 'ac': 12, 'armor_class': 12}
+    assert payload['derived']['armorClass'] == 18
+    assert payload['derived']['armorClassBreakdown']['armorName'] == 'Scale Mail'
+    assert payload['derived']['armorClassBreakdown']['shieldBonus'] == 2
+
+
 def test_create_player_assigns_starting_inventory_from_extended_class(client, app):
     ids = seed_world_campaign_player_session(app)
 

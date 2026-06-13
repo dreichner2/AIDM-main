@@ -77,6 +77,17 @@ describe('game selector helpers', () => {
     })
   })
 
+  it('prefers derived armor class over stale legacy AC fields', () => {
+    const statBlock = normalizeStats(
+      { dexterity: 14, ac: 12, armor_class: 12 },
+      { ac: 11 },
+      2,
+      { armorClass: 17, armorClassBreakdown: { armorName: 'Scale Mail', shieldBonus: 2 } },
+    )
+
+    expect(statBlock.ac).toBe('17')
+  })
+
   it('normalizes spellbooks from character sheets and dedupes known spells', () => {
     const spellbook = normalizeSpellbook(
       {

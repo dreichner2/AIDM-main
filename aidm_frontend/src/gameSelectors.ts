@@ -781,8 +781,17 @@ export function normalizeInventory(value: unknown): InventoryRow[] {
   })
 }
 
-export function normalizeStats(statsValue: unknown, sheetValue: unknown, level: number | null): StatBlock {
-  const records = [...collectRecords(statsValue), ...collectRecords(sheetValue)]
+export function normalizeStats(
+  statsValue: unknown,
+  sheetValue: unknown,
+  level: number | null,
+  derivedValue?: unknown,
+): StatBlock {
+  const records = [
+    ...collectRecords(derivedValue),
+    ...collectRecords(statsValue),
+    ...collectRecords(sheetValue),
+  ]
   const scoreFor = (longKey: string, shortKey: string) =>
     numberValue(findValue(records, [longKey, shortKey, `${longKey}_score`, `${shortKey}_score`]))
   const statLabel = (keys: string[], fallback = '—') =>
@@ -807,7 +816,7 @@ export function normalizeStats(statsValue: unknown, sheetValue: unknown, level: 
 
   return {
     hp,
-    ac: statLabel(['ac', 'armor_class', 'armorClass']),
+    ac: statLabel(['armorClass', 'armor_class', 'ac']),
     init: statLabel(['initiative', 'init']),
     speed: statLabel(['speed', 'movement', 'walk_speed']),
     abilities: abilityEntries,

@@ -111,6 +111,13 @@ const runtime: LlmRuntimeConfig = {
       configured: true,
       models: [{ id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }],
     },
+    {
+      id: 'fallback',
+      label: 'Fallback',
+      default_model: 'deterministic-v1',
+      configured: true,
+      models: [{ id: 'deterministic-v1', label: 'Deterministic Local Fallback' }],
+    },
   ],
 }
 
@@ -129,7 +136,15 @@ let segmentsByCampaign: Record<number, CampaignSegment[]>
 let sessionLogs: Record<number, SessionLogEntry[]>
 let sessionStates: Record<number, SessionState>
 let playerDetails: Record<number, PlayerDetail>
-let fetchCalls: Array<{ method: string; path: string; origin: string; body: unknown }>
+let fetchCalls: Array<{
+  method: string
+  path: string
+  origin: string
+  body: unknown
+  authorization: string | null
+  workspaceToken: string | null
+  workspaceIdHeader: string | null
+}>
 let ttsFetchHandler: ((path: string, body: unknown) => Promise<Response>) | null
 let requiredAuthToken: string | null
 
@@ -403,12 +418,12 @@ function installFetchMock() {
       const path = url.pathname
       const method = init?.method ?? 'GET'
       const body = init?.body ? JSON.parse(String(init.body)) : null
-      fetchCalls.push({ method, path, origin: url.origin, body })
-
-      if (method === 'GET' && path === '/api/health') return jsonResponse(health)
       const authorization = new Headers(init?.headers).get('Authorization')
       const workspaceToken = new Headers(init?.headers).get('X-AIDM-Workspace-Token')
       const workspaceIdHeader = new Headers(init?.headers).get('X-AIDM-Workspace-Id')
+      fetchCalls.push({ method, path, origin: url.origin, body, authorization, workspaceToken, workspaceIdHeader })
+
+      if (method === 'GET' && path === '/api/health') return jsonResponse(health)
       if (method === 'GET' && path === '/api/accounts/me') {
         const accountToken = authorization?.replace(/^Bearer\s+/i, '') ?? ''
         if (!accountToken) {
@@ -658,6 +673,19 @@ function installFetchMock() {
       if (method === 'GET' && path === '/api/worlds') return jsonResponse(worlds)
       if (method === 'GET' && path === '/api/beta/summary') return jsonResponse(metrics)
       if (method === 'GET' && path === '/api/llm/config') return jsonResponse(runtime)
+      if ((method === 'PATCH' || method === 'POST') && path === '/api/llm/config') {
+        const runtimeBody = body as { provider?: string; model?: string; persist?: boolean }
+        return jsonResponse({
+          ...runtime,
+          current: {
+            ...runtime.current,
+            provider: runtimeBody.provider,
+            model: runtimeBody.model,
+            configured: true,
+          },
+          persisted: runtimeBody.persist !== false,
+        })
+      }
       if (method === 'GET' && path === '/api/tts/config') return jsonResponse(ttsConfig)
       if (method === 'POST' && (path === '/api/tts/stream' || path === '/api/tts/speak')) {
         if (ttsFetchHandler) return ttsFetchHandler(path, body)
@@ -2419,6 +2447,38 @@ describe('App user workflow regressions', () => {
         }),
       ]),
     )
+  })
+
+  it('switches global providers from another table for owner admins', async () => {
+    requiredAuthToken = 'owner-token'
+    sessionStorage.setItem('aidm:authToken', 'account-token')
+    localStorage.setItem('aidm:workspaceId', 'friend')
+
+    render(<App />)
+
+    const providerSelect = await screen.findByTitle('Current runtime provider')
+    await waitFor(() => expect(providerSelect).toBeEnabled())
+
+    fireEvent.change(providerSelect, { target: { value: 'fallback' } })
+
+    await waitFor(() => expect(providerSelect).toHaveValue('fallback'))
+    expect(fetchCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: 'PATCH',
+          path: '/api/llm/config',
+          authorization: 'Bearer account-token',
+          workspaceToken: null,
+          workspaceIdHeader: 'owner',
+          body: {
+            provider: 'fallback',
+            model: 'deterministic-v1',
+            persist: true,
+          },
+        }),
+      ]),
+    )
+    expect(screen.queryByText(/Runtime switch failed/i)).not.toBeInTheDocument()
   })
 
   it('keeps restored legacy passwordless sessions in password setup', async () => {

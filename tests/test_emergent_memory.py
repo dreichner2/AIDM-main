@@ -1208,6 +1208,93 @@ def test_refresh_session_projection_ignores_prose_current_location_fact(app):
         assert refreshed_snapshot['currentScene']['locationId'] == 'rensira'
 
 
+def test_refresh_session_projection_prefers_newer_source_turn_over_newer_fact_id(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        older_turn = _create_turn(
+            app,
+            ids,
+            player_input='We enter the Midgewater track.',
+            dm_output='The party is still on the Midgewater Track.',
+        )
+        newer_turn = _create_turn(
+            app,
+            ids,
+            player_input='We press deeper to the watch-stones.',
+            dm_output='The party reaches the Old Watch-stones.',
+        )
+        campaign = newer_turn.campaign
+        db.session.add(
+            StoryFact(
+                campaign_id=ids['campaign_id'],
+                predicate='current_location',
+                value_text='Old Watch-stones',
+                fact_status='superseded',
+                source_turn_id=newer_turn.turn_id,
+            )
+        )
+        db.session.flush()
+        db.session.add(
+            StoryFact(
+                campaign_id=ids['campaign_id'],
+                predicate='current_location',
+                value_text='Midgewater Track',
+                fact_status='accepted',
+                source_turn_id=older_turn.turn_id,
+            )
+        )
+        db.session.commit()
+
+        refresh_session_projection(ids['session_id'], campaign)
+        db.session.commit()
+
+        refreshed_state = SessionState.query.filter_by(session_id=ids['session_id']).one()
+        refreshed_snapshot = safe_json_loads(db.session.get(Session, ids['session_id']).state_snapshot, {})
+
+        assert refreshed_state.current_location == 'Old Watch-stones'
+        assert refreshed_snapshot['currentScene']['name'] == 'Old Watch-stones'
+        assert refreshed_snapshot['currentScene']['updatedAtTurn'] == newer_turn.turn_id
+
+
+def test_validate_canon_patch_rejects_delayed_older_singleton_fact(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        older_turn = _create_turn(
+            app,
+            ids,
+            player_input='We start on the Midgewater Track.',
+            dm_output='The party travels the Midgewater Track.',
+        )
+        newer_turn = _create_turn(
+            app,
+            ids,
+            player_input='We reach the old stones.',
+            dm_output='The party reaches the Old Watch-stones.',
+        )
+        campaign = newer_turn.campaign
+        accepted_patch = {'facts': [{'predicate': 'current_location', 'value_text': 'Old Watch-stones'}]}
+        validated_newer, newer_rejections = validate_canon_patch(newer_turn, campaign, accepted_patch)
+        assert newer_rejections == []
+        apply_canon_patch(newer_turn, campaign, validated_newer, 'test-extractor', newer_rejections)
+        db.session.commit()
+
+        delayed_patch = {
+            'facts': [
+                {
+                    'predicate': 'current_location',
+                    'value_text': 'Midgewater Track',
+                    'replace_existing': True,
+                }
+            ]
+        }
+        validated_older, older_rejections = validate_canon_patch(older_turn, campaign, delayed_patch)
+
+        assert validated_older['facts'] == []
+        assert older_rejections[0]['reason'] == 'incoming singleton fact is older than the accepted source turn'
+
+
 def test_refresh_session_projection_repairs_prose_scene_from_snapshot_location(app):
     ids = seed_world_campaign_player_session(app)
 

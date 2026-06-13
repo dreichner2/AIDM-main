@@ -29,6 +29,7 @@ type WorkspaceQueryErrorCategory = 'connection' | 'workspace'
 type UseWorkspaceQueriesOptions = {
   auth: string
   baseUrl: string
+  runtimeConfigHeaders?: HeadersInit
   sessions: SessionSummary[]
   selectedCampaignId: number | null
   selectedSessionId: number | null
@@ -92,6 +93,7 @@ function sessionMetaFromCampaign(campaign: Campaign): CampaignSessionMeta {
 export function useWorkspaceQueries({
   auth,
   baseUrl,
+  runtimeConfigHeaders,
   sessions,
   selectedCampaignId,
   selectedSessionId,
@@ -249,18 +251,40 @@ export function useWorkspaceQueries({
   const refreshRoot = useCallback(async () => {
     const requestAuth = auth
     const requestAccessSnapshot = storedRuntimeAccessSnapshot(requestAuth)
-    try {
-      const [healthData, campaignData, metricData, llmData, worldData] = await Promise.all([
-        apiFetch<Health>(baseUrl, '/api/health', requestAuth),
+    const [healthResult, workspaceResult, llmResult] = await Promise.allSettled([
+      apiFetch<Health>(baseUrl, '/api/health', requestAuth),
+      Promise.all([
         apiFetch<Campaign[]>(baseUrl, '/api/campaigns', requestAuth),
         apiFetch<BetaSummary>(baseUrl, '/api/beta/summary', requestAuth),
-        apiFetch<LlmRuntimeConfig>(baseUrl, '/api/llm/config', requestAuth),
         apiFetch<World[]>(baseUrl, '/api/worlds?limit=200', requestAuth),
-      ])
+      ]),
+      apiFetch<LlmRuntimeConfig>(baseUrl, '/api/llm/config', requestAuth, {
+        headers: runtimeConfigHeaders,
+      }),
+    ])
+
+    if (healthResult.status === 'fulfilled') {
+      const healthData = healthResult.value
       setHealth(healthData)
+    } else {
+      setHealth(null)
+      pushError(
+        'connection',
+        `Connection failed: ${healthResult.reason instanceof Error ? healthResult.reason.message : String(healthResult.reason)}`,
+      )
+      return
+    }
+
+    if (llmResult.status === 'fulfilled') {
+      setLlmConfig(llmResult.value)
+    } else {
+      setLlmConfig(null)
+    }
+
+    if (workspaceResult.status === 'fulfilled') {
+      const [campaignData, metricData, worldData] = workspaceResult.value
       rootCampaignsLoaded(campaignData)
       setMetrics(metricData)
-      setLlmConfig(llmData)
       setWorlds(worldData)
       setCampaignSessionMeta(
         Object.fromEntries(
@@ -281,8 +305,8 @@ export function useWorkspaceQueries({
       if (!campaignData.length) {
         setSelectedSessionId(null)
       }
-    } catch (error) {
-      setHealth(null)
+    } else {
+      const error = workspaceResult.reason
       if (isUnauthorizedError(error)) {
         if (requestAccessSnapshot !== storedRuntimeAccessSnapshot()) return
         onUnauthorized()
@@ -297,6 +321,7 @@ export function useWorkspaceQueries({
     onUnauthorized,
     pushError,
     rootCampaignsLoaded,
+    runtimeConfigHeaders,
     setCampaignSessionMeta,
     setHealth,
     setLlmConfig,

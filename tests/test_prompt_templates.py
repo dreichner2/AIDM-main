@@ -44,6 +44,9 @@ def test_active_dm_system_prompt_version():
     assert DM_SYSTEM_PROMPTS['v2'] == DM_SYSTEM_MESSAGE_V2
     assert DM_SYSTEM_MESSAGE_V2 != DM_SYSTEM_MESSAGE_V1
     assert "You are AIDM's live Dungeon Master" in DM_SYSTEM_MESSAGE_V2
+    assert 'campaign_pack_director' in DM_SYSTEM_MESSAGE_V2
+    assert 'mainQuestGeneration is "pack_only"' in DM_SYSTEM_MESSAGE_V2
+    assert 'Do not make a player character choose goals' in DM_SYSTEM_MESSAGE_V2
     assert DM_SYSTEM_MESSAGE == DM_SYSTEM_MESSAGE_V2
 
 

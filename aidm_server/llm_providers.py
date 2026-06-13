@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import queue
-import shutil
 import subprocess
 import tempfile
 from threading import Lock, Thread
@@ -19,6 +18,7 @@ from flask import current_app, has_app_context
 import requests
 
 from aidm_server.contracts import ProviderRequest, ProviderResponse
+from aidm_server.codex_runtime import codex_executable_configured, resolve_codex_executable
 from aidm_server.http_client import post as http_post
 from aidm_server.http_client import timeout_from_config
 from aidm_server.provider_registry import (
@@ -784,15 +784,18 @@ class CodexCliProvider(BaseLLMProvider):
     def _resolved_executable(self) -> str:
         if not self.executable:
             raise ProviderNotConfiguredError('AIDM_CODEX_EXECUTABLE is empty')
+        resolved = resolve_codex_executable(self.executable)
+        if resolved:
+            return resolved
         if os.path.sep in self.executable:
-            if Path(self.executable).is_file():
-                return self.executable
             raise ProviderNotConfiguredError(f'Codex executable not found: {self.executable}')
-        resolved = shutil.which(self.executable)
-        if not resolved:
+        if self.executable == 'codex':
             telemetry_event('llm.provider_not_configured', payload={'provider': self.provider_name}, severity='warning')
-            raise ProviderNotConfiguredError(f'Codex executable "{self.executable}" is not on PATH')
-        return resolved
+            raise ProviderNotConfiguredError(
+                'Codex executable "codex" is not on PATH or in /Applications/Codex.app'
+            )
+        telemetry_event('llm.provider_not_configured', payload={'provider': self.provider_name}, severity='warning')
+        raise ProviderNotConfiguredError(f'Codex executable "{self.executable}" is not on PATH')
 
     def _build_prompt(self, request: ProviderRequest) -> str:
         if self.prompt_role == 'dm':
@@ -1409,9 +1412,7 @@ def helper_provider_configured(provider_name: str) -> bool:
         return bool(_cfg('GOOGLE_GENAI_API_KEY'))
     if provider in {'codex', 'codex_cli'}:
         executable = str(_cfg('AIDM_CODEX_EXECUTABLE', os.getenv('AIDM_CODEX_EXECUTABLE', 'codex')) or 'codex')
-        if os.path.sep in executable:
-            return Path(executable).is_file()
-        return shutil.which(executable) is not None
+        return codex_executable_configured(executable)
     return False
 
 

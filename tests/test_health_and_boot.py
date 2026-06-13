@@ -200,6 +200,25 @@ def test_llm_config_exposes_provider_capabilities(client, monkeypatch, tmp_path)
     assert payload['restart_required_for_other_workers'] is True
 
 
+def test_llm_config_marks_codex_configured_from_mac_app_bundle(client, monkeypatch, tmp_path):
+    from aidm_server import codex_runtime
+
+    app_executable = tmp_path / 'Codex.app' / 'Contents' / 'Resources' / 'codex'
+    app_executable.parent.mkdir(parents=True)
+    app_executable.write_text('#!/bin/sh\n', encoding='utf-8')
+    app_executable.chmod(0o755)
+    monkeypatch.delenv('AIDM_CODEX_EXECUTABLE', raising=False)
+    monkeypatch.setattr(codex_runtime.shutil, 'which', lambda executable: None)
+    monkeypatch.setattr(codex_runtime, 'DEFAULT_CODEX_APP_EXECUTABLES', (app_executable,))
+
+    response = client.get('/api/llm/config')
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    providers = {provider['id']: provider for provider in payload['providers']}
+    assert providers['codex_cli']['configured'] is True
+
+
 def test_llm_config_update_accepts_codex_reasoning_effort_model(client, monkeypatch, tmp_path):
     codex_executable = tmp_path / 'codex'
     codex_executable.write_text('#!/bin/sh\n', encoding='utf-8')
@@ -238,6 +257,28 @@ def test_llm_config_update_normalizes_legacy_codex_model(client, monkeypatch, tm
     assert payload['current']['provider'] == 'codex_cli'
     assert payload['current']['model'] == 'gpt-5.5-medium'
     assert os.environ['AIDM_CODEX_REASONING_EFFORT'] == 'medium'
+
+
+def test_llm_config_persist_writes_active_env_file(client, monkeypatch, tmp_path):
+    active_env = tmp_path / 'desktop-env.local'
+    active_env.write_text(
+        'AIDM_LLM_PROVIDER=deepseek\n'
+        'AIDM_LLM_MODEL=deepseek-v4-pro\n'
+        'AIDM_LLM_FALLBACK_MODELS=\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('AIDM_ENV_FILE', str(active_env))
+    monkeypatch.setenv('AIDM_SKIP_REPO_ENV_LOCAL', '1')
+
+    response = client.patch(
+        '/api/llm/config',
+        json={'provider': 'fallback', 'model': 'deterministic-v1', 'persist': True},
+    )
+
+    assert response.status_code == 200
+    persisted = active_env.read_text(encoding='utf-8')
+    assert 'AIDM_LLM_PROVIDER=fallback\n' in persisted
+    assert 'AIDM_LLM_MODEL=deterministic-v1\n' in persisted
 
 
 def test_llm_config_route_is_owned_by_runtime_config_blueprint(app):

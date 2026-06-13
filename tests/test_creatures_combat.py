@@ -15,7 +15,12 @@ from aidm_server.combat.end_conditions import check_combat_end
 import aidm_server.combat.enemy_brain as enemy_brain_module
 from aidm_server.combat.evaluation import run_combat_helper_evaluation, summarize_combat_helper_plan
 from aidm_server.combat.intent_planner import plan_enemy_intents
-from aidm_server.combat.pipeline import DIRECT_HOSTILE_ACTION_PATTERN, combat_turn_advance_change, prepare_combat_for_turn
+from aidm_server.combat.pipeline import (
+    DIRECT_HOSTILE_ACTION_PATTERN,
+    combat_turn_advance_change,
+    prepare_combat_for_turn,
+    prepare_combat_from_dm_response,
+)
 from aidm_server.combat.morale import apply_morale_event
 from aidm_server.combat.state import combat_summary_for_dm, combat_turn_context, instantiate_creature, normalize_battlefield, player_combat_participant
 from aidm_server.creatures.balance import analyze_creature_balance, auto_scale_creature
@@ -50,6 +55,56 @@ def _combat_with(enemy):
         'participants': [player_combat_participant(_player()), enemy],
         'battlefield': {'environmentType': 'forest', 'lighting': 'bright', 'visibility': 'clear'},
         'flags': {},
+    }
+
+
+def _greenway_pack_state(player_id: int = 1) -> dict:
+    player = _player()
+    player['id'] = f'player_{player_id}'
+    player['playerId'] = player_id
+    black_feather = {
+        **core_creature('bandit_thug'),
+        'id': 'black_feather_orc_scout',
+        'name': 'Black Feather Orc Scout',
+        'source': 'campaign_pack',
+        'packId': 'middle_earth_shadow_over_the_greenway',
+        'creatureType': 'humanoid',
+        'visualTags': ['campaign_pack', 'black_feather', 'orc'],
+    }
+    return {
+        'currentScene': {
+            'locationId': 'midgewater_marsh',
+            'name': 'Midgewater Marsh',
+            'characterPositions': {f'player_{player_id}': {'zoneId': 'reed_bank', 'rangeBand': 'near'}},
+        },
+        'playerCharacters': [player],
+        'flags': {'campaignPackActiveCheckpointId': 'cp_midgewater_courier'},
+        'campaignPack': {
+            'packId': 'middle_earth_shadow_over_the_greenway',
+            'title': 'Shadow Over the Greenway',
+            'checkpoints': [
+                {
+                    'id': 'cp_midgewater_courier',
+                    'title': 'The Courier in the Reeds',
+                    'encounterIds': ['enc_marsh_black_feathers'],
+                    'nextCheckpointIds': ['cp_watchtower_marks'],
+                },
+                {'id': 'cp_watchtower_marks', 'title': 'The Watchtower Marks'},
+            ],
+            'catalog': {
+                'enemies': [black_feather],
+                'encounters': [
+                    {
+                        'id': 'enc_marsh_black_feathers',
+                        'title': 'Black Feathers in the Reeds',
+                        'checkpointIds': ['cp_midgewater_courier'],
+                        'enemyIds': ['black_feather_orc_scout'],
+                        'completion': {'anyOf': ['defeat', 'flee', 'negotiate']},
+                    }
+                ],
+            },
+        },
+        'combat': {'status': 'none', 'round': 1, 'participants': [], 'flags': {}},
     }
 
 
@@ -596,6 +651,92 @@ def test_prepare_combat_starts_known_thunderer_npc_instead_of_generated_thrower(
     assert enemies[0]['name'] == 'The Thunderer'
     assert 'thunderer' in enemies[0]['aliases']
     assert 'Thunder Javelin Thrower' not in result['combatContext']['turnOrderText']
+
+
+def test_prepare_combat_for_turn_prefers_active_campaign_pack_encounter(app, monkeypatch):
+    ids = seed_world_campaign_player_session(app)
+    monkeypatch.setattr(
+        'aidm_server.combat.pipeline.resolve_creatures_for_encounter',
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('generic resolver should not run')),
+    )
+    with app.app_context():
+        session_obj = db.session.get(Session, ids['session_id'])
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        assert session_obj is not None
+        assert campaign is not None
+        state = _greenway_pack_state(ids['player_id'])
+        turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            player_input='I shoot the orc closest to the wounded courier.',
+        )
+        db.session.add(turn)
+        db.session.flush()
+
+        result = prepare_combat_for_turn(
+            state=state,
+            session_obj=session_obj,
+            campaign=campaign,
+            turn=turn,
+            player_message=turn.player_input,
+            workspace_id=campaign.workspace_id,
+        )
+        validation = validate_state_changes(state=state, changes=result['changes'])
+        applied = validated_changes_for_application(validation)
+        apply_result = apply_state_changes(state, applied)
+
+    combat = apply_result['nextState']['combat']
+    enemies = [participant for participant in combat['participants'] if participant['team'] == 'enemy']
+    assert validation['rejected'] == []
+    assert result['debug']['resolver']['resolutionMethod'] == 'campaign_pack'
+    assert combat['flags']['combatStartedBy'] == 'player_hostile_action'
+    assert combat['flags']['campaignPackEncounterId'] == 'enc_marsh_black_feathers'
+    assert enemies[0]['name'] == 'Black Feather Orc Scout'
+    assert enemies[0]['source'] == 'campaign_pack'
+    assert enemies[0]['campaignPackEnemyId'] == 'black_feather_orc_scout'
+    assert enemies[0]['currentIntent']
+
+
+def test_prepare_combat_from_dm_response_prefers_active_campaign_pack_encounter(app, monkeypatch):
+    ids = seed_world_campaign_player_session(app)
+    monkeypatch.setattr(
+        'aidm_server.combat.pipeline.resolve_creatures_for_encounter',
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('generic resolver should not run')),
+    )
+    with app.app_context():
+        session_obj = db.session.get(Session, ids['session_id'])
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        assert session_obj is not None
+        assert campaign is not None
+        state = _greenway_pack_state(ids['player_id'])
+        turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            player_input='I push through the reeds.',
+        )
+        db.session.add(turn)
+        db.session.flush()
+
+        result = prepare_combat_from_dm_response(
+            state=state,
+            session_obj=session_obj,
+            campaign=campaign,
+            turn=turn,
+            player_message=turn.player_input,
+            dm_response='Black-feathered orcs rise from the reeds and attack you. Roll initiative.',
+            workspace_id=campaign.workspace_id,
+        )
+
+    combat = result['changes'][0]['combat']
+    enemies = [participant for participant in combat['participants'] if participant['team'] == 'enemy']
+    assert result['debug']['resolver']['resolutionMethod'] == 'campaign_pack'
+    assert result['debug']['adjudicationSource'] == 'post_dm_response'
+    assert combat['flags']['combatStartedBy'] == 'post_dm_adjudicator'
+    assert combat['flags']['campaignPackEncounterId'] == 'enc_marsh_black_feathers'
+    assert enemies[0]['name'] == 'Black Feather Orc Scout'
+    assert enemies[0]['source'] == 'campaign_pack'
 
 
 def test_core_bestiary_entries_validate_and_balance():
@@ -2184,6 +2325,32 @@ def test_fine_combat_changes_morale_events_and_round_advance_apply():
     assert enemy['morale'] == apply_morale_event(wolf, 'took_heavy_damage')
     assert enemy['abilities'][0]['lastUsedRound'] == 1
     assert applied['nextState']['combat']['round'] == 2
+
+
+def test_combat_ability_mark_used_rejects_unknown_ability():
+    wolf = instantiate_creature(core_creature('wolf'), instance_id='enemy_wolf_1')
+    state = {
+        'currentScene': {'sceneType': 'combat', 'dangerLevel': 8, 'combatState': 'active'},
+        'combat': _combat_with(wolf),
+        'stateChangeLedger': [],
+    }
+
+    validation = validate_state_changes(
+        state=state,
+        changes=[
+            {
+                'id': 'wolf_missing_ability_used',
+                'type': 'combat.ability.mark_used',
+                'participantId': 'enemy_wolf_1',
+                'abilityId': 'missing_bite',
+            }
+        ],
+    )
+    applied = apply_state_changes(state, validated_changes_for_application(validation))
+
+    assert not validation['accepted']
+    assert validation['rejected'][0]['reason'] == "Combat ability 'missing_bite' was not found for participant 'enemy_wolf_1'."
+    assert applied['nextState']['stateChangeLedger'] == []
 
 
 def test_combat_end_conditions_cover_defeat_flee_surrender_and_objective():

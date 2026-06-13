@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import shutil
 
+from aidm_server.codex_runtime import codex_executable_configured
 from flask import current_app, has_app_context
 
 from aidm_server.models import DmTurn
@@ -66,9 +66,7 @@ def provider_configured(provider_id: str) -> bool:
         return True
     if provider_id in {'codex', 'codex_cli'}:
         executable = _config_value('AIDM_CODEX_EXECUTABLE') or 'codex'
-        if os.path.sep in executable:
-            return Path(executable).is_file()
-        return shutil.which(executable) is not None
+        return codex_executable_configured(executable)
     return False
 
 
@@ -107,8 +105,15 @@ def repo_root() -> Path:
     return Path(current_app.root_path).resolve().parent
 
 
+def runtime_env_file() -> Path:
+    configured_env_file = str(os.getenv('AIDM_ENV_FILE') or '').strip()
+    if configured_env_file:
+        return Path(configured_env_file).expanduser()
+    return repo_root() / '.env.local'
+
+
 def persist_env_updates(updates: dict[str, str]):
-    env_file = repo_root() / '.env.local'
+    env_file = runtime_env_file()
     lines = env_file.read_text(encoding='utf-8').splitlines(keepends=True) if env_file.exists() else []
     written: set[str] = set()
     output: list[str] = []
@@ -129,6 +134,7 @@ def persist_env_updates(updates: dict[str, str]):
         if key not in written:
             output.append(f'{key}={value}\n')
 
+    env_file.parent.mkdir(parents=True, exist_ok=True)
     env_file.write_text(''.join(output), encoding='utf-8')
     env_file.chmod(0o600)
 

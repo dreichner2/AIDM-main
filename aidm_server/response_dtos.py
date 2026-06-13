@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import func, or_
 
+from aidm_server.armor_class import armor_class_details
 from aidm_server.canon_inventory import inventory_payload
 from aidm_server.database import db
 from aidm_server.auth import account_display_name
@@ -370,6 +371,18 @@ def structured_payload(raw_value):
     return safe_json_loads(raw_value, raw_value)
 
 
+def player_derived_payload(player: Player) -> dict:
+    stats = structured_payload(player.stats)
+    stats_record = stats if isinstance(stats, dict) else {}
+    inventory = inventory_payload(player.inventory)
+    armor_details = armor_class_details(stats_record, inventory)
+    return {
+        'armorClass': armor_details['armorClass'],
+        'armor_class': armor_details['armorClass'],
+        'armorClassBreakdown': armor_details,
+    }
+
+
 def player_summary_payload(player: Player) -> dict:
     race_selection = race_selection_from_json(player.race_selection, player.race)
     profile_race = profile_race_from_selection(race_selection, player.race)
@@ -401,6 +414,7 @@ def player_detail_payload(player: Player) -> dict:
         'stats': structured_payload(player.stats),
         'inventory': inventory_payload(player.inventory),
         'character_sheet': structured_payload(player.character_sheet),
+        'derived': player_derived_payload(player),
     }
 
 

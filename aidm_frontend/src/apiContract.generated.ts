@@ -290,6 +290,7 @@ export type PlayerDetail = {
   stats: unknown
   inventory: unknown
   character_sheet: unknown
+  derived?: JsonRecord
 }
 
 export type PlayerEquipmentUpdateResponse = PlayerDetail & { snapshot_changed: boolean; equipment_update: JsonRecord }
