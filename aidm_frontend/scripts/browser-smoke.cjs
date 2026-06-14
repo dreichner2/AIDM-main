@@ -70,6 +70,10 @@ function cleanupTempDir() {
   smokeTempDir = null
 }
 
+function isPathLikeExecutable(command) {
+  return path.isAbsolute(command) || command.includes('/') || command.includes('\\')
+}
+
 function waitForChildExit(child, timeoutMs) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
   return new Promise((resolve) => {
@@ -379,7 +383,7 @@ function withTimeout(promise, timeoutMs, label) {
 }
 
 async function main() {
-  if (!fs.existsSync(PYTHON)) {
+  if (isPathLikeExecutable(PYTHON) && !fs.existsSync(PYTHON)) {
     throw new Error(`Missing Python executable: ${PYTHON}`)
   }
 

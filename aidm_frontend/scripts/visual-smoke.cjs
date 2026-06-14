@@ -75,6 +75,10 @@ function cleanupTempDir() {
   smokeTempDir = null
 }
 
+function isPathLikeExecutable(command) {
+  return path.isAbsolute(command) || command.includes('/') || command.includes('\\')
+}
+
 async function shutdown() {
   for (const child of [...children]) {
     stopManaged(child)
@@ -310,7 +314,7 @@ async function runVisualFlow(frontendUrl, backendUrl, ids, artifactDir) {
 }
 
 async function main() {
-  if (!fs.existsSync(PYTHON)) {
+  if (isPathLikeExecutable(PYTHON) && !fs.existsSync(PYTHON)) {
     throw new Error(`Missing Python executable: ${PYTHON}`)
   }
 
