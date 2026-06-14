@@ -2272,7 +2272,7 @@ describe('App user workflow regressions', () => {
     }
     await renderLoadedApp()
 
-    expect(screen.getByText('Auto: Structured - Borin')).toBeInTheDocument()
+    expect(await screen.findByText('Auto: Structured - Borin')).toBeInTheDocument()
     const actionInput = screen.getByLabelText(/Your Action/i)
     fireEvent.change(actionInput, { target: { value: 'I kick open the side door.' } })
     socketMock.socket.emit.mockClear()
