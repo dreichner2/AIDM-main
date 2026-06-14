@@ -9,7 +9,8 @@ from aidm_server.creatures.schemas import normalize_creature_definition
 from aidm_server.services.campaign_pack_linter import lint_campaign_pack_file, lint_campaign_pack_manifest
 
 
-EXAMPLES_DIR = Path(__file__).resolve().parents[1] / 'docs' / 'examples'
+TEST_REPO_ROOT = Path(__file__).resolve().parents[1]
+EXAMPLES_DIR = TEST_REPO_ROOT / 'docs' / 'examples'
 
 
 def _valid_pack() -> dict:
@@ -82,7 +83,7 @@ def test_campaign_pack_linter_cli_prints_json(tmp_path, app):
             '--json',
         ],
         check=False,
-        cwd='/Users/danny/Developer/AIDM-main',
+        cwd=str(TEST_REPO_ROOT),
         capture_output=True,
         text=True,
     )
