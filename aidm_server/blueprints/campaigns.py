@@ -420,6 +420,13 @@ def list_example_campaign_packs():
 
 @campaigns_bp.route('/example-packs/<path:pack_id>/import', methods=['POST'])
 def import_example_campaign_pack(pack_id):
+    if not _include_hidden_session_state():
+        return error_response(
+            'forbidden',
+            'Only workspace admins can import example campaign packs.',
+            403,
+        )
+
     example_pack = get_example_campaign_pack(pack_id)
     if not example_pack:
         return error_response('example_campaign_pack_not_found', 'Example campaign pack not found.', 404)

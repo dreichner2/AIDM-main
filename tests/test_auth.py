@@ -436,6 +436,44 @@ def test_combat_state_and_debug_endpoints_require_workspace_admin_account(tmp_pa
     assert admin_debug_bad_limit.get_json()['events'] == []
 
 
+def test_example_campaign_pack_import_requires_workspace_admin_account(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+    with app.app_context():
+        account = Account(
+            username='example-import-player',
+            first_name='Example',
+            last_name='Importer',
+            password_hash='configured',
+            account_token_hash=hash_secret('example-import-token'),
+        )
+        db.session.add(account)
+        db.session.flush()
+        membership = AccountWorkspaceMembership(account_id=account.account_id, workspace_id='owner', role='player')
+        db.session.add(membership)
+        db.session.commit()
+        account_id = account.account_id
+
+    headers = {'Authorization': 'Bearer example-import-token', 'X-AIDM-Workspace-Id': 'owner'}
+    player_import = client.post('/api/campaigns/example-packs/bleakmoor_intro/import', headers=headers, json={})
+
+    assert player_import.status_code == 403
+    assert player_import.get_json()['error_code'] == 'forbidden'
+    with app.app_context():
+        assert Campaign.query.filter_by(workspace_id='owner', title='The Lanterns of Bleakmoor').count() == 0
+
+        membership = AccountWorkspaceMembership.query.filter_by(account_id=account_id, workspace_id='owner').one()
+        membership.role = 'admin'
+        db.session.commit()
+
+    admin_import = client.post('/api/campaigns/example-packs/bleakmoor_intro/import', headers=headers, json={})
+
+    assert admin_import.status_code == 201
+    payload = admin_import.get_json()
+    assert payload['pack_id'] == 'bleakmoor_intro'
+    assert payload['session']['state_snapshot']['campaignPack']['packId'] == 'bleakmoor_intro'
+
+
 def test_socket_token_extraction_ignores_query_and_event_payloads(tmp_path, monkeypatch):
     app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
 

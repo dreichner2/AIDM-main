@@ -409,6 +409,84 @@ def test_pack_progress_promotes_downstream_checkpoint_when_party_reaches_its_loc
     assert result.active_checkpoint_id == 'cp_old_road'
 
 
+def test_pack_progress_promotes_downstream_checkpoint_with_generated_location_alias(app):
+    ids = _seed_pack_session(
+        app,
+        _pack_snapshot(
+            location_id='brokk_stonehand_s_old_mason_s_yard',
+            flags={'campaignPackActiveCheckpointId': 'cp_moving_road'},
+            pack_extra={
+                'catalog': {
+                    'locations': [
+                        {'id': 'loc_waystation_scratched_names', 'name': 'Waystation of Scratched Names'},
+                        {'id': 'loc_old_masons_yard', 'name': "Old Mason's Yard"},
+                    ]
+                }
+            },
+            checkpoints=[
+                {
+                    'id': 'cp_moving_road',
+                    'title': 'The Road That Moves',
+                    'nextCheckpointIds': ['cp_scratched_names'],
+                    'alternateCheckpointIds': ['cp_stonewright_warning'],
+                },
+                {
+                    'id': 'cp_scratched_names',
+                    'title': 'The Waystation of Scratched Names',
+                    'locationIds': ['loc_waystation_scratched_names'],
+                },
+                {
+                    'id': 'cp_stonewright_warning',
+                    'title': "The Stonewright's Warning",
+                    'locationIds': ['loc_old_masons_yard'],
+                },
+            ],
+        ),
+    )
+
+    with app.app_context():
+        result = update_campaign_pack_progress(session_id=ids['session_id'], campaign_id=ids['campaign_id'])
+
+    assert result.changed is True
+    assert result.reason == 'reached_downstream_checkpoint_location'
+    assert result.completed_checkpoint_ids == ['cp_moving_road']
+    assert result.active_checkpoint_id == 'cp_stonewright_warning'
+
+
+def test_pack_progress_explicit_complete_when_uses_structured_location_alias(app):
+    ids = _seed_pack_session(
+        app,
+        _pack_snapshot(
+            location_id='brokk_stonehand_s_old_mason_s_yard',
+            flags={'campaignPackActiveCheckpointId': 'cp_moving_road'},
+            pack_extra={
+                'catalog': {
+                    'locations': [
+                        {'id': 'loc_old_masons_yard', 'name': "Old Mason's Yard"},
+                    ]
+                }
+            },
+            checkpoints=[
+                {
+                    'id': 'cp_moving_road',
+                    'title': 'The Road That Moves',
+                    'completeWhen': {'locationIds': ['loc_old_masons_yard']},
+                    'nextCheckpointIds': ['cp_scratched_names'],
+                },
+                {'id': 'cp_scratched_names', 'title': 'The Waystation of Scratched Names'},
+            ],
+        ),
+    )
+
+    with app.app_context():
+        result = update_campaign_pack_progress(session_id=ids['session_id'], campaign_id=ids['campaign_id'])
+
+    assert result.changed is True
+    assert result.reason == 'checkpoint_location_reached'
+    assert result.completed_checkpoint_ids == ['cp_moving_road']
+    assert result.active_checkpoint_id == 'cp_scratched_names'
+
+
 def test_pack_progress_can_complete_out_of_order_checkpoint_without_changing_active_spine(app):
     ids = _seed_pack_session(
         app,

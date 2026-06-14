@@ -2,7 +2,7 @@
   "schemaVersion": "1",
   "packId": "original_fantasy.road_of_unremembered_kings",
   "title": "The Road of Unremembered Kings",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "An original heroic-fantasy campaign for AIDM about memory, mercy, and ancient protection gone wrong. In the western roadlands, travelers vanish from an old road once built to protect the weak. The party must uncover why the road ward has awakened, restore the names of forgotten guardians, and decide whether the last road-stone should be renewed, destroyed, hidden, or claimed.",
   "world": {
     "name": "The Western Roadlands",
@@ -2255,6 +2255,22 @@
         "clue_final_valley_map"
       ],
       "completeWhen": {
+        "locationIds": [
+          "loc_waystation_scratched_names",
+          "loc_cairns_roadwardens",
+          "loc_old_masons_yard",
+          "loc_ridge_and_culvert_paths",
+          "loc_valley_last_road_stone"
+        ],
+        "objectiveIds": [
+          "obj_follow_changing_road"
+        ],
+        "encounterIds": [
+          "enc_pale_lantern_detour"
+        ],
+        "segmentIds": [
+          "seg_road_moves"
+        ],
         "anyOf": [
           "The party reaches the waystation by following the road.",
           "The party follows a pale lantern and reaches a shortcut or vision.",
@@ -2310,6 +2326,21 @@
         "clue_ash_marks"
       ],
       "completeWhen": {
+        "locationIds": [
+          "loc_cairns_roadwardens",
+          "loc_old_masons_yard",
+          "loc_ridge_and_culvert_paths",
+          "loc_valley_last_road_stone"
+        ],
+        "objectiveIds": [
+          "obj_recover_erased_names"
+        ],
+        "encounterIds": [
+          "enc_waystation_ambush"
+        ],
+        "segmentIds": [
+          "seg_scratched_names"
+        ],
         "anyOf": [
           "The party preserves or restores at least one Roadwarden name.",
           "The party learns that names are keys to the ward.",
@@ -2363,6 +2394,20 @@
         "clue_scratched_memorial_names"
       ],
       "completeWhen": {
+        "locationIds": [
+          "loc_old_masons_yard",
+          "loc_ridge_and_culvert_paths",
+          "loc_valley_last_road_stone"
+        ],
+        "objectiveIds": [
+          "obj_confront_roadwardens"
+        ],
+        "encounterIds": [
+          "enc_roadwarden_judgment"
+        ],
+        "segmentIds": [
+          "seg_cairns_judgment"
+        ],
         "anyOf": [
           "The party restores Caelorn's name.",
           "The party speaks or reconstructs the original road oath.",
@@ -2421,6 +2466,19 @@
         "clue_cinder_scribe_true_name"
       ],
       "completeWhen": {
+        "locationIds": [
+          "loc_valley_last_road_stone"
+        ],
+        "objectiveIds": [
+          "obj_learn_ward_choices",
+          "obj_reach_final_valley"
+        ],
+        "encounterIds": [
+          "enc_hollow_marshal_pursuit"
+        ],
+        "segmentIds": [
+          "seg_stonewright_warning"
+        ],
         "anyOf": [
           "The party prepares a renewal method.",
           "The party prepares a destruction method.",
@@ -2481,6 +2539,16 @@
         "clue_scratched_memorial_names"
       ],
       "completeWhen": {
+        "objectiveIds": [
+          "obj_reach_final_valley",
+          "obj_decide_ward_fate"
+        ],
+        "encounterIds": [
+          "enc_final_binding"
+        ],
+        "segmentIds": [
+          "seg_final_binding"
+        ],
         "anyOf": [
           "The party defeats the Cinder Scribe.",
           "The party breaks the binding quill or ash-ink.",

@@ -2597,17 +2597,14 @@ def test_campaign_pack_combat_end_advances_encounter_checkpoint(client, app):
         assert encounter.ended_at is not None
 
 
-def test_combat_apply_state_changes_synthesizes_stable_ids_for_retries(client, app):
+def test_combat_apply_state_changes_uses_request_scoped_ids_unless_keyed(client, app):
     ids = seed_world_campaign_player_session(app)
-    combat = client.post(
-        f"/api/sessions/{ids['session_id']}/combat/start",
-        json={'creature': core_creature('wolf'), 'enemyCount': 1},
-    ).get_json()
-    enemy_id = next(participant['id'] for participant in combat['combat']['participants'] if participant['team'] == 'enemy')
+    actor_id = f"player_{ids['player_id']}"
     change = {
-        'type': 'combat.participant.update',
-        'participantId': enemy_id,
-        'hp': {'current': 0, 'max': 11},
+        'type': 'currency.add',
+        'actorId': actor_id,
+        'currency': 'gp',
+        'amount': 5,
     }
 
     first = client.post(
@@ -2622,20 +2619,67 @@ def test_combat_apply_state_changes_synthesizes_stable_ids_for_retries(client, a
     assert first.status_code == 200
     first_payload = first.get_json()
     assert len(first_payload['appliedChanges']) == 1
-    generated_id = first_payload['appliedChanges'][0]['id']
-    assert generated_id.startswith('chg_')
+    first_id = first_payload['appliedChanges'][0]['id']
+    assert first_id.startswith('chg_')
 
     assert second.status_code == 200
     second_payload = second.get_json()
-    assert second_payload['appliedChanges'] == []
-    assert second_payload['validation']['rejected'][0]['change']['id'] == generated_id
-    assert second_payload['validation']['rejected'][0]['reason'] == 'State change was already applied.'
+    assert len(second_payload['appliedChanges']) == 1
+    second_id = second_payload['appliedChanges'][0]['id']
+    assert second_id.startswith('chg_')
+    assert second_id != first_id
 
     with app.app_context():
         session = db.session.get(Session, ids['session_id'])
         snapshot = json.loads(session.state_snapshot)
-    ledger_entries = [entry for entry in snapshot['stateChangeLedger'] if entry.get('id') == generated_id]
-    assert len(ledger_entries) == 1
+    actor = next(character for character in snapshot['playerCharacters'] if character['id'] == actor_id)
+    assert actor['inventory']['currency']['gp'] == 10
+    ledger_ids = {entry.get('id') for entry in snapshot['stateChangeLedger']}
+    assert {first_id, second_id}.issubset(ledger_ids)
+
+    keyed_ids = seed_world_campaign_player_session(app)
+    keyed_actor_id = f"player_{keyed_ids['player_id']}"
+    keyed_change = {**change, 'actorId': keyed_actor_id}
+    request_key = 'combat-currency-retry-1'
+    keyed_first = client.post(
+        f"/api/sessions/{keyed_ids['session_id']}/combat/apply-state-changes",
+        json={'idempotencyKey': request_key, 'changes': [keyed_change]},
+    )
+    keyed_second = client.post(
+        f"/api/sessions/{keyed_ids['session_id']}/combat/apply-state-changes",
+        json={'idempotencyKey': request_key, 'changes': [keyed_change]},
+    )
+    keyed_shifted = client.post(
+        f"/api/sessions/{keyed_ids['session_id']}/combat/apply-state-changes",
+        json={'idempotencyKey': request_key, 'changes': [None, keyed_change]},
+    )
+
+    assert keyed_first.status_code == 200
+    keyed_payload = keyed_first.get_json()
+    assert len(keyed_payload['appliedChanges']) == 1
+    keyed_generated_id = keyed_payload['appliedChanges'][0]['id']
+    assert keyed_generated_id.startswith('chg_')
+
+    assert keyed_second.status_code == 200
+    keyed_second_payload = keyed_second.get_json()
+    assert keyed_second_payload['appliedChanges'] == []
+    assert keyed_second_payload['validation']['rejected'][0]['change']['id'] == keyed_generated_id
+    assert keyed_second_payload['validation']['rejected'][0]['reason'] == 'State change was already applied.'
+
+    assert keyed_shifted.status_code == 200
+    keyed_shifted_payload = keyed_shifted.get_json()
+    assert keyed_shifted_payload['appliedChanges'] == []
+    assert keyed_shifted_payload['validation']['rejected'][0]['change']['id'] == keyed_generated_id
+
+    with app.app_context():
+        keyed_session = db.session.get(Session, keyed_ids['session_id'])
+        keyed_snapshot = json.loads(keyed_session.state_snapshot)
+    keyed_actor = next(character for character in keyed_snapshot['playerCharacters'] if character['id'] == keyed_actor_id)
+    assert keyed_actor['inventory']['currency']['gp'] == 5
+    keyed_ledger_entries = [
+        entry for entry in keyed_snapshot['stateChangeLedger'] if entry.get('id') == keyed_generated_id
+    ]
+    assert len(keyed_ledger_entries) == 1
 
 
 def test_creature_deep_api_endpoints_for_pack_evolution_morale_and_debug(client, app):

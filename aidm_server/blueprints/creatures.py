@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from flask import Blueprint, jsonify, request
@@ -152,9 +153,24 @@ def _canonical_change_payload(change: dict[str, Any]) -> str:
     return json.dumps(fingerprint, sort_keys=True, separators=(',', ':'), default=str)
 
 
-def _combat_api_changes_with_ids(session_id: int, changes: list[Any]) -> list[Any]:
+def _request_idempotency_key(payload: dict[str, Any]) -> str:
+    return _text(
+        payload.get('idempotencyKey')
+        or payload.get('idempotency_key')
+        or payload.get('requestId')
+        or payload.get('request_id')
+        or payload.get('clientRequestId')
+        or payload.get('client_request_id')
+        or payload.get('clientMutationId')
+        or payload.get('client_mutation_id')
+    )
+
+
+def _combat_api_changes_with_ids(session_id: int, changes: list[Any], *, idempotency_key: str | None = None) -> list[Any]:
     normalized: list[Any] = []
-    for index, change in enumerate(changes):
+    request_scope = idempotency_key or uuid.uuid4().hex
+    payload_occurrences: dict[str, int] = {}
+    for change in changes:
         if not isinstance(change, dict):
             normalized.append(change)
             continue
@@ -162,14 +178,18 @@ def _combat_api_changes_with_ids(session_id: int, changes: list[Any]) -> list[An
         if change_id:
             normalized.append({**change, 'id': change_id})
             continue
+        canonical_payload = _canonical_change_payload(change)
+        payload_occurrence = payload_occurrences.get(canonical_payload, 0)
+        payload_occurrences[canonical_payload] = payload_occurrence + 1
         normalized.append(
             {
                 **change,
                 'id': stable_change_id(
                     session_id,
                     'api.combat.apply_state_changes',
-                    index,
-                    _canonical_change_payload(change),
+                    request_scope,
+                    payload_occurrence,
+                    canonical_payload,
                 ),
             }
         )
@@ -712,7 +732,7 @@ def apply_session_combat_changes(session_id: int):
         return forbidden
     payload = parse_json_body(request) or {}
     changes = payload.get('changes') if isinstance(payload.get('changes'), list) else []
-    changes = _combat_api_changes_with_ids(session_id, changes)
+    changes = _combat_api_changes_with_ids(session_id, changes, idempotency_key=_request_idempotency_key(payload))
     state = _session_state(session_obj)
     validation = validate_state_changes(state=state, changes=changes)
     applied = validated_changes_for_application(validation)

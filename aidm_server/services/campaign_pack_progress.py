@@ -606,7 +606,7 @@ def _checkpoint_completion_reason(
         location_completion_allowed
         and location_ids
         and current_location_id
-        and _id_key(current_location_id) in {_id_key(location_id) for location_id in location_ids}
+        and _location_ids_match_current(snapshot, location_ids)
     ):
         return 'checkpoint_location_reached'
 
@@ -791,7 +791,7 @@ def _matching_downstream_checkpoint(
         if not _checkpoint_available(candidate, completed_ids, skipped_ids, failed_ids):
             continue
         location_ids = _ids_from(candidate, 'locationId', 'locationIds', 'location_id', 'location_ids', 'locations')
-        if _id_key(current_location_id) in {_id_key(location_id) for location_id in location_ids}:
+        if _location_ids_match_current(snapshot, location_ids):
             return candidate
     return None
 
@@ -953,6 +953,122 @@ def _checkpoint_id(checkpoint: dict | None) -> str | None:
 def _current_location_id(snapshot: dict) -> str | None:
     scene = snapshot.get('currentScene') if isinstance(snapshot.get('currentScene'), dict) else {}
     return _text(_first(scene, 'locationId', 'location_id')) or None
+
+
+def _current_location_keys(snapshot: dict) -> set[str]:
+    scene = snapshot.get('currentScene') if isinstance(snapshot.get('currentScene'), dict) else {}
+    keys: set[str] = set()
+    for value in (
+        _first(scene, 'locationId', 'location_id'),
+        _first(scene, 'name', 'title', 'locationName', 'location_name'),
+    ):
+        keys.update(_location_alias_keys(value))
+    current_id = _current_location_id(snapshot)
+    if current_id:
+        keys.update(_location_record_keys(snapshot, current_id))
+    return keys
+
+
+def _location_ids_match_current(snapshot: dict, location_ids: list[str]) -> bool:
+    current_keys = _current_location_keys(snapshot)
+    if not current_keys:
+        return False
+    for location_id in location_ids:
+        candidate_keys = _location_alias_keys(location_id)
+        candidate_keys.update(_location_record_keys(snapshot, location_id))
+        if _location_key_sets_match(current_keys, candidate_keys):
+            return True
+    return False
+
+
+def _location_record_keys(snapshot: dict, location_id: str) -> set[str]:
+    keys: set[str] = set()
+    location_id_keys = _location_alias_keys(location_id)
+    for record in _location_records(snapshot):
+        record_ids = _ids_from(record, 'id', 'locationId', 'location_id', 'slug')
+        record_id_keys: set[str] = set()
+        for record_id in record_ids:
+            record_id_keys.update(_location_alias_keys(record_id))
+        if not _location_key_sets_match(location_id_keys, record_id_keys):
+            continue
+        keys.update(record_id_keys)
+        for value in (
+            _first(record, 'name', 'title', 'label'),
+            *_ids_from(record, 'aliases', 'aliasIds', 'alias_ids', 'alternateIds', 'alternate_ids'),
+        ):
+            keys.update(_location_alias_keys(value))
+    return keys
+
+
+def _location_records(snapshot: dict) -> list[dict]:
+    records: list[dict] = []
+    for value in snapshot.get('locations') or []:
+        if isinstance(value, dict):
+            records.append(value)
+
+    pack = snapshot.get('campaignPack') if isinstance(snapshot.get('campaignPack'), dict) else {}
+    for value in pack.get('locations') or []:
+        if isinstance(value, dict):
+            records.append(value)
+    catalog = pack.get('catalog') if isinstance(pack.get('catalog'), dict) else {}
+    for value in catalog.get('locations') or []:
+        if isinstance(value, dict):
+            records.append(value)
+    return records
+
+
+def _location_alias_keys(value: Any) -> set[str]:
+    text = _text(value)
+    if not text:
+        return set()
+    keys = {_id_key(text), stable_slug(text)}
+    for key in list(keys):
+        for prefix in ('loc_', 'location_', 'scene_'):
+            if key.startswith(prefix):
+                keys.add(key[len(prefix) :])
+    for key in list(keys):
+        keys.update(_location_possessive_variants(key))
+    return {key for key in keys if key}
+
+
+def _location_possessive_variants(key: str) -> set[str]:
+    variants: set[str] = set()
+    if '_s_' in key:
+        variants.add(key.replace('_s_', 's_'))
+        variants.add(key.replace('_s_', '_'))
+    parts = key.split('_')
+    for index, part in enumerate(parts):
+        if len(part) > 4 and part.endswith('s'):
+            singular = [*parts]
+            singular[index] = part[:-1]
+            variants.add('_'.join(singular))
+    return variants
+
+
+def _location_key_sets_match(left: set[str], right: set[str]) -> bool:
+    if left.intersection(right):
+        return True
+    for left_key in left:
+        for right_key in right:
+            if _location_key_fuzzy_match(left_key, right_key):
+                return True
+    return False
+
+
+def _location_key_fuzzy_match(left: str, right: str) -> bool:
+    shorter, longer = sorted((_text(left), _text(right)), key=len)
+    if not shorter or not longer:
+        return False
+    if len(shorter) < 12 or _location_key_token_count(shorter) < 2:
+        return False
+    padded_longer = f'_{longer}_'
+    padded_shorter = f'_{shorter}_'
+    return padded_longer.endswith(padded_shorter) or padded_shorter in padded_longer
+
+
+def _location_key_token_count(key: str) -> int:
+    ignored = {'a', 'an', 'and', 'at', 'by', 'in', 'loc', 'of', 'on', 'scene', 'the', 'to'}
+    return len([part for part in key.split('_') if part and part not in ignored])
 
 
 def _quests(snapshot: dict) -> list[dict]:
