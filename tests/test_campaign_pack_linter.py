@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
 import sys
 
 from aidm_server.services.campaign_pack_linter import lint_campaign_pack_manifest
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _valid_pack() -> dict:
@@ -77,7 +80,7 @@ def test_campaign_pack_linter_cli_prints_json(tmp_path, app):
             '--json',
         ],
         check=False,
-        cwd='/Users/danny/Developer/AIDM-main',
+        cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
     )
