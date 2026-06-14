@@ -7,7 +7,7 @@ import sys
 
 from aidm_server.services.campaign_pack_linter import lint_campaign_pack_manifest
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+TEST_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _valid_pack() -> dict:
@@ -80,7 +80,7 @@ def test_campaign_pack_linter_cli_prints_json(tmp_path, app):
             '--json',
         ],
         check=False,
-        cwd=str(REPO_ROOT),
+        cwd=str(TEST_REPO_ROOT),
         capture_output=True,
         text=True,
     )
