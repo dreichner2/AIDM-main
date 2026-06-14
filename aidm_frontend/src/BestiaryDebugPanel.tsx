@@ -144,14 +144,16 @@ export function BestiaryDebugPanel({
     setLoading(true)
     setError('')
     try {
+      const debugRequest = selectedSessionId
+        ? apiFetch<CombatDebugEventsResponse>(baseUrl, `/api/sessions/${selectedSessionId}/combat/debug?limit=12`, auth)
+          .catch((): CombatDebugEventsResponse => ({ events: [] }))
+        : Promise.resolve({ events: [] })
       const [core, campaign, debug] = await Promise.all([
         apiFetch<BestiaryListResponse>(baseUrl, '/api/bestiary/core', auth),
         selectedCampaignId
           ? apiFetch<BestiaryListResponse>(baseUrl, `/api/campaigns/${selectedCampaignId}/bestiary`, auth)
           : Promise.resolve(null),
-        selectedSessionId
-          ? apiFetch<CombatDebugEventsResponse>(baseUrl, `/api/sessions/${selectedSessionId}/combat/debug?limit=12`, auth)
-          : Promise.resolve({ events: [] }),
+        debugRequest,
       ])
       const nextRows = [
         ...normalizeRows(campaign, 'campaign'),
@@ -276,20 +278,22 @@ export function BestiaryDebugPanel({
       {status && !error ? <div className="bestiary-message">{status}</div> : null}
 
       <div className="bestiary-layout">
-        <div className="bestiary-list" role="listbox" aria-label="Bestiary creatures">
+        <ul className="bestiary-list" aria-label="Bestiary creatures">
           {filteredRows.slice(0, 14).map((row) => (
-            <button
-              type="button"
-              key={row.key}
-              className={row.key === selected?.key ? 'selected' : ''}
-              onClick={() => setSelectedKey(row.key)}
-            >
-              <span>{row.name}</span>
-              <small>{row.source.replace(/_/g, ' ')} / {row.tier}</small>
-            </button>
+            <li key={row.key}>
+              <button
+                type="button"
+                className={row.key === selected?.key ? 'selected' : ''}
+                onClick={() => setSelectedKey(row.key)}
+                aria-pressed={row.key === selected?.key}
+              >
+                <span>{row.name}</span>
+                <small>{row.source.replace(/_/g, ' ')} / {row.tier}</small>
+              </button>
+            </li>
           ))}
-          {!filteredRows.length ? <div className="empty-row">No creatures match.</div> : null}
-        </div>
+          {!filteredRows.length ? <li className="empty-row">No creatures match.</li> : null}
+        </ul>
 
         {selected ? (
           <article className="creature-debug-card">

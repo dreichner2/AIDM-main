@@ -361,8 +361,13 @@ export function InspectorPanel({
                 const isSelectedPlayer = player.id === selectedPlayerId
                 const ancestryClass = activePlayerAncestryClass(player)
                 const isOtherPlayerTyping = !isSelectedPlayer && player.is_typing
+                const health = player.health
+                const healthClassName = health ? `active-player-health-${health.tone}` : ''
                 return (
-                  <li key={player.id} className={isSelectedPlayer ? 'selected' : ''}>
+                  <li
+                    key={player.id}
+                    className={[isSelectedPlayer ? 'selected' : '', healthClassName].filter(Boolean).join(' ')}
+                  >
                     <div className="active-player-avatar-wrap">
                       <img
                         className="active-player-avatar"
@@ -371,9 +376,18 @@ export function InspectorPanel({
                       />
                       <span className="presence-dot" aria-hidden="true" />
                     </div>
-                    <div>
+                    <div className="active-player-copy">
                       <strong>{player.character_name}</strong>
-                      <small>{player.name} - {ancestryClass}</small>
+                      {health ? (
+                        <small
+                          className="active-player-health-text"
+                          aria-label={`${player.character_name} health: ${health.label}`}
+                          title={`${health.label}: ${health.currentHp}/${health.maxHp} HP`}
+                        >
+                          {health.label}
+                        </small>
+                      ) : null}
+                      <small className="active-player-detail">{player.name} - {ancestryClass}</small>
                     </div>
                     <div className="presence-badges">
                       {isOtherPlayerTyping ? (

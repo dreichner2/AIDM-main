@@ -2,7 +2,14 @@
 
 Campaign packs are structured adventure modules that seed an AIDM campaign with authored locations, NPCs, quests, enemies, encounters, segments, checkpoints, clues, factions, maps, handouts, lore, and director rules.
 
-The current contract is version `1`. The JSON Schema lives at [campaign_pack.schema.json](campaign_pack.schema.json), and a runnable example lives at [examples/bleakmoor_intro_campaign_pack.json](examples/bleakmoor_intro_campaign_pack.json).
+The current contract is version `1`. The JSON Schema lives at [campaign_pack.schema.json](campaign_pack.schema.json), and runnable examples live in [examples/](examples/).
+
+Current example packs:
+
+- [examples/bleakmoor_intro_campaign_pack.json](examples/bleakmoor_intro_campaign_pack.json): compact starter pack for import and visibility checks.
+- [examples/shadow_over_the_greenway_campaign_pack.json](examples/shadow_over_the_greenway_campaign_pack.json): larger checkpoint-spine campaign with branches and encounter pressure.
+- [examples/shadow_under_eryn_luin_campaign_pack.json](examples/shadow_under_eryn_luin_campaign_pack.json): larger multi-location campaign with hidden lore and finale state.
+- [examples/the_road_of_unremembered_kings_campaign.json](examples/the_road_of_unremembered_kings_campaign.json): original full campaign with soft checkpoint pathing, redundant clues, factions, maps, handouts, lore, and multiple ending states.
 
 ## Import Flow
 
@@ -134,10 +141,11 @@ The importer returns these stable `error_code` values:
 Run the local pack tool before importing or publishing a pack:
 
 ```bash
-python scripts/aidm_pack.py lint docs/examples/bleakmoor_intro_campaign_pack.json
-python scripts/aidm_pack.py preview docs/examples/bleakmoor_intro_campaign_pack.json
-python scripts/aidm_pack.py graph docs/examples/bleakmoor_intro_campaign_pack.json
-python scripts/aidm_pack.py test-checkpoints docs/examples/bleakmoor_intro_campaign_pack.json
+PACK=docs/examples/the_road_of_unremembered_kings_campaign.json
+python scripts/aidm_pack.py lint "$PACK"
+python scripts/aidm_pack.py preview "$PACK"
+python scripts/aidm_pack.py graph "$PACK"
+python scripts/aidm_pack.py test-checkpoints "$PACK"
 ```
 
 The linter uses the same import dry-run validator as the API, then adds authoring checks for unreachable checkpoints, missing completion cues, hidden records visible at start, large prompt-budget records, dependency declarations, and `pack_only` checkpoints without rejoin targets.

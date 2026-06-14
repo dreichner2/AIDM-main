@@ -702,7 +702,7 @@ start_backend() {
   ensure_backend_dependencies
   ensure_frontend_build
   start_backend_launch_agent || fail "Could not start backend LaunchAgent."
-  wait_for_http "${BACKEND_HEALTH_URL}" "Backend" 5 || fail "Backend did not become ready at ${BACKEND_HEALTH_URL}."
+  wait_for_http "${BACKEND_HEALTH_URL}" "Backend" 30 || fail "Backend did not become ready at ${BACKEND_HEALTH_URL}."
 }
 
 main() {

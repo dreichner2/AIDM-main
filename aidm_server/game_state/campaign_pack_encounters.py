@@ -177,27 +177,30 @@ def _instantiate_pack_enemies(pack: dict[str, Any], encounter: dict[str, Any], *
 
 
 def _encounter_enemy_specs(encounter: dict[str, Any]) -> list[tuple[str, int]]:
-    specs: list[tuple[str, int]] = []
+    specs_by_id: dict[str, int] = {}
+    ordered_ids: list[str] = []
+
+    def add_spec(enemy_id: Any, count: Any, *, override: bool = False) -> None:
+        key = _text(enemy_id)
+        if not key:
+            return
+        if key not in specs_by_id:
+            ordered_ids.append(key)
+        if override or key not in specs_by_id:
+            specs_by_id[key] = max(1, _positive_int(count) or 1)
+
     for enemy_id in _string_list(encounter.get('enemyIds') or encounter.get('enemy_ids')):
-        specs.append((enemy_id, 1))
+        add_spec(enemy_id, 1)
     groups = encounter.get('enemyGroups') or encounter.get('enemy_groups') or encounter.get('enemies')
     if isinstance(groups, list):
         for group in groups:
             if isinstance(group, str):
-                specs.append((group, 1))
+                add_spec(group, 1, override=True)
             elif isinstance(group, dict):
                 enemy_id = _text(group.get('enemyId') or group.get('enemy_id') or group.get('id') or group.get('creatureId'))
                 if enemy_id:
-                    specs.append((enemy_id, max(1, _positive_int(group.get('count')) or 1)))
-    deduped: list[tuple[str, int]] = []
-    seen: set[str] = set()
-    for enemy_id, count in specs:
-        key = _text(enemy_id)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped.append((enemy_id, count))
-    return deduped
+                    add_spec(enemy_id, group.get('count'), override=True)
+    return [(enemy_id, specs_by_id[enemy_id]) for enemy_id in ordered_ids]
 
 
 def _player_participants(state: dict[str, Any], combat: dict[str, Any]) -> list[dict[str, Any]]:

@@ -5,9 +5,10 @@ import json
 from aidm_server.contracts import ProviderResponse
 from aidm_server.database import db
 import aidm_server.game_state.extraction.post_dm_outcome_extractor as post_extractor_module
+import aidm_server.game_state.extraction.pre_dm_action_extractor as pre_extractor_module
 import aidm_server.turn_events as turn_events_module
 import aidm_server.turn_control as turn_control_module
-from aidm_server.turn_engine import _state_application_event_details
+from aidm_server.turn_engine import TurnEngine, _state_application_event_details
 from aidm_server.models import (
     Campaign,
     CampaignSegment,
@@ -82,6 +83,20 @@ def _assert_realtime_state_applied(received, *, item_name: str | None = None, ac
             for change in changes
         )
     return state_payload
+
+
+def test_group_roll_detector_requires_explicit_group_roll_request():
+    assert not TurnEngine._dm_response_requests_group_roll(
+        'No roll is needed; the party reaches the checkpoint at dusk.'
+    )
+    assert not TurnEngine._dm_response_requests_group_roll(
+        'The party follows the left-hand road to the checkpoint.'
+    )
+    assert not TurnEngine._dm_response_requests_group_roll(
+        'The party checks the wagon and finds old ash under the bench.'
+    )
+    assert TurnEngine._dm_response_requests_group_roll('Everyone roll initiative.')
+    assert TurnEngine._dm_response_requests_group_roll('All of you make a Wisdom saving throw.')
 
 
 def test_state_application_event_details_marks_snapshot_refresh_domains():
@@ -3830,6 +3845,175 @@ def test_dm_requested_initiative_waits_for_all_active_players(app, socketio, app
             .first()
         )
         assert first_roll_turn.status == 'completed'
+
+
+def test_no_roll_travel_text_does_not_spawn_group_roll_gate(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        del user_input, context, speaking_player, rules_hint
+        yield 'No roll is needed; the party reaches the checkpoint at dusk.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+
+    ids = seed_world_campaign_player_session(app)
+    other_player_id = _seed_second_player(app, ids['campaign_id'])
+    client_one = socketio.test_client(app, flask_test_client=app.test_client())
+    client_two = socketio.test_client(app, flask_test_client=app.test_client())
+    assert client_one.is_connected()
+    assert client_two.is_connected()
+
+    client_one.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    client_one.get_received()
+    client_two.emit('join_session', {'session_id': ids['session_id'], 'player_id': other_player_id})
+    client_two.get_received()
+
+    client_one.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'We go left.',
+        },
+    )
+    events = client_one.get_received()
+    start_payload = _event_payload(events, 'dm_response_start')
+    assert start_payload is not None
+    assert _event_payload(events, 'roll_required') is None
+
+    with app.app_context():
+        turn = db.session.get(DmTurn, start_payload['turn_id'])
+        metadata = safe_json_loads(turn.metadata_json, {})
+        assert turn.requires_roll is False
+        assert turn.outcome_status == 'resolved'
+        assert 'roll_gate' not in metadata
+
+
+def test_dm_no_roll_explanation_clears_classifier_roll_gate(app, socketio, app_runtime, monkeypatch):
+    socketio_module = app_runtime['modules']['socketio_events']
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        del user_input, context, speaking_player
+        assert rules_hint['requires_roll'] is True
+        assert rules_hint['roll_type'] == 'social'
+        yield 'No roll is needed. The guard already wants to answer honestly.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+
+    ids = seed_world_campaign_player_session(app)
+    client = socketio.test_client(app, flask_test_client=app.test_client())
+    assert client.is_connected()
+
+    client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    client.get_received()
+    client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'I intimidate the guard into telling us what happened.',
+        },
+    )
+    events = client.get_received()
+    start_payload = _event_payload(events, 'dm_response_start')
+    assert start_payload is not None
+    assert _event_payload(events, 'roll_required') is None
+
+    with app.app_context():
+        turn = db.session.get(DmTurn, start_payload['turn_id'])
+        metadata = safe_json_loads(turn.metadata_json, {})
+        rules_hint = safe_json_loads(turn.rules_hint, {})
+        assert turn.requires_roll is False
+        assert turn.rule_type is None
+        assert turn.outcome_status == 'resolved'
+        assert 'roll_gate' not in metadata
+        assert metadata['roll_requirement_cleared']['reason'] == 'dm_explained_no_roll_needed'
+        assert rules_hint['requires_roll'] is False
+        assert rules_hint['outcome_deferred'] is False
+        assert 'Please roll' not in turn.dm_output
+
+
+def test_pre_dm_helper_veto_clears_classifier_roll_before_dm(app, socketio, app_runtime, monkeypatch):
+    from aidm_server.rules import RuleHint
+
+    socketio_module = app_runtime['modules']['socketio_events']
+    turn_engine_module = app_runtime['modules']['turn_engine']
+    pre_helper_text = (
+        '{"declaredActions":[],"rollRequirement":{"requiresRoll":false,'
+        '"reason":"The player is reporting a threat, not attacking anyone.",'
+        '"confidence":0.92},"notes":"reported threat context"}'
+    )
+    post_helper_text = '{"proposedChanges":[],"uncertainChanges":[]}'
+
+    class FakePreProvider:
+        def generate(self, _request):
+            return ProviderResponse(text=pre_helper_text, provider='fake', model='fake-pre-helper')
+
+    class FakePostProvider:
+        def generate(self, _request):
+            return ProviderResponse(text=post_helper_text, provider='fake', model='fake-post-helper')
+
+    def fake_stream(user_input, context, speaking_player=None, rules_hint=None):
+        del user_input, context, speaking_player
+        assert rules_hint['requires_roll'] is False
+        assert rules_hint['roll_type'] is None
+        assert rules_hint['roll_requirement_cleared']['source'] == 'pre_dm_helper'
+        assert rules_hint['state_pipeline']['pendingRolls'] == []
+        yield 'The guard hears the warning and answers without needing a check.'
+
+    monkeypatch.setattr(socketio_module, 'query_dm_function_stream', fake_stream)
+    monkeypatch.setattr(
+        turn_engine_module,
+        'classify_player_action',
+        lambda _message: RuleHint(True, 'attack', 'd20 + attack bonus vs AC', 'False positive attack hint', 0.91),
+    )
+    monkeypatch.setattr(pre_extractor_module, 'get_helper_provider', lambda: FakePreProvider())
+    monkeypatch.setattr(post_extractor_module, 'get_helper_provider', lambda: FakePostProvider())
+
+    ids = seed_world_campaign_player_session(app)
+    app.config['AIDM_STATE_PIPELINE_HELPER_IN_TESTS'] = True
+    client = socketio.test_client(app, flask_test_client=app.test_client())
+    assert client.is_connected()
+
+    client.emit('join_session', {'session_id': ids['session_id'], 'player_id': ids['player_id']})
+    client.get_received()
+    client.emit(
+        'send_message',
+        {
+            'session_id': ids['session_id'],
+            'campaign_id': ids['campaign_id'],
+            'world_id': ids['world_id'],
+            'player_id': ids['player_id'],
+            'message': 'I tell the dwarf people are trying to kill us for the stone.',
+        },
+    )
+    events = client.get_received()
+    start_payload = _event_payload(events, 'dm_response_start')
+    assert start_payload is not None
+    assert _event_payload(events, 'roll_required') is None
+
+    with app.app_context():
+        turn = db.session.get(DmTurn, start_payload['turn_id'])
+        metadata = safe_json_loads(turn.metadata_json, {})
+        rules_hint = safe_json_loads(turn.rules_hint, {})
+        state_pipeline = metadata['state_pipeline']
+        assert turn.requires_roll is False
+        assert turn.rule_type is None
+        assert turn.outcome_status == 'resolved'
+        assert 'roll_gate' not in metadata
+        assert metadata['roll_requirement_cleared']['source'] == 'pre_dm_helper'
+        assert metadata['roll_requirement_cleared']['original_rule_type'] == 'attack'
+        assert state_pipeline['rollRequirementCleared']['source'] == 'pre_dm_helper'
+        assert state_pipeline['dmContextPacket']['pendingRolls'] == []
+        assert state_pipeline['dmContextPacket']['rollRequirementCleared']['source'] == 'pre_dm_helper'
+        assert rules_hint['requires_roll'] is False
+        assert rules_hint['roll_type'] is None
+        assert rules_hint['roll_requirement_cleared']['source'] == 'pre_dm_helper'
+        assert rules_hint['state_pipeline']['pendingRolls'] == []
 
 
 def test_character_resource_limits_block_missing_items_and_gold_spend(app, socketio, app_runtime, monkeypatch):

@@ -133,6 +133,27 @@ _RETROSPECTIVE_ATTACK_RE = re.compile(
     r'shot|slammed|slashed|sliced|smashed|stabbed|stomped|struck|threw)\b',
     re.IGNORECASE,
 )
+_REPORTED_ATTACK_REFERENCE_PATTERNS = [
+    re.compile(
+        r'\b(?:trying|tried|attempting|attempted|planning|planned|looking|looked|want(?:s|ed)?|'
+        r'came|coming|sent|hired)\s+to\s+'
+        r'(?:attack|hurt|kill|murder|stab|shoot|cut)\s+'
+        r'(?:us|me|the\s+party|our\s+group)\b',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'\b(?:we|i|the\s+party|our\s+group|my\s+friends|my\s+companions)\b[^.!?]{0,50}'
+        r'\b(?:was|were|got|have\s+been|had\s+been)\s+'
+        r'(?:attacked|blasted|crushed|hit|hunted|killed|maimed|shot|slashed|stabbed|struck)\b',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'\bwhy\s+(?:did|would|are|were|was)\s+(?:you|they|he|she|it)\b[^.!?]{0,80}'
+        r'\b(?:attack|hurt|kill|try\s+to\s+kill|try\s+to\s+hurt)\s+'
+        r'(?:us|me|the\s+party|our\s+group)\b',
+        re.IGNORECASE,
+    ),
+]
 _STEALTH_KEYWORDS = {"sneak", "stealth", "hide", "silently"}
 _SOCIAL_KEYWORDS = {
     "persuade",
@@ -172,6 +193,12 @@ _MOBILITY_KEYWORDS = {
     "roof",
     "chase",
 }
+_NON_MOVEMENT_RUN_INTO_RE = re.compile(
+    r'\b(?:run|ran|running)\s+into\s+(?:\d+\s+)?'
+    r'(?:people|persons?|someone|somebody|bandits?|raiders?|guards?|attackers?|enemies|'
+    r'trouble|problems?|danger)\b',
+    re.IGNORECASE,
+)
 _ROLL_SKILL_WORDS = {
     "acrobatics",
     "animal",
@@ -272,6 +299,19 @@ def _looks_like_spell_action(text: str, tokens: set[str]) -> bool:
     return any(pattern.search(text) for pattern in _SPELL_ACTION_PATTERNS)
 
 
+def _looks_like_reported_attack_reference(text: str) -> bool:
+    return bool(_RETROSPECTIVE_ATTACK_RE.search(text)) or any(
+        pattern.search(text)
+        for pattern in _REPORTED_ATTACK_REFERENCE_PATTERNS
+    )
+
+
+def _looks_like_non_movement_run_reference(text: str, tokens: set[str]) -> bool:
+    return bool(_NON_MOVEMENT_RUN_INTO_RE.search(text)) and not (
+        tokens & (_MOBILITY_KEYWORDS - {'run'})
+    )
+
+
 def classify_player_action(message: str) -> RuleHint:
     text = (message or "").strip().lower()
     if not text:
@@ -291,7 +331,7 @@ def classify_player_action(message: str) -> RuleHint:
                 roll_value=roll_value,
             )
         )
-    if tokens & _ATTACK_KEYWORDS and not _RETROSPECTIVE_ATTACK_RE.search(text):
+    if tokens & _ATTACK_KEYWORDS and not _looks_like_reported_attack_reference(text):
         return _with_resolution(
             RuleHint(
                 True,
@@ -357,7 +397,7 @@ def classify_player_action(message: str) -> RuleHint:
                 roll_value=roll_value,
             )
         )
-    if tokens & _MOBILITY_KEYWORDS:
+    if tokens & _MOBILITY_KEYWORDS and not _looks_like_non_movement_run_reference(text, tokens):
         return _with_resolution(
             RuleHint(
                 True,

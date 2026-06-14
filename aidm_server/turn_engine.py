@@ -88,6 +88,26 @@ _INTERACTION_TARGET_CUE_RE = re.compile(
     r'\b(?:to|at|toward|towards|with|from)\s+(?:the\s+)?(?P<target>[A-Za-z][A-Za-z0-9\'\-\s]{1,80}?)(?:\s*:|[.!?]|$)',
     re.IGNORECASE,
 )
+_NO_ROLL_NEEDED_RE = re.compile(
+    r"\bno\s+(?:a\s+)?(?:roll|check)s?\s+(?:(?:is|are|was|were)\s+)?(?:needed|required|necessary)\b|"
+    r"\b(?:roll|check)s?\s+(?:is|are|was|were)\s+not\s+(?:needed|required|necessary)\b|"
+    r"\bwithout\s+(?:requiring\s+)?(?:a\s+)?(?:roll|check)\b|"
+    r"\b(?:doesn't|does not|don't|do not)\s+(?:need|require)\s+(?:a\s+)?(?:roll|check)\b|"
+    r"\b(?:don't|do not)\s+roll\b",
+    re.IGNORECASE,
+)
+_GROUP_ROLL_MARKER_RE = re.compile(
+    r'\b(?:both of you|you both|all of you|everyone|each of you|every player|all players|the party)\b',
+    re.IGNORECASE,
+)
+_GROUP_ROLL_REQUEST_RE = re.compile(
+    r'\b(?:please\s+)?roll\b|'
+    r'\b(?:must|should|need(?:s)? to|have to|has to)\s+(?:all\s+)?(?:roll|make)\b|'
+    r'\bmake\s+(?:an?\s+)?[a-z][a-z \'-]{0,60}\s+(?:check|saving\s+throw|save)\b|'
+    r'\bsaving\s+throw\b|'
+    r'\binitiative\b',
+    re.IGNORECASE,
+)
 
 
 def _coerce_player_id(value) -> int | None:
@@ -417,21 +437,30 @@ class TurnEngine:
         return selected if isinstance(selected, dict) else {}
 
     @staticmethod
-    def _dm_response_requests_group_roll(text: str) -> bool:
-        candidate = (text or '').lower()
-        group_markers = (
-            'both of you',
-            'you both',
-            'all of you',
-            'everyone',
-            'each of you',
-            'every player',
-            'all players',
-            'the party',
+    def _dm_response_sentences(text: str) -> list[str]:
+        return [
+            chunk.strip()
+            for chunk in re.split(r'(?<=[.!?;])\s+|\n+', text or '')
+            if chunk.strip()
+        ]
+
+    @staticmethod
+    def _dm_response_explains_no_roll_needed(text: str) -> bool:
+        return any(
+            _NO_ROLL_NEEDED_RE.search(sentence)
+            for sentence in TurnEngine._dm_response_sentences(text)
         )
-        if not any(marker in candidate for marker in group_markers):
-            return False
-        return 'roll' in candidate or 'check' in candidate or 'saving throw' in candidate
+
+    @staticmethod
+    def _dm_response_requests_group_roll(text: str) -> bool:
+        for sentence in TurnEngine._dm_response_sentences(text):
+            if _NO_ROLL_NEEDED_RE.search(sentence):
+                continue
+            if not _GROUP_ROLL_MARKER_RE.search(sentence):
+                continue
+            if _GROUP_ROLL_REQUEST_RE.search(sentence):
+                return True
+        return False
 
     def _dm_response_requests_roll(self, text: str) -> bool:
         return self.response_mentions_roll_request(text) or self._dm_response_requests_group_roll(text)
@@ -872,6 +901,114 @@ class TurnEngine:
         rule_hint.outcome_deferred = True
         return rule_hint
 
+    @staticmethod
+    def _pre_dm_roll_veto(pre_pipeline_result: dict, rules_hint_payload: dict) -> dict | None:
+        if not rules_hint_payload.get('requires_roll'):
+            return None
+        if rules_hint_payload.get('roll_value') is not None:
+            return None
+        if rules_hint_payload.get('resolved_turn_id') is not None:
+            return None
+        if rules_hint_payload.get('target_pending_turn_id') is not None:
+            return None
+        if isinstance(rules_hint_payload.get('pvp'), dict):
+            return None
+
+        pre_extraction = pre_pipeline_result.get('preExtraction')
+        pre_extraction = pre_extraction if isinstance(pre_extraction, dict) else {}
+        roll_requirement = pre_extraction.get('rollRequirement')
+        if not isinstance(roll_requirement, dict) or roll_requirement.get('requiresRoll') is not False:
+            return None
+
+        try:
+            confidence = float(roll_requirement.get('confidence') or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence < 0.75:
+            return None
+
+        pre_validation = pre_pipeline_result.get('preValidation')
+        pre_validation = pre_validation if isinstance(pre_validation, dict) else {}
+        if pre_validation.get('pendingRolls'):
+            return None
+        for result in pre_validation.get('validatedActions') or []:
+            if not isinstance(result, dict):
+                continue
+            if result.get('status') not in {'valid', 'pending'}:
+                continue
+            action = result.get('normalizedAction') if isinstance(result.get('normalizedAction'), dict) else {}
+            original = result.get('originalAction') if isinstance(result.get('originalAction'), dict) else {}
+            action_type = str(action.get('type') or original.get('type') or '')
+            if action_type == 'combat.attack':
+                return None
+
+        reason = str(roll_requirement.get('reason') or '').strip() or 'Pre-DM helper marked this as no-roll context.'
+        return {
+            'source': 'pre_dm_helper',
+            'reason': reason,
+            'confidence': confidence,
+            'original_rule_type': rules_hint_payload.get('roll_type'),
+            'original_reason': rules_hint_payload.get('reason'),
+        }
+
+    @staticmethod
+    def _clear_turn_roll_requirement_from_pre_dm_veto(
+        *,
+        turn: DmTurn,
+        rules_hint_payload: dict,
+        veto: dict,
+        pre_pipeline_result: dict,
+    ) -> None:
+        turn.requires_roll = False
+        turn.rule_type = None
+        turn.outcome_status = 'resolved'
+
+        rules_hint_payload['requires_roll'] = False
+        rules_hint_payload['roll_type'] = None
+        rules_hint_payload['dc_hint'] = None
+        rules_hint_payload['outcome_deferred'] = False
+        rules_hint_payload['reason'] = 'Pre-DM helper marked no roll needed'
+        rules_hint_payload.pop('roll_gate', None)
+        rules_hint_payload.pop('remaining_player_ids', None)
+        rules_hint_payload['roll_requirement_cleared'] = veto
+
+        rules_hint = safe_json_loads(turn.rules_hint, {})
+        rules_hint = rules_hint if isinstance(rules_hint, dict) else {}
+        rules_hint.update(
+            {
+                'requires_roll': False,
+                'roll_type': None,
+                'dc_hint': None,
+                'outcome_deferred': False,
+                'reason': 'Pre-DM helper marked no roll needed',
+                'roll_requirement_cleared': veto,
+            }
+        )
+        rules_hint.pop('roll_gate', None)
+        rules_hint.pop('remaining_player_ids', None)
+        turn.rules_hint = safe_json_dumps(rules_hint, {})
+
+        metadata = safe_json_loads(turn.metadata_json, {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        metadata.pop('roll_gate', None)
+        metadata['roll_requirement_cleared'] = veto
+        state_pipeline = metadata.get(STATE_PIPELINE_METADATA_KEY)
+        if isinstance(state_pipeline, dict):
+            state_pipeline['rollRequirementCleared'] = veto
+            dm_context = state_pipeline.get('dmContextPacket')
+            if isinstance(dm_context, dict):
+                dm_context['pendingRolls'] = []
+                dm_context['rollRequirementCleared'] = veto
+            pre_validation = state_pipeline.get('preDmValidation')
+            if isinstance(pre_validation, dict) and pre_validation.get('pendingRolls'):
+                pre_validation['pendingRolls'] = []
+        turn.metadata_json = safe_json_dumps(metadata, {})
+
+        dm_context_packet = pre_pipeline_result.get('dmContextPacket')
+        if isinstance(dm_context_packet, dict):
+            dm_context_packet['pendingRolls'] = []
+            dm_context_packet['rollRequirementCleared'] = veto
+
     def process(self, command: TurnCommand):
         with session_turn_coordinator.serialized(command.session_id) as wait_ms:
             if wait_ms >= 1.0:
@@ -1310,6 +1447,14 @@ class TurnEngine:
                     clarification_requests=clarification_requests,
                 )
                 return
+            pre_dm_roll_veto = self._pre_dm_roll_veto(pre_pipeline_result, rules_hint_payload)
+            if pre_dm_roll_veto:
+                self._clear_turn_roll_requirement_from_pre_dm_veto(
+                    turn=turn,
+                    rules_hint_payload=rules_hint_payload,
+                    veto=pre_dm_roll_veto,
+                    pre_pipeline_result=pre_pipeline_result,
+                )
             rules_hint_payload = augment_rules_hint_with_state_packet(
                 rules_hint_payload,
                 pre_pipeline_result.get('dmContextPacket') or {},
@@ -1921,7 +2066,12 @@ class TurnEngine:
                 session_id=turn.session_id,
             )
 
-        if turn.requires_roll and turn.roll_value is None and not self.response_mentions_roll_request(dm_response_text):
+        if (
+            turn.requires_roll
+            and turn.roll_value is None
+            and not self._dm_response_requests_roll(dm_response_text)
+            and not self._dm_response_explains_no_roll_needed(dm_response_text)
+        ):
             injected_prompt = self.build_roll_prompt(
                 RuleHint(
                     requires_roll=True,
@@ -2076,8 +2226,55 @@ class TurnEngine:
                         metadata_payload['error'] = stream_error
                     turn_obj.metadata_json = safe_json_dumps(metadata_payload, {})
 
-                roll_gate_payload = self._roll_gate_for_turn(turn_obj, campaign, dm_response_text)
-                if roll_gate_payload:
+                dm_explains_no_roll = (
+                    stream_error is None
+                    and turn_obj.roll_value is None
+                    and self._dm_response_explains_no_roll_needed(dm_response_text)
+                    and not self._dm_response_requests_roll(dm_response_text)
+                )
+                roll_gate_payload = None if dm_explains_no_roll else self._roll_gate_for_turn(
+                    turn_obj,
+                    campaign,
+                    dm_response_text,
+                )
+                if dm_explains_no_roll and turn_obj.requires_roll:
+                    turn_obj.requires_roll = False
+                    turn_obj.rule_type = None
+                    turn_obj.outcome_status = 'resolved'
+                    turn.requires_roll = False
+                    turn.rule_type = None
+                    turn.outcome_status = 'resolved'
+                    metadata_payload = safe_json_loads(turn_obj.metadata_json, {})
+                    metadata_payload = metadata_payload if isinstance(metadata_payload, dict) else {}
+                    metadata_payload.pop('roll_gate', None)
+                    metadata_payload['roll_requirement_cleared'] = {
+                        'reason': 'dm_explained_no_roll_needed',
+                        'original_rule_type': rules_hint_payload.get('roll_type'),
+                        'original_reason': rules_hint_payload.get('reason'),
+                    }
+                    turn_obj.metadata_json = safe_json_dumps(metadata_payload, {})
+                    rules_hint_payload['requires_roll'] = False
+                    rules_hint_payload['roll_type'] = None
+                    rules_hint_payload['dc_hint'] = None
+                    rules_hint_payload['outcome_deferred'] = False
+                    rules_hint_payload['reason'] = 'DM explained no roll was needed'
+                    rules_hint_payload.pop('roll_gate', None)
+                    rules_hint_payload.pop('remaining_player_ids', None)
+                    rules_hint = safe_json_loads(turn_obj.rules_hint, {})
+                    rules_hint = rules_hint if isinstance(rules_hint, dict) else {}
+                    rules_hint.update(
+                        {
+                            'requires_roll': False,
+                            'roll_type': None,
+                            'dc_hint': None,
+                            'outcome_deferred': False,
+                            'reason': 'DM explained no roll was needed',
+                        }
+                    )
+                    rules_hint.pop('roll_gate', None)
+                    rules_hint.pop('remaining_player_ids', None)
+                    turn_obj.rules_hint = safe_json_dumps(rules_hint, {})
+                elif roll_gate_payload:
                     rule_type = roll_gate_payload.get('rule_type') or turn_obj.rule_type or 'check'
                     turn_obj.requires_roll = True
                     turn_obj.rule_type = rule_type

@@ -3,7 +3,7 @@
   "packId": "original_fantasy.road_of_unremembered_kings",
   "title": "The Road of Unremembered Kings",
   "version": "1.0.0",
-  "description": "An original LOTR-inspired heroic-fantasy campaign for AIDM. In the western roadlands, travelers vanish from an ancient road that was once built to protect the weak. The company must uncover why the road ward has awakened, restore the names of forgotten guardians, and decide whether the last road-stone should be renewed, destroyed, hidden, or claimed.",
+  "description": "An original heroic-fantasy campaign for AIDM about memory, mercy, and ancient protection gone wrong. In the western roadlands, travelers vanish from an old road once built to protect the weak. The party must uncover why the road ward has awakened, restore the names of forgotten guardians, and decide whether the last road-stone should be renewed, destroyed, hidden, or claimed.",
   "world": {
     "name": "The Western Roadlands",
     "description": "A grounded heroic-fantasy borderland of old roads, rain-dark inns, broken watch-posts, burial hills, hidden valleys, and scattered settlements that survive by trade and courage. Great powers are distant. The story belongs to ordinary travelers, wardens, masons, rangers, and forgotten dead whose oaths still echo under stone."
@@ -46,7 +46,7 @@
       "description": "Rain taps on the inn shutters as the settlement gathers around a caravan that should have carried drivers, guards, and winter goods. The wagons are intact. The horses do not look panicked. But the ledger on the driver's bench has been ruined: every traveler's name has been cut out in black strokes.",
       "visibleDetails": [
         "One wagon bell rings three times though no hand touches it.",
-        "The wheel rims are wet with marsh water despite the road being dry for miles behind the caravan.",
+        "The wheel rims are packed with cold road-mud that does not match any track near the inn.",
         "A cloth-wrapped chip of pale stone rests beneath the driver's bench.",
         "A faint ash mark stains the rear signboard where the caravan route was written."
       ],
@@ -110,7 +110,7 @@
       ],
       "description": "A weathered road of old stone, mud, half-buried milestones, and leaning signposts. At night, its distances change. A bridge may appear whole under moonlight and broken again by dawn.",
       "playerSummary": "The changing road where milestones move, paths loop, and pale lanterns appear in the fog.",
-      "gmNotes": "This location can absorb detours. If players leave the road, show the ward's influence through animal behavior, false tracks, impossible echoes, and road-stones appearing in fields or marshes."
+      "gmNotes": "This location can absorb detours. If players leave the road, show the ward's influence through animal behavior, false tracks, impossible echoes, and road-stones appearing in fields, ditches, or forgotten lanes."
     },
     {
       "id": "loc_waystation_scratched_names",
@@ -239,9 +239,9 @@
       "questIds": [
         "quest_road_unremembered_kings"
       ],
-      "playerSummary": "The stablehand who heard whispers inside the empty wagons and saw wet wheel rims from a marsh road the caravan never took.",
+      "playerSummary": "The stablehand who heard whispers inside the empty wagons and saw cold road-mud on wheels that should have been dry.",
       "knows": [
-        "The wagon wheels were wet with marsh water.",
+        "The wagon wheels were packed with cold road-mud from a track the caravan should never have touched.",
         "One horse had a white dust handprint on its neck.",
         "The driver's bench held a cloth-wrapped stone fragment.",
         "The caravan bell rang three times before the horses stopped."
@@ -532,6 +532,181 @@
       "role": "early_enemy_pressure",
       "difficulty": "low_to_moderate",
       "description": "Frightened people, bought blades, failed guards, and criminals marked with ash-signs that help them pass through parts of the broken ward.",
+      "descriptionShort": "Road thieves with ash-signed passes who strike to steal names, ledgers, and road-stone fragments.",
+      "descriptionLong": "Ashmarked Cutthroats are not a faceless bandit wall. They are frightened hirelings, failed guards, and desperate criminals carrying little ash marks that let them cross parts of the broken ward. In combat they feint, separate, steal, and run. A good scene with them should feel like a messy theft under bad weather, not a stand-up duel.",
+      "creatureType": "humanoid",
+      "creatureTypeName": "Ash-Signed Mercenary Cell",
+      "visualTags": [
+        "ashmark",
+        "road_thief",
+        "ambusher",
+        "cowardly",
+        "fragment_hunter"
+      ],
+      "level": 2,
+      "challengeTier": "standard",
+      "size": "medium",
+      "stats": {
+        "maxHp": 18,
+        "armorClass": 13,
+        "strength": 10,
+        "dexterity": 15,
+        "constitution": 12,
+        "intelligence": 11,
+        "wisdom": 10,
+        "charisma": 12
+      },
+      "movement": {
+        "walk": 30,
+        "climb": 20
+      },
+      "senses": {
+        "passivePerception": 12
+      },
+      "abilities": [
+        {
+          "id": "ashmarked_hooked_road_knife",
+          "name": "Hooked Road-Knife",
+          "type": "attack",
+          "description": "A hooked blade meant to drag cloaks, packs, reins, and road-stone satchels out of position.",
+          "actionCost": "action",
+          "range": "melee",
+          "targetType": "single",
+          "cooldown": "none",
+          "attackBonus": 4,
+          "damage": {
+            "dice": "1d6+2",
+            "type": "slashing"
+          },
+          "conditionsApplied": [
+            "off_balance"
+          ],
+          "aiUseWhen": [
+            "target carries a visible clue or road-stone fragment",
+            "target is isolated or protecting a witness"
+          ]
+        },
+        {
+          "id": "ashmarked_feint_sign",
+          "name": "Ashmark Feint",
+          "type": "special",
+          "description": "A cutthroat flashes a false ward-sign and points toward a fake threat, buying one brutal heartbeat to reposition or grab a clue.",
+          "actionCost": "bonus_action",
+          "range": "near",
+          "targetType": "single",
+          "cooldown": "once_per_combat",
+          "save": {
+            "ability": "wis",
+            "dc": 12,
+            "effectOnSuccess": "none"
+          },
+          "conditionsApplied": [
+            "distracted"
+          ],
+          "aiUseWhen": [
+            "outnumbered",
+            "needs to disengage",
+            "ally is stealing a fragment"
+          ]
+        },
+        {
+          "id": "ashmarked_snatch_fragment",
+          "name": "Snatch the Fragment",
+          "type": "special",
+          "description": "The cell attempts to cut a strap, hook a pouch, or pass a stolen object hand-to-hand before fleeing.",
+          "actionCost": "action",
+          "range": "touch",
+          "targetType": "single",
+          "cooldown": "turn",
+          "save": {
+            "ability": "dex",
+            "dc": 13,
+            "effectOnSuccess": "none"
+          },
+          "conditionsApplied": [
+            "item_threatened"
+          ],
+          "aiUseWhen": [
+            "road-stone fragment is exposed",
+            "ledger or name-list is exposed",
+            "escape route is open"
+          ]
+        }
+      ],
+      "behavior": {
+        "intelligenceProfile": "trained",
+        "combatRole": "skirmisher",
+        "primaryGoal": "steal_item",
+        "secondaryGoals": [
+          "survive",
+          "escape",
+          "delay_party"
+        ],
+        "aggression": 42,
+        "selfPreservation": 82,
+        "morale": 38,
+        "discipline": 46,
+        "cruelty": 35,
+        "loyalty": 24,
+        "fleeThreshold": 45,
+        "surrenderThreshold": 30,
+        "targetPriority": [
+          "carrying_desired_item",
+          "isolated",
+          "lowest_armor",
+          "wounded"
+        ],
+        "tactics": [
+          "Open with cover, bad weather, or a false road sign rather than a frontal charge.",
+          "One cutthroat pressures the visible defender while another tries to snatch the clue.",
+          "Break and run once the theft fails, a leader drops, or a true Roadwarden name is spoken."
+        ],
+        "personalityTags": [
+          "desperate",
+          "superstitious",
+          "paid_not_loyal",
+          "quick_to_bargain"
+        ],
+        "speechStyle": "Blunt threats, nervous jokes, and repeated warnings that the Scribe can erase worse than death.",
+        "specialBehaviorNotes": [
+          "They should expose who hired them through fear, mistakes, or bargaining.",
+          "They prefer theft, intimidation, and escape over killing.",
+          "If captured, one can reveal a route clue or a partial description of the Cinder Scribe."
+        ],
+        "survivalRules": {
+          "fightToDeath": false,
+          "fleeBelowHpPercent": 45,
+          "surrenderBelowMorale": 28,
+          "negotiateBelowMorale": 40,
+          "fleeIfLeaderDies": true,
+          "fleeIfOutnumbered": true,
+          "fleeIfAlone": true,
+          "protectSelfIfBloodied": true,
+          "notes": [
+            "A cutthroat who cannot steal the target should preserve themself and carry a warning back instead."
+          ]
+        }
+      },
+      "xpReward": 90,
+      "aiNarrationHints": [
+        "Make the fight about theft, rain, cover, panic, and the ashmark's eerie permission through the ward.",
+        "Let them fold into interrogation, bribery, or surrender as soon as the party shows control."
+      ],
+      "balance": {
+        "estimatedTier": "standard",
+        "targetTier": "standard",
+        "estimatedDamagePerRound": 6,
+        "estimatedDurability": 18,
+        "estimatedControlStrength": 2,
+        "reviewed": true,
+        "warnings": [
+          "Use as a cell of two to four enemies; one stat block represents the average member."
+        ],
+        "balanceAdjustments": [
+          "For level 1 parties, remove Ashmark Feint or reduce the group by one cutthroat.",
+          "For stronger parties, add a hidden archer using the same behavior but far range."
+        ]
+      },
       "tactics": [
         "Avoid fair fights.",
         "Ambush from ditches, rain, broken walls, and false road signs.",
@@ -562,6 +737,191 @@
       "role": "travel_danger",
       "difficulty": "variable",
       "description": "Small ghostly lights that move along the road at night. Some guide travelers away from danger. Others lead them into the ward's false refuge.",
+      "descriptionShort": "Ghost-lights that lure, guide, split, and test travelers on behalf of the wounded road ward.",
+      "descriptionLong": "Pale Lanterns are a navigation hazard with a will. Some are protective remnants; others have learned the false refuge's logic and steer exhausted travelers into traps that feel merciful. In combat they should manipulate distance, fear, and memory rather than brawl.",
+      "creatureType": "fey",
+      "creatureTypeName": "Ward-Lantern Remnant",
+      "visualTags": [
+        "ghost_light",
+        "road_lure",
+        "false_refuge",
+        "voice_mimic",
+        "not_quite_hostile"
+      ],
+      "level": 2,
+      "challengeTier": "standard",
+      "size": "tiny",
+      "stats": {
+        "maxHp": 16,
+        "armorClass": 14,
+        "strength": 4,
+        "dexterity": 17,
+        "constitution": 10,
+        "intelligence": 12,
+        "wisdom": 15,
+        "charisma": 16
+      },
+      "movement": {
+        "fly": 40
+      },
+      "senses": {
+        "darkvision": 60,
+        "passivePerception": 14
+      },
+      "resistances": [
+        "cold",
+        "necrotic",
+        "psychic"
+      ],
+      "immunities": [
+        "poison"
+      ],
+      "abilities": [
+        {
+          "id": "pale_lantern_lure",
+          "name": "Lantern-Lure",
+          "type": "spell",
+          "description": "The lantern speaks in a familiar voice and offers a shortcut that only feels safe.",
+          "actionCost": "action",
+          "range": "near",
+          "targetType": "single",
+          "cooldown": "once_per_combat",
+          "save": {
+            "ability": "wis",
+            "dc": 13,
+            "effectOnSuccess": "none"
+          },
+          "conditionsApplied": [
+            "charmed",
+            "drawn_aside"
+          ],
+          "aiUseWhen": [
+            "target is tired or afraid",
+            "party is split",
+            "the lantern wants a traveler to follow"
+          ]
+        },
+        {
+          "id": "pale_lantern_cold_wick",
+          "name": "Cold Wick",
+          "type": "attack",
+          "description": "A white flame gutters inside the target's reflection, numbing muscle and memory.",
+          "actionCost": "action",
+          "range": "far",
+          "targetType": "single",
+          "cooldown": "none",
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d6+2",
+            "type": "psychic"
+          },
+          "conditionsApplied": [
+            "memory_chill"
+          ],
+          "aiUseWhen": [
+            "target refuses the lure violently",
+            "target threatens a helpful lantern",
+            "needs to slow pursuit"
+          ]
+        },
+        {
+          "id": "pale_lantern_split_the_road",
+          "name": "Split the Road",
+          "type": "special",
+          "description": "The lantern shows each traveler a slightly different road, pulling the group out of formation.",
+          "actionCost": "action",
+          "range": "area",
+          "targetType": "multiple",
+          "cooldown": "recharge_5_6",
+          "save": {
+            "ability": "wis",
+            "dc": 12,
+            "effectOnSuccess": "reduced_effect"
+          },
+          "conditionsApplied": [
+            "separated",
+            "frightened"
+          ],
+          "aiUseWhen": [
+            "party is clustered",
+            "escape route needs to open",
+            "the false refuge is nearby"
+          ]
+        }
+      ],
+      "behavior": {
+        "intelligenceProfile": "alien",
+        "combatRole": "controller",
+        "primaryGoal": "delay_party",
+        "secondaryGoals": [
+          "capture_target",
+          "test_party",
+          "protect_location"
+        ],
+        "aggression": 28,
+        "selfPreservation": 68,
+        "morale": 70,
+        "discipline": 30,
+        "cruelty": 18,
+        "loyalty": 60,
+        "fleeThreshold": 35,
+        "surrenderThreshold": 0,
+        "targetPriority": [
+          "isolated",
+          "spellcaster",
+          "wounded",
+          "nearest"
+        ],
+        "tactics": [
+          "Use voice mimicry and impossible shortcuts before direct harm.",
+          "Split scouts or stragglers, then offer a bargain or a warning.",
+          "Withdraw into fog if addressed by oath, song, bell, or a true missing name."
+        ],
+        "personalityTags": [
+          "curious",
+          "mourning",
+          "literal",
+          "tempting"
+        ],
+        "speechStyle": "Soft borrowed voices, half-finished directions, and questions that sound like remembered promises.",
+        "specialBehaviorNotes": [
+          "Not every lantern wants to harm the party.",
+          "A respectful approach can turn the encounter into guidance instead of combat.",
+          "Violence should make the road feel more confused, not merely more hostile."
+        ],
+        "survivalRules": {
+          "fightToDeath": false,
+          "fleeBelowHpPercent": 25,
+          "surrenderBelowMorale": 0,
+          "negotiateBelowMorale": 50,
+          "fleeIfOutnumbered": true,
+          "fleeIfAlone": false,
+          "protectSelfIfBloodied": true,
+          "notes": [
+            "A lantern that is badly hurt dims and retreats toward the nearest ward-stone."
+          ]
+        }
+      },
+      "xpReward": 100,
+      "aiNarrationHints": [
+        "Frame them as moving geography and memory, with light reflected in puddles, windows, and eyes.",
+        "Offer nonviolent exits through calm questions, names, songs, and anchored travel."
+      ],
+      "balance": {
+        "estimatedTier": "standard",
+        "targetTier": "standard",
+        "estimatedDamagePerRound": 5,
+        "estimatedDurability": 16,
+        "estimatedControlStrength": 5,
+        "reviewed": true,
+        "warnings": [
+          "Use one or two lanterns unless the party has strong anti-charm tools."
+        ],
+        "balanceAdjustments": [
+          "For a travel-only scene, remove Cold Wick and run them as a hazard.",
+          "For a harder scene, let Split the Road create an environmental obstacle instead of extra damage."
+        ]
+      },
       "tactics": [
         "Appear when characters are tired, lost, grieving, or afraid.",
         "Mimic voices of missing loved ones or companions.",
@@ -592,6 +952,197 @@
       "role": "major_moral_encounter",
       "difficulty": "moderate_to_hard",
       "description": "Ancient guardians whose names were erased. They still defend the road but no longer understand whom they are defending or why.",
+      "descriptionShort": "Oath-bound dead who block passage, demand names, and punish lies because their own identities were stolen.",
+      "descriptionLong": "Name-Eaten Roadwardens are not generic undead soldiers. They are legal memory and grief wearing armor. They can be fought, bypassed, restored, appeased, or turned into allies. Their best scenes pressure the party's honesty and respect for the dead before initiative ever matters.",
+      "creatureType": "undead",
+      "creatureTypeName": "Erased Roadwarden Spirit",
+      "visualTags": [
+        "nameless",
+        "oathbound",
+        "dead_guardian",
+        "bridge_blocker",
+        "restorable"
+      ],
+      "level": 4,
+      "challengeTier": "hard",
+      "size": "medium",
+      "stats": {
+        "maxHp": 52,
+        "armorClass": 16,
+        "strength": 16,
+        "dexterity": 10,
+        "constitution": 16,
+        "intelligence": 11,
+        "wisdom": 14,
+        "charisma": 13
+      },
+      "movement": {
+        "walk": 25
+      },
+      "senses": {
+        "darkvision": 60,
+        "passivePerception": 14
+      },
+      "resistances": [
+        "cold",
+        "necrotic",
+        "slashing"
+      ],
+      "immunities": [
+        "poison"
+      ],
+      "abilities": [
+        {
+          "id": "roadwarden_oathblade",
+          "name": "Oathblade of Forgotten Stone",
+          "type": "attack",
+          "description": "A spectral road-sword rings like a toll bell and strikes hardest against oathbreakers and liars.",
+          "actionCost": "action",
+          "range": "melee",
+          "targetType": "single",
+          "cooldown": "none",
+          "attackBonus": 6,
+          "damage": {
+            "dice": "1d10+4",
+            "type": "radiant"
+          },
+          "conditionsApplied": [
+            "marked_by_oath"
+          ],
+          "aiUseWhen": [
+            "target lied to the ward",
+            "target forced passage",
+            "target attacked first"
+          ]
+        },
+        {
+          "id": "roadwarden_name_demand",
+          "name": "Name-Demand",
+          "type": "special",
+          "description": "The Roadwarden demands a true name, oath, or lawful proof of passage. False answers chill the heart.",
+          "actionCost": "action",
+          "range": "area",
+          "targetType": "multiple",
+          "cooldown": "once_per_combat",
+          "save": {
+            "ability": "wis",
+            "dc": 14,
+            "effectOnSuccess": "reduced_effect"
+          },
+          "damage": {
+            "dice": "1d6",
+            "type": "psychic"
+          },
+          "conditionsApplied": [
+            "frightened",
+            "oath_tested"
+          ],
+          "aiUseWhen": [
+            "party tries to pass without parley",
+            "a character gives a false name",
+            "the ward needs judgment"
+          ]
+        },
+        {
+          "id": "roadwarden_roadblock_vigil",
+          "name": "Roadblock Vigil",
+          "type": "reaction",
+          "description": "Broken milestones and dead banners rise to bar a rushing or fleeing creature.",
+          "actionCost": "reaction",
+          "range": "near",
+          "targetType": "single",
+          "cooldown": "turn",
+          "save": {
+            "ability": "str",
+            "dc": 14,
+            "effectOnSuccess": "none"
+          },
+          "conditionsApplied": [
+            "restrained"
+          ],
+          "aiUseWhen": [
+            "target tries to bypass the guardian",
+            "target runs with a stolen name",
+            "bridge or gate must be held"
+          ]
+        }
+      ],
+      "behavior": {
+        "intelligenceProfile": "trained",
+        "combatRole": "tank",
+        "primaryGoal": "protect_location",
+        "secondaryGoals": [
+          "test_party",
+          "delay_party",
+          "negotiate"
+        ],
+        "aggression": 60,
+        "selfPreservation": 15,
+        "morale": 82,
+        "discipline": 88,
+        "cruelty": 12,
+        "loyalty": 92,
+        "fleeThreshold": 0,
+        "surrenderThreshold": 0,
+        "targetPriority": [
+          "blocking_escape",
+          "last_damaged_by",
+          "leader",
+          "nearest"
+        ],
+        "tactics": [
+          "Start as a legal challenge: demand names, oaths, tokens, or proof.",
+          "Punish lies and desecration, but pause when shown restored names or old road signs.",
+          "Hold choke points and protect weaker spirits instead of chasing fleeing travelers."
+        ],
+        "personalityTags": [
+          "stern",
+          "grieving",
+          "literal",
+          "honorable",
+          "restorable"
+        ],
+        "speechStyle": "Formal commands with missing-name gaps, as if every sentence has a burned hole in it.",
+        "specialBehaviorNotes": [
+          "Treat a restored name as a major tactical interruption.",
+          "They can grant passage or become allies if the party honors the old oath.",
+          "They should not execute helpless characters unless the party has badly corrupted the ward."
+        ],
+        "survivalRules": {
+          "fightToDeath": false,
+          "fleeBelowHpPercent": 0,
+          "surrenderBelowMorale": 0,
+          "negotiateBelowMorale": 70,
+          "fleeIfLeaderDies": false,
+          "fleeIfOutnumbered": false,
+          "fleeIfAlone": false,
+          "protectSelfIfBloodied": false,
+          "notes": [
+            "A Roadwarden reduced to 0 HP can collapse into a name-token instead of being destroyed.",
+            "A spoken true name should weaken or pacify the spirit before lethal resolution."
+          ]
+        }
+      },
+      "xpReward": 260,
+      "aiNarrationHints": [
+        "Make the Roadwardens feel like law, grief, and armor, not ordinary skeletons.",
+        "Prompt parley, proof, ritual respect, and alternate passage before defaulting to a kill fight."
+      ],
+      "balance": {
+        "estimatedTier": "hard",
+        "targetTier": "hard",
+        "estimatedDamagePerRound": 10,
+        "estimatedDurability": 52,
+        "estimatedControlStrength": 4,
+        "reviewed": true,
+        "warnings": [
+          "A full patrol can overwhelm low-level parties; one Roadwarden plus terrain is enough for a moral gate."
+        ],
+        "balanceAdjustments": [
+          "If Caelorn is restored, reduce max HP by 15 or remove Name-Demand.",
+          "If the party lies repeatedly, add one minion spirit using only Oathblade."
+        ]
+      },
       "tactics": [
         "Block roads and bridges.",
         "Demand names, oaths, and proof of lawful passage.",
@@ -623,6 +1174,190 @@
       "role": "wilderness_pressure",
       "difficulty": "low_to_moderate",
       "description": "Wolves, crows, deer, and road-beasts marked by white dust, ash lines, or strange stillness. They behave like guardians, scouts, or warnings rather than normal predators.",
+      "descriptionShort": "Dust-marked animals and road-beasts that herd travelers away from corrupted paths and toward buried clues.",
+      "descriptionLong": "Wardbound Beasts are the living road's warning system. Their attacks are usually herding behavior, panic, or corrupted obedience rather than hunger. They should create pressure in the wild while also giving observant players clues about which routes the ward still considers safe.",
+      "creatureType": "beast",
+      "creatureTypeName": "Dust-Marked Ward Beast",
+      "visualTags": [
+        "white_dust",
+        "road_beast",
+        "guardian_animal",
+        "warning",
+        "corruption_sensitive"
+      ],
+      "level": 2,
+      "challengeTier": "standard",
+      "size": "medium",
+      "stats": {
+        "maxHp": 22,
+        "armorClass": 13,
+        "strength": 14,
+        "dexterity": 15,
+        "constitution": 13,
+        "intelligence": 4,
+        "wisdom": 14,
+        "charisma": 7
+      },
+      "movement": {
+        "walk": 40,
+        "climb": 20
+      },
+      "senses": {
+        "darkvision": 60,
+        "passivePerception": 14
+      },
+      "abilities": [
+        {
+          "id": "wardbeast_dust_marked_pounce",
+          "name": "Dust-Marked Pounce",
+          "type": "attack",
+          "description": "The beast slams or snaps with unnatural timing, knocking prey away from a forbidden path.",
+          "actionCost": "action",
+          "range": "melee",
+          "targetType": "single",
+          "cooldown": "none",
+          "attackBonus": 5,
+          "damage": {
+            "dice": "1d8+3",
+            "type": "piercing"
+          },
+          "save": {
+            "ability": "str",
+            "dc": 12,
+            "effectOnSuccess": "none"
+          },
+          "conditionsApplied": [
+            "prone"
+          ],
+          "aiUseWhen": [
+            "target ignores a warning circle",
+            "target carries corrupted ash",
+            "target approaches a forbidden road"
+          ]
+        },
+        {
+          "id": "wardbeast_warning_circle",
+          "name": "Warning Circle",
+          "type": "special",
+          "description": "The beast circles, claws a white-dust boundary, and forces travelers to choose whether to cross knowingly.",
+          "actionCost": "free",
+          "range": "area",
+          "targetType": "multiple",
+          "cooldown": "once_per_combat",
+          "save": {
+            "ability": "wis",
+            "dc": 12,
+            "effectOnSuccess": "none"
+          },
+          "conditionsApplied": [
+            "warned",
+            "hesitating"
+          ],
+          "aiUseWhen": [
+            "combat can still be avoided",
+            "party is about to miss a clue",
+            "ward wants to redirect rather than kill"
+          ]
+        },
+        {
+          "id": "wardbeast_drive_from_road",
+          "name": "Drive from the Road",
+          "type": "attack",
+          "description": "A coordinated rush pushes the target sideways into brambles, a ditch, or a safer hidden track.",
+          "actionCost": "action",
+          "range": "melee",
+          "targetType": "single",
+          "cooldown": "turn",
+          "attackBonus": 4,
+          "damage": {
+            "dice": "1d6+2",
+            "type": "bludgeoning"
+          },
+          "conditionsApplied": [
+            "pushed",
+            "slowed"
+          ],
+          "aiUseWhen": [
+            "target stands on corrupted road",
+            "party needs to be driven toward a clue",
+            "the beast is protecting young or territory"
+          ]
+        }
+      ],
+      "behavior": {
+        "intelligenceProfile": "animal",
+        "combatRole": "beast",
+        "primaryGoal": "test_party",
+        "secondaryGoals": [
+          "protect_location",
+          "defend_young",
+          "survive"
+        ],
+        "aggression": 48,
+        "selfPreservation": 70,
+        "morale": 55,
+        "discipline": 35,
+        "cruelty": 5,
+        "loyalty": 65,
+        "fleeThreshold": 35,
+        "surrenderThreshold": 0,
+        "targetPriority": [
+          "carrying_desired_item",
+          "isolated",
+          "nearest",
+          "last_damaged_by"
+        ],
+        "tactics": [
+          "Circle and warn before attacking unless corrupted ash is present.",
+          "Use pounces to push characters off the wrong road rather than focus-fire kills.",
+          "Flee or become guides if the party removes ash marks, offers food, or uses nature magic."
+        ],
+        "personalityTags": [
+          "watchful",
+          "ward_bound",
+          "panicked_by_scribe",
+          "protective"
+        ],
+        "speechStyle": "Animal body language: circling, white-dust paw marks, lowered antlers, and sudden stillness.",
+        "specialBehaviorNotes": [
+          "A calm animal-handling approach should reveal a route clue.",
+          "Beasts attack the Cinder Scribe's marks more fiercely than ordinary travelers.",
+          "They should make wilderness navigation feel reactive."
+        ],
+        "survivalRules": {
+          "fightToDeath": false,
+          "fleeBelowHpPercent": 35,
+          "surrenderBelowMorale": 0,
+          "negotiateBelowMorale": 30,
+          "fleeIfLeaderDies": true,
+          "fleeIfOutnumbered": true,
+          "fleeIfAlone": true,
+          "protectSelfIfBloodied": true,
+          "notes": [
+            "If bloodied, a beast should retreat toward the safest ward-sign unless defending young."
+          ]
+        }
+      },
+      "xpReward": 110,
+      "aiNarrationHints": [
+        "Use animal movement as information: circling a danger, blocking a corrupted path, or leading toward memorial stones.",
+        "Reward nonlethal choices with clues, safer travel, or a future beast warning."
+      ],
+      "balance": {
+        "estimatedTier": "standard",
+        "targetTier": "standard",
+        "estimatedDamagePerRound": 7,
+        "estimatedDurability": 22,
+        "estimatedControlStrength": 3,
+        "reviewed": true,
+        "warnings": [
+          "Do not run too many at once unless the scene is about escape or herding."
+        ],
+        "balanceAdjustments": [
+          "For a lower-threat scene, run them as a skill challenge with Warning Circle only.",
+          "For a chase, give one beast advantage through terrain instead of adding damage."
+        ]
+      },
       "tactics": [
         "Circle the party without immediately attacking.",
         "Drive travelers away from forbidden paths.",
@@ -653,6 +1388,211 @@
       "role": "conditional_mini_boss",
       "difficulty": "hard",
       "description": "A corrupted command-form of the Roadwarden oath, wearing a helm full of black ash and carrying a cracked horn that can seal roads behind the living.",
+      "descriptionShort": "A corrupted command-spirit that weaponizes the Roadwarden oath, seals exits, and punishes broken promises.",
+      "descriptionLong": "The Hollow Marshal is the old road's command structure without mercy. Use him as optional consequence content or a weakened echo.",
+      "creatureType": "undead",
+      "creatureTypeName": "Corrupted Roadwarden Command-Spirit",
+      "visualTags": [
+        "black_ash_helm",
+        "cracked_horn",
+        "road_sealer",
+        "oath_punisher",
+        "conditional_boss"
+      ],
+      "level": 6,
+      "challengeTier": "deadly",
+      "size": "medium",
+      "stats": {
+        "maxHp": 88,
+        "armorClass": 17,
+        "strength": 18,
+        "dexterity": 10,
+        "constitution": 18,
+        "intelligence": 13,
+        "wisdom": 16,
+        "charisma": 16
+      },
+      "movement": {
+        "walk": 30
+      },
+      "senses": {
+        "darkvision": 90,
+        "passivePerception": 16
+      },
+      "resistances": [
+        "cold",
+        "necrotic",
+        "slashing"
+      ],
+      "immunities": [
+        "poison"
+      ],
+      "abilities": [
+        {
+          "id": "hollow_marshal_verdict",
+          "name": "Marshal's Verdict",
+          "type": "attack",
+          "description": "The Marshal names a broken promise and strikes with the weight of every abandoned road oath.",
+          "actionCost": "action",
+          "range": "melee",
+          "targetType": "single",
+          "cooldown": "none",
+          "attackBonus": 8,
+          "damage": {
+            "dice": "2d8+4",
+            "type": "necrotic"
+          },
+          "conditionsApplied": [
+            "oath_burdened"
+          ],
+          "aiUseWhen": [
+            "target broke an oath",
+            "target destroyed a road sign",
+            "target is blocking command"
+          ]
+        },
+        {
+          "id": "hollow_marshal_cracked_horn_command",
+          "name": "Cracked Horn Command",
+          "type": "special",
+          "description": "The cracked horn calls lesser spirits and turns retreating roads into locked gates.",
+          "actionCost": "action",
+          "range": "area",
+          "targetType": "multiple",
+          "cooldown": "recharge_5_6",
+          "save": {
+            "ability": "wis",
+            "dc": 15,
+            "effectOnSuccess": "reduced_effect"
+          },
+          "damage": {
+            "dice": "1d8",
+            "type": "thunder"
+          },
+          "conditionsApplied": [
+            "frightened",
+            "road_sealed"
+          ],
+          "aiUseWhen": [
+            "party attempts retreat",
+            "lesser spirits need direction",
+            "the Marshal wants to lock the battlefield"
+          ]
+        },
+        {
+          "id": "hollow_marshal_seal_the_road_behind",
+          "name": "Seal the Road Behind",
+          "type": "lair",
+          "description": "Milestones rotate, ditches fill with black ash, and the last safe road closes behind the living.",
+          "actionCost": "action",
+          "range": "area",
+          "targetType": "multiple",
+          "cooldown": "once_per_combat",
+          "save": {
+            "ability": "str",
+            "dc": 15,
+            "effectOnSuccess": "reduced_effect"
+          },
+          "conditionsApplied": [
+            "restrained",
+            "route_cut_off"
+          ],
+          "aiUseWhen": [
+            "party has a clear escape route",
+            "final valley pursuit begins",
+            "Cinder Scribe needs more ritual time"
+          ]
+        },
+        {
+          "id": "hollow_marshal_name_proof_retreat",
+          "name": "Name-Proof Retreat",
+          "type": "reaction",
+          "description": "If a true Roadwarden name is spoken with proof, the Marshal staggers, loses cohesion, or withdraws rather than dying cleanly.",
+          "actionCost": "reaction",
+          "range": "self",
+          "targetType": "self",
+          "cooldown": "once_per_combat",
+          "aiUseWhen": [
+            "party restores Caelorn",
+            "true name is spoken with evidence",
+            "Marshal is bloodied and the oath is challenged"
+          ]
+        }
+      ],
+      "behavior": {
+        "intelligenceProfile": "tactical",
+        "combatRole": "leader",
+        "primaryGoal": "protect_location",
+        "secondaryGoals": [
+          "delay_party",
+          "complete_ritual",
+          "kill_party"
+        ],
+        "aggression": 78,
+        "selfPreservation": 25,
+        "morale": 90,
+        "discipline": 95,
+        "cruelty": 48,
+        "loyalty": 82,
+        "fleeThreshold": 0,
+        "surrenderThreshold": 0,
+        "targetPriority": [
+          "leader",
+          "spellcaster",
+          "last_damaged_by",
+          "blocking_escape"
+        ],
+        "tactics": [
+          "Use the horn to seal exits before committing to heavy melee.",
+          "Command lesser spirits and terrain to split the party from restored-name evidence.",
+          "Retreat, weaken, or collapse if Caelorn's restored name is proven."
+        ],
+        "personalityTags": [
+          "merciless",
+          "oath_driven",
+          "hollow_authority",
+          "weakened_by_true_names"
+        ],
+        "speechStyle": "Parade-ground commands, repeated charges, and verdicts with the names burned out.",
+        "specialBehaviorNotes": [
+          "This is consequence content, not a required miniboss.",
+          "If the party honored the Roadwardens, weaken or remove him.",
+          "Breaking the horn cuts road and spirit control."
+        ],
+        "survivalRules": {
+          "fightToDeath": false,
+          "fleeBelowHpPercent": 0,
+          "surrenderBelowMorale": 0,
+          "negotiateBelowMorale": 85,
+          "fleeIfLeaderDies": false,
+          "fleeIfOutnumbered": false,
+          "fleeIfAlone": false,
+          "protectSelfIfBloodied": false,
+          "notes": [
+          "True-name proof, a broken horn, or a restored oath should transform the fight."
+          ]
+        }
+      },
+      "xpReward": 720,
+      "aiNarrationHints": [
+        "Use command pressure: sealed roads, horn calls, verdicts, and collapsing exits.",
+        "Restored names and a broken horn should visibly weaken him."
+      ],
+      "balance": {
+        "estimatedTier": "deadly",
+        "targetTier": "hard",
+        "estimatedDamagePerRound": 16,
+        "estimatedDurability": 88,
+        "estimatedControlStrength": 7,
+        "reviewed": true,
+        "warnings": [
+          "Do not force him into a clean Roadwarden-restoration path."
+        ],
+        "balanceAdjustments": [
+          "If Caelorn was restored, remove Cracked Horn Command or start him bloodied.",
+          "For low-level parties, run him as a chase hazard."
+        ]
+      },
       "tactics": [
         "Command lesser spirits.",
         "Seal roads behind the party.",
@@ -672,7 +1612,7 @@
         "The final valley is the center of the ward's judgment."
       ],
       "failureOutcome": "The party reaches the finale pursued by hostile spirits or with the road actively resisting them.",
-      "gmNotes": "Use this enemy if the party destroys, ignores, or badly mishandles the Roadwardens. If Caelorn was restored, the Hollow Marshal should be weakened or absent."
+      "gmNotes": "Use if the party mishandles the Roadwardens. If Caelorn was restored, weaken or remove him."
     },
     {
       "id": "enemy_cinder_scribe",
@@ -681,31 +1621,257 @@
       "role": "final_boss",
       "difficulty": "boss",
       "description": "A burned-voiced keeper of stolen names who seeks to bind the last road-stone and turn an ancient protection into a controlled road of obedience.",
+      "descriptionShort": "A name-thief ritual boss who turns roads, bargains, and stolen oaths into weapons.",
+      "descriptionLong": "A persuasive ritual boss who weaponizes names, ink, roads, and bargains. Victory can be social, ritual, tactical, or lethal.",
+      "creatureType": "humanoid",
+      "creatureTypeName": "Ash-Ink Oathbreaker Ritualist",
+      "visualTags": [
+        "ash_ink",
+        "name_thief",
+        "ritual_boss",
+        "persuasive",
+        "road_binder",
+        "binding_quill"
+      ],
+      "level": 7,
+      "challengeTier": "boss",
+      "size": "medium",
+      "stats": {
+        "maxHp": 110,
+        "armorClass": 16,
+        "strength": 9,
+        "dexterity": 14,
+        "constitution": 16,
+        "intelligence": 18,
+        "wisdom": 15,
+        "charisma": 18
+      },
+      "movement": {
+        "walk": 30
+      },
+      "senses": {
+        "darkvision": 60,
+        "passivePerception": 15
+      },
+      "resistances": [
+        "necrotic",
+        "psychic"
+      ],
+      "abilities": [
+        {
+          "id": "cinder_scribe_ash_ink_bolt",
+          "name": "Ash-Ink Bolt",
+          "type": "spell",
+          "description": "Burning script lashes out and leaves a name smoking in the air.",
+          "actionCost": "action",
+          "range": "far",
+          "targetType": "single",
+          "cooldown": "none",
+          "attackBonus": 7,
+          "damage": {
+            "dice": "2d8+4",
+            "type": "necrotic"
+          },
+          "conditionsApplied": [
+            "ash_marked"
+          ],
+          "aiUseWhen": [
+            "ritual is threatened"
+          ]
+        },
+        {
+          "id": "cinder_scribe_erase_the_name",
+          "name": "Erase the Name",
+          "type": "spell",
+          "description": "A stolen syllable blurs how allies remember the target.",
+          "actionCost": "action",
+          "range": "near",
+          "targetType": "single",
+          "cooldown": "once_per_combat",
+          "save": {
+            "ability": "wis",
+            "dc": 15,
+            "effectOnSuccess": "reduced_effect"
+          },
+          "damage": {
+            "dice": "2d6",
+            "type": "psychic"
+          },
+          "conditionsApplied": [
+            "frightened",
+            "name_blurred"
+          ],
+          "aiUseWhen": [
+            "target has true-name proof"
+          ]
+        },
+        {
+          "id": "cinder_scribe_bind_the_road_stone",
+          "name": "Bind the Road-Stone",
+          "type": "lair",
+          "description": "Ash-ink threads turn safe paths into obedience lines.",
+          "actionCost": "action",
+          "range": "area",
+          "targetType": "multiple",
+          "cooldown": "recharge_5_6",
+          "save": {
+            "ability": "wis",
+            "dc": 15,
+            "effectOnSuccess": "reduced_effect"
+          },
+          "damage": {
+            "dice": "1d10",
+            "type": "force"
+          },
+          "conditionsApplied": [
+            "restrained",
+            "route_bound"
+          ],
+          "aiUseWhen": [
+            "party clusters near the road-stone"
+          ]
+        },
+        {
+          "id": "cinder_scribe_bargain_of_perfect_safety",
+          "name": "Bargain of Perfect Safety",
+          "type": "special",
+          "description": "The Scribe offers perfect safety if a living voice consents.",
+          "actionCost": "action",
+          "range": "near",
+          "targetType": "single",
+          "cooldown": "once_per_combat",
+          "save": {
+            "ability": "cha",
+            "dc": 15,
+            "effectOnSuccess": "none"
+          },
+          "conditionsApplied": [
+            "tempted",
+            "charmed"
+          ],
+          "aiUseWhen": [
+            "Scribe needs living consent"
+          ]
+        },
+        {
+          "id": "cinder_scribe_legendary_move_a_door",
+          "name": "Legendary: Move a Door",
+          "type": "legendary",
+          "description": "A door, gap, or road-bend moves far enough to ruin a plan.",
+          "actionCost": "legendary_action",
+          "range": "area",
+          "targetType": "single",
+          "cooldown": "turn",
+          "save": {
+            "ability": "dex",
+            "dc": 14,
+            "effectOnSuccess": "none"
+          },
+          "conditionsApplied": [
+            "repositioned",
+            "isolated"
+          ],
+          "aiUseWhen": [
+            "target reaches binding quill"
+          ]
+        }
+      ],
+      "behavior": {
+        "intelligenceProfile": "genius",
+        "combatRole": "boss",
+        "primaryGoal": "complete_ritual",
+        "secondaryGoals": [
+          "negotiate",
+          "capture_target",
+          "survive",
+          "delay_party"
+        ],
+        "aggression": 58,
+        "selfPreservation": 72,
+        "morale": 86,
+        "discipline": 90,
+        "cruelty": 55,
+        "loyalty": 8,
+        "fleeThreshold": 20,
+        "surrenderThreshold": 8,
+        "targetPriority": [
+          "ritual_interruptor",
+          "carrying_desired_item",
+          "spellcaster",
+          "healer",
+          "leader"
+        ],
+        "tactics": [
+          "Frame control as mercy, then punish refusal with road control.",
+          "Protect the ritual, quill, and ledger before chasing kills.",
+          "Reposition dissenters and interrupt plans.",
+          "Retreat or bargain if his true name is proven early."
+        ],
+        "personalityTags": [
+          "persuasive",
+          "controlling",
+          "afraid_of_chaos",
+          "name_thief"
+        ],
+        "speechStyle": "Patient, intimate, and legalistic; he offers safety like a contract and violence like a correction.",
+        "specialBehaviorNotes": [
+          "He should try to win consent, not just initiative.",
+          "Quill, ink, ledger, and road-stone are tactical objects.",
+          "His fear of free roads can shake his confidence."
+        ],
+        "survivalRules": {
+          "fightToDeath": false,
+          "fleeBelowHpPercent": 18,
+          "surrenderBelowMorale": 8,
+          "negotiateBelowMorale": 55,
+          "fleeIfLeaderDies": false,
+          "fleeIfOutnumbered": false,
+          "fleeIfAlone": false,
+          "protectSelfIfBloodied": true,
+          "notes": [
+            "Before consent, he offers compromise or escapes with one stolen name."
+          ]
+        }
+      },
+      "xpReward": 1400,
+      "aiNarrationHints": [
+        "Every attack should argue for safety through obedience; restored names weaken control."
+      ],
+      "balance": {
+        "estimatedTier": "boss",
+        "targetTier": "boss",
+        "estimatedDamagePerRound": 18,
+        "estimatedDurability": 110,
+        "estimatedControlStrength": 9,
+        "reviewed": true,
+        "warnings": [
+          "Use consent, terrain, clocks, and stolen names."
+        ],
+        "balanceAdjustments": [
+          "Each restored Roadwarden name can reduce control DCs by 1.",
+          "Destroying the quill disables Erase the Name until he uses the ledger."
+        ]
+      },
       "tactics": [
-        "Use stolen names to command spirits.",
-        "Offer bargains before and during conflict.",
-        "Try to make a player willingly bind the road.",
-        "Turn paths, doors, and distances against the party.",
-        "Use minions, ash marks, and ritual pressure.",
-        "Retreat if his true name is spoken before the final rite is stable."
+        "Command spirits with stolen names.",
+        "Offer bargains and seek willing consent.",
+        "Turn roads, doors, minions, ash marks, and ritual pressure against the party."
       ],
       "nonCombatOptions": [
         "speak_true_name_with_proof",
         "restore_enough_roadwarden_names",
         "turn_followers_against_him",
         "destroy_binding_quill",
-        "spill_ash_ink",
         "renew_original_road_oath",
-        "refuse_offer_of_perfect_safety",
-        "claim_ward_temporarily_then_release_it"
+        "refuse_offer_of_perfect_safety"
       ],
       "reveals": [
-        "He believes free roads are dangerous because freedom allowed betrayal.",
-        "He needs living consent for the strongest version of the binding.",
-        "He sees himself as correcting mercy, not destroying it."
+        "He fears free roads because freedom allowed betrayal.",
+        "He needs living consent for the strongest binding.",
+        "He thinks he is correcting mercy, not destroying it."
       ],
-      "failureOutcome": "A full failure may leave the ward partially corrupted, isolate a settlement, trap some travelers, mark a party member's name on the stone, or allow the Cinder Scribe to escape.",
-      "gmNotes": "The Cinder Scribe should be persuasive first and violent second. His ideology is safety through control."
+      "failureOutcome": "Failure may corrupt the ward, isolate a settlement, trap travelers, mark a party name, or let him escape.",
+      "gmNotes": "Persuasive first, violent second: safety through control."
     }
   ],
   "encounters": [
@@ -724,7 +1890,14 @@
       "enemyIds": [
         "enemy_ashmarked_cutthroats"
       ],
-      "description": "As the company investigates the empty caravan, ashmarked cutthroats attempt to steal the road-stone fragment or silence a witness.",
+      "enemyGroups": [
+        {
+          "enemyId": "enemy_ashmarked_cutthroats",
+          "count": 2,
+          "role": "opening_theft_cell"
+        }
+      ],
+      "description": "As the party investigates the empty caravan, ashmarked cutthroats attempt to steal the road-stone fragment or silence a witness.",
       "setup": "Rain thickens, the lantern tower gutters, and one of the wagon doors creaks open though nobody stands beside it.",
       "stakes": "If the fragment is stolen, it appears later in enemy hands, raising the ward corruption level.",
       "completion": {
@@ -738,7 +1911,7 @@
           "success"
         ]
       },
-      "gmNotes": "This encounter is optional pressure. If the opening already has enough tension, delay the cutthroats until the road or waystation."
+      "gmNotes": "This encounter is optional pressure. For a four-player level 1 party, use two cutthroats as a theft cell: one grabs attention while the other tries to snatch the fragment. Use one only for a solo/fragile party, or three if the party has extra allies or obvious control."
     },
     {
       "id": "enc_pale_lantern_detour",
@@ -789,7 +1962,7 @@
         "enemy_ashmarked_cutthroats",
         "enemy_wardbound_beasts"
       ],
-      "description": "At the ruined waystation, the company finds the scratched memorial wall while ashmarked agents return to erase the remaining names.",
+      "description": "At the ruined waystation, the party finds the scratched memorial wall while ashmarked agents return to erase the remaining names.",
       "setup": "A chisel rings once from inside the ruin, then stops. The hearth is cold, but fresh stone dust lies beneath the memorial.",
       "stakes": "If the remaining names are lost, the Roadwardens are harder to restore and the Hollow Marshal is more likely to appear.",
       "completion": {
@@ -856,7 +2029,7 @@
         "enemy_name_eaten_roadwardens"
       ],
       "description": "If the Roadwardens remain hostile or the ward corruption rises too high, the Hollow Marshal seals paths behind the party and drives them toward the final valley under pressure.",
-      "setup": "A cracked horn sounds behind the company. The road they just walked is gone, replaced by a wall of standing stones.",
+      "setup": "A cracked horn sounds behind the party. The road they just walked is gone, replaced by a wall of standing stones.",
       "stakes": "The party may reach the finale exhausted, separated, or with fewer ritual options unless they break the Marshal's command.",
       "completion": {
         "anyOf": [
@@ -965,7 +2138,7 @@
         "quest_road_unremembered_kings"
       ],
       "summary": "The party learns that the final road-stone can be renewed, broken, hidden, claimed, or corrupted.",
-      "playerSummary": "Prepare for the final choice and decide what kind of solution the company wants.",
+      "playerSummary": "Prepare for the final choice and decide what kind of solution the party wants.",
       "tone": "preparation_and_difficult_truth",
       "gmNotes": "This is the clearest place to explain the possible endings, but do not make it the only place players can learn them."
     },
@@ -989,7 +2162,7 @@
         "quest_road_unremembered_kings"
       ],
       "summary": "The road's fate is revealed through the return, loss, haunting, or transformation of travel in the region.",
-      "playerSummary": "See the consequences of the company's choices.",
+      "playerSummary": "See the consequences of the party's choices.",
       "tone": "quiet_aftermath",
       "gmNotes": "End with ordinary people reacting. The emotional resolution should return to the settlement and the missing travelers."
     }
@@ -1085,7 +2258,7 @@
         "anyOf": [
           "The party reaches the waystation by following the road.",
           "The party follows a pale lantern and reaches a shortcut or vision.",
-          "The party bypasses the road through ridge, marsh, field, or culvert.",
+          "The party bypasses the road through ridge, field, ditch, or culvert.",
           "The party tracks ashmarked agents toward the final valley."
         ],
         "summary": "The party learns the road is changing and chooses a route deeper into the mystery."
@@ -1195,7 +2368,7 @@
           "The party speaks or reconstructs the original road oath.",
           "The party fights through the Roadwardens.",
           "The party retreats respectfully and finds another route.",
-          "The party bypasses the cairns through ridge, marsh, culvert, or enemy route."
+          "The party bypasses the cairns through ridge, field, culvert, or enemy route."
         ],
         "summary": "The party gets past the Roadwardens, with consequences based on method."
       },

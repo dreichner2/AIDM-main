@@ -21,6 +21,9 @@ def build_pre_dm_prompt(*, current_state: dict[str, Any], player_message: str, r
     return (
         'Return JSON with key declaredActions, where each action has id, type, actorId, confidence, '
         'sourceText, requiresDMResolution, and type-specific fields.\n'
+        'You may also include rollRequirement with requiresRoll false, reason, and confidence when the player is only speaking, '
+        'asking, reporting past danger, warning someone, planning, or giving context and no dice roll should be required. '
+        'Do not use rollRequirement to force a roll; omit it when uncertain.\n'
         'Allowed types: inventory.consume, inventory.use, inventory.equip, inventory.unequip, inventory.transfer, currency.transfer, combat.attack, generic.intent.\n\n'
         'For inventory.consume, inventory.use, and inventory.transfer, include quantity; use 1 when exactly one item is indicated by context. '
         'For inventory.equip and inventory.unequip, include itemName or itemId and include slot only when the player explicitly names a slot such as main_hand, off_hand, helmet, hood, body_armor, clothing, or underwear. '

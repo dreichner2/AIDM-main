@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import subprocess
 import sys
 
-from aidm_server.services.campaign_pack_linter import lint_campaign_pack_manifest
+from aidm_server.creatures.schemas import normalize_creature_definition
+from aidm_server.services.campaign_pack_linter import lint_campaign_pack_file, lint_campaign_pack_manifest
+
+
+EXAMPLES_DIR = Path(__file__).resolve().parents[1] / 'docs' / 'examples'
 
 
 def _valid_pack() -> dict:
@@ -86,3 +91,69 @@ def test_campaign_pack_linter_cli_prints_json(tmp_path, app):
     payload = json.loads(result.stdout)
     assert payload['ok'] is True
     assert payload['summary']['packId'] == 'lint_pack'
+
+
+def test_example_campaign_packs_lint_and_have_reachable_checkpoints(app):
+    example_paths = sorted(EXAMPLES_DIR.glob('*.json'))
+    assert example_paths
+
+    results = {}
+    with app.app_context():
+        for pack_path in example_paths:
+            results[pack_path.name] = lint_campaign_pack_file(pack_path, workspace_id='owner')
+
+    blocking_issues = {
+        name: result['issues']
+        for name, result in results.items()
+        if not result['ok']
+    }
+    assert blocking_issues == {}
+
+    unreachable = {}
+    for name, result in results.items():
+        graph = result['graph']
+        missing = sorted(set(graph['nodes']) - set(graph['reachable']))
+        if missing:
+            unreachable[name] = missing
+    assert unreachable == {}
+
+
+def test_road_of_unremembered_kings_example_has_clean_authoring_surface(app):
+    pack_path = EXAMPLES_DIR / 'the_road_of_unremembered_kings_campaign.json'
+    pack = json.loads(pack_path.read_text(encoding='utf-8'))
+
+    with app.app_context():
+        result = lint_campaign_pack_file(pack_path, workspace_id='owner')
+
+    assert result['ok'] is True
+    assert result['issues'] == []
+    assert result['summary']['packId'] == 'original_fantasy.road_of_unremembered_kings'
+    assert result['summary']['counts']['checkpoints'] == 7
+    assert result['summary']['counts']['encounters'] == 6
+    assert result['preview']['preview']['starting_location_id'] == 'loc_lantern_post_inn'
+    assert result['preview']['preview']['starting_quest_id'] == 'quest_road_unremembered_kings'
+
+    opening_encounter = next(encounter for encounter in pack['encounters'] if encounter['id'] == 'enc_empty_caravan_pressure')
+    assert opening_encounter['enemyGroups'] == [
+        {
+            'enemyId': 'enemy_ashmarked_cutthroats',
+            'count': 2,
+            'role': 'opening_theft_cell',
+        }
+    ]
+
+    enemies = pack['enemies']
+    assert len(enemies) == 6
+    for enemy in enemies:
+        normalized = normalize_creature_definition(enemy, source='campaign_pack')
+        assert normalized['stats']['maxHp'] > 10
+        assert normalized['stats']['armorClass'] > 11
+        assert len(normalized['abilities']) >= 3
+        assert normalized['abilities'][0]['name'] != 'Strike'
+        assert normalized['behavior']['tactics'] != ['Use the strongest available attack against the best target.']
+        assert normalized['balance']['reviewed'] is True
+
+    cinder_scribe = next(enemy for enemy in enemies if enemy['id'] == 'enemy_cinder_scribe')
+    normalized_scribe = normalize_creature_definition(cinder_scribe, source='campaign_pack')
+    assert normalized_scribe['challengeTier'] == 'boss'
+    assert normalized_scribe['behavior']['primaryGoal'] == 'complete_ritual'

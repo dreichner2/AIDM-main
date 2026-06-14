@@ -139,6 +139,16 @@ export type ActivePlayer = {
   class_?: string | null
   char_class?: string | null
   is_typing?: boolean
+  health?: ActivePlayerHealth | null
+}
+
+export type ActivePlayerHealthTone = 'uninjured' | 'wounded' | 'badly-wounded' | 'dead'
+
+export type ActivePlayerHealth = {
+  tone: ActivePlayerHealthTone
+  label: string
+  currentHp: number
+  maxHp: number
 }
 
 export type TurnControlMode = 'free' | 'spotlight' | 'structured'

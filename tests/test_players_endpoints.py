@@ -1,9 +1,53 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from aidm_server.database import db
 from aidm_server.game_state.models import player_character_from_model
 from aidm_server.models import DmTurn, Player, PlayerAction, Session, TurnEvent, safe_json_dumps, safe_json_loads
+from aidm_server.starting_inventory import starting_inventory_for_class
 from tests.helpers import seed_world_campaign_player_session
+
+
+def _class_catalog_choices() -> list[str]:
+    catalog_path = Path(__file__).resolve().parents[1] / 'aidm_frontend' / 'src' / 'classCatalog.ts'
+    choices: list[str] = []
+    in_class = False
+    in_subclasses = False
+    class_name = ''
+    subclasses: list[str] = []
+    for line in catalog_path.read_text().splitlines():
+        stripped = line.strip()
+        if stripped == 'cls({':
+            in_class = True
+            in_subclasses = False
+            class_name = ''
+            subclasses = []
+            continue
+        if not in_class:
+            continue
+        if not class_name:
+            match = re.search(r"name: '([^']+)'", line)
+            if match:
+                class_name = match.group(1)
+            continue
+        if stripped.startswith('subclasses: ['):
+            in_subclasses = True
+            continue
+        if in_subclasses:
+            if stripped.startswith('],'):
+                in_subclasses = False
+                continue
+            match = re.search(r"\['([^']+)'", line)
+            if match:
+                subclasses.append(match.group(1))
+            continue
+        if stripped == '}),':
+            choices.append(class_name)
+            choices.extend(f'{class_name} - {subclass}' for subclass in subclasses)
+            in_class = False
+    return choices
 
 
 def test_create_player_accepts_structured_inventory_and_get_returns_parsed_inventory(client, app):
@@ -148,12 +192,51 @@ def test_create_player_assigns_starting_inventory_from_extended_class(client, ap
     assert player_response.status_code == 200
     inventory = {item['name']: item for item in player_response.get_json()['inventory']}
 
+    assert inventory['Long Rifle']['type'] == 'weapon'
+    assert inventory['Long Rifle']['equipped'] is True
+    assert inventory['Long Rifle']['slot'] == 'two_hands'
     assert inventory['Pistol']['type'] == 'weapon'
-    assert inventory['Pistol']['equipped'] is True
-    assert inventory['Pistol']['slot'] == 'main_hand'
+    assert inventory['Pistol'].get('equipped', False) is False
     assert inventory['Leather Armor']['equipped'] is True
-    assert inventory['Ammunition']['quantity'] == 20
+    assert inventory['Ammunition']['quantity'] == 30
     assert "Gunsmith's Tools" in inventory
+
+
+def test_starting_inventory_covers_catalog_classes_and_subclasses():
+    missing = [
+        class_choice
+        for class_choice in _class_catalog_choices()
+        if not starting_inventory_for_class(class_choice)
+    ]
+
+    assert missing == []
+
+
+def test_subclass_starting_inventory_changes_role_defining_gear():
+    archer = {item['name']: item for item in starting_inventory_for_class('Fighter - Archer')}
+    shieldbearer = {item['name']: item for item in starting_inventory_for_class('Fighter - Shieldbearer')}
+    emt = {item['name']: item for item in starting_inventory_for_class('Public Safety Officer - EMT')}
+    attorney = {item['name']: item for item in starting_inventory_for_class('Legal Professional - Defense Attorney')}
+    accountant = {item['name']: item for item in starting_inventory_for_class('Business Professional - Accountant')}
+
+    assert archer['Longbow']['equipped'] is True
+    assert archer['Longbow']['slot'] == 'two_hands'
+    assert archer['Arrow']['quantity'] == 20
+    assert archer['Shield'].get('equipped', False) is False
+    assert archer['Studded Leather Armor']['equipped'] is True
+
+    assert shieldbearer['Shield']['equipped'] is True
+    assert shieldbearer['Reinforced Armor']['equipped'] is True
+    assert shieldbearer['Armor Repair Kit']['type'] == 'tool'
+
+    assert emt['Medical Bag']['type'] == 'gear'
+    assert emt["Healer's Kit"]['type'] == 'tool'
+    assert 'Sidearm' not in emt
+
+    assert attorney['Legal Briefcase']['type'] == 'gear'
+    assert attorney['Case Files']['type'] == 'gear'
+    assert accountant['Laptop']['type'] == 'tool'
+    assert accountant['Ledger']['type'] == 'gear'
 
 
 def test_create_player_assigns_starting_spells_from_magical_class_and_race(client, app):

@@ -85,7 +85,17 @@ def _helper_enabled() -> bool:
 def _pre_payload_schema_valid(payload: dict[str, Any] | None) -> bool:
     if not isinstance(payload, dict):
         return False
-    known_keys = {'declaredActions', 'declared_actions', 'notes'}
+    known_keys = {
+        'declaredActions',
+        'declared_actions',
+        'notes',
+        'rollRequirement',
+        'roll_requirement',
+        'rollRequired',
+        'roll_required',
+        'requiresRoll',
+        'requires_roll',
+    }
     if not any(key in payload for key in known_keys):
         return False
     for key in ('declaredActions', 'declared_actions'):
@@ -385,6 +395,7 @@ def extract_pre_dm_actions(
     recent_timeline: list[dict[str, Any]],
     actor_id: str,
     action_intent: dict[str, Any] | None = None,
+    force_helper: bool = False,
 ) -> dict[str, Any]:
     intent_payload = _extract_from_action_intent(action_intent, actor_id=actor_id, player_message=player_message)
     if intent_payload:
@@ -393,7 +404,8 @@ def extract_pre_dm_actions(
             _empty_helper_debug(source='action_intent', reason='client_action_intent'),
         )
 
-    if not ACTIONABLE_PATTERN.search(player_message or ''):
+    helper_enabled = _helper_enabled()
+    if not ACTIONABLE_PATTERN.search(player_message or '') and not (force_helper and helper_enabled):
         return _attach_debug(
             {'declaredActions': [], 'notes': ['no_actionable_intent']},
             _empty_helper_debug(source='skipped', reason='no_actionable_intent'),
@@ -406,7 +418,6 @@ def extract_pre_dm_actions(
     helper_raw_text: str | None = None
     helper_raw_preview: str | None = None
     helper_error: str | None = None
-    helper_enabled = _helper_enabled()
     fallback_reason = 'helper_disabled' if not helper_enabled else 'helper_empty_actions'
     if helper_enabled:
         helper_attempted = True
@@ -456,7 +467,10 @@ def extract_pre_dm_actions(
         'fallbackReason': None,
     }
     normalized = normalize_pre_extraction(helper_payload, fallback_actor_id=actor_id)
-    if normalized['declaredActions']:
+    roll_requirement = normalized.get('rollRequirement') if isinstance(normalized.get('rollRequirement'), dict) else None
+    if helper_schema_valid and (
+        normalized['declaredActions'] or (roll_requirement and roll_requirement.get('requiresRoll') is False)
+    ):
         return _attach_debug(normalized, helper_debug)
 
     fallback = _heuristic_extract(player_message, actor_id=actor_id)

@@ -9,7 +9,7 @@ import aidm_server.game_state.extraction.pre_dm_action_extractor as pre_extracto
 import aidm_server.game_state.orchestration.turn_pipeline as turn_pipeline_module
 from aidm_server.game_state.extraction.post_dm_outcome_extractor import extract_post_dm_outcomes
 from aidm_server.game_state.extraction.pre_dm_action_extractor import extract_pre_dm_actions
-from aidm_server.game_state.extraction.schemas import normalize_post_extraction
+from aidm_server.game_state.extraction.schemas import normalize_post_extraction, normalize_pre_extraction
 from aidm_server.game_state.logging.state_log_builder import build_state_log
 from aidm_server.game_state.models import compact_state_for_extraction, display_actor_id
 from aidm_server.game_state.orchestration.turn_pipeline import post_dm_pipeline
@@ -724,6 +724,57 @@ def test_pre_dm_helper_debug_captures_raw_response(app, monkeypatch):
     assert result['debug']['helperRawText'] == helper_text
     assert result['debug']['helperParsed']['declaredActions'][0]['type'] == 'generic.intent'
     assert result['debug']['fallbackRan'] is False
+
+
+def test_pre_dm_helper_normalizes_roll_requirement_veto(app, monkeypatch):
+    helper_text = (
+        '{"declaredActions":[],"rollRequirement":{"requiresRoll":false,'
+        '"reason":"Player is reporting a past threat, not attempting an attack.",'
+        '"confidence":0.93},"notes":"dialogue only"}'
+    )
+
+    class FakeProvider:
+        def generate(self, _request):
+            return ProviderResponse(text=helper_text, provider='fake', model='fake-pre-helper')
+
+    monkeypatch.setattr(pre_extractor_module, 'get_helper_provider', lambda: FakeProvider())
+
+    with app.app_context():
+        app.config['AIDM_STATE_PIPELINE_HELPER_IN_TESTS'] = True
+        result = extract_pre_dm_actions(
+            current_state={},
+            player_message='I tell the dwarf people are trying to kill us for the stone.',
+            recent_timeline=[],
+            actor_id='player_1',
+            force_helper=True,
+        )
+
+    assert result['declaredActions'] == []
+    assert result['rollRequirement'] == {
+        'requiresRoll': False,
+        'reason': 'Player is reporting a past threat, not attempting an attack.',
+        'confidence': 0.93,
+    }
+    assert result['debug']['source'] == 'helper'
+    assert result['debug']['helperSchemaValid'] is True
+
+
+def test_normalize_pre_extraction_accepts_roll_required_aliases():
+    result = normalize_pre_extraction(
+        {
+            'declaredActions': [],
+            'rollRequired': False,
+            'rollReason': 'The message is dialogue context.',
+            'rollConfidence': 0.88,
+        },
+        fallback_actor_id='player_1',
+    )
+
+    assert result['rollRequirement'] == {
+        'requiresRoll': False,
+        'reason': 'The message is dialogue context.',
+        'confidence': 0.88,
+    }
 
 
 def test_pre_dm_helper_intent_description_becomes_summary(app, monkeypatch):
@@ -3714,6 +3765,63 @@ def test_post_dm_extracts_enemy_combat_damage_and_conditions(app):
     assert condition_change['participantId'] == 'enemy_wolf_1'
     assert condition_change['condition'] == 'frightened'
     assert 'heuristic_combat_outcomes' in result['notes']
+
+
+def test_post_dm_flee_heuristic_targets_nearest_enemy_reference(app):
+    state = _state()
+    state['combat'] = {
+        'status': 'active',
+        'round': 1,
+        'participants': [
+            {
+                'id': 'player_1',
+                'team': 'player',
+                'name': 'Kael',
+                'hp': {'current': 10, 'max': 20, 'temp': 0},
+                'conditions': [],
+                'isAlive': True,
+                'isConscious': True,
+            },
+            {
+                'id': 'enemy_pale_lanterns_1',
+                'team': 'enemy',
+                'name': 'Pale Lanterns',
+                'hp': {'current': 16, 'max': 16, 'temp': 0},
+                'conditions': [],
+                'isAlive': True,
+                'isConscious': True,
+            },
+            {
+                'id': 'enemy_wardbound_beasts_2',
+                'team': 'enemy',
+                'name': 'Wardbound Beasts',
+                'hp': {'current': 3, 'max': 22, 'temp': 0},
+                'conditions': [],
+                'isAlive': True,
+                'isConscious': True,
+            },
+        ],
+        'battlefield': {'environmentType': 'yard'},
+        'flags': {},
+    }
+
+    result = post_extractor_module._heuristic_combat_changes(
+        state_before_dm=state,
+        dm_response=(
+            'Varin, the Pale Lanterns still burn above the gate, and the wounded '
+            'Wardbound Beast is trying to flee deeper through the mason\'s yard.'
+        ),
+        turn_id=17,
+        already_applied_changes=[],
+    )
+
+    fled_changes = [
+        change
+        for change in result
+        if change['type'] == 'combat.participant.update' and 'fled' in (change.get('conditions') or [])
+    ]
+    assert [change['participantId'] for change in fled_changes] == ['enemy_wardbound_beasts_2']
+    assert all(change['type'] != 'combat.end' for change in result)
 
 
 def test_post_dm_filters_helper_enemy_health_damage_and_updates_combat_participant(app, monkeypatch):

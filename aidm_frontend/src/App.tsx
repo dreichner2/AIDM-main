@@ -63,6 +63,7 @@ import {
   normalizeSpellbook,
   normalizeStats,
   normalizeXp,
+  numberValue,
   pendingRollNoticeFromTimeline,
   pendingRollOptionsFromTimeline,
   stringValue,
@@ -79,6 +80,8 @@ import './App.css'
 import type {
   AccountWorkspace,
   ActivePlayer,
+  ActivePlayerHealth,
+  ActivePlayerHealthTone,
   BetaSummary,
   Campaign,
   ClarificationRequest,
@@ -87,6 +90,7 @@ import type {
   Player,
   PlayerDetail,
   PlayerEquipmentUpdateResponse,
+  SessionState,
   SessionSummary,
   StreamingTurn,
   TimelineEntry,
@@ -115,6 +119,108 @@ const DiceRollDialog = lazy(loadDiceRollDialog)
 function preloadDiceRollDialog() {
   if (import.meta.env.MODE === 'test') return
   void loadDiceRollDialog()
+}
+
+const ACTIVE_PLAYER_HEALTH_LABELS: Record<ActivePlayerHealthTone, string> = {
+  uninjured: 'Uninjured',
+  wounded: 'Wounded',
+  'badly-wounded': 'Badly wounded',
+  dead: 'Dead',
+}
+
+function normalizedCharacterLookup(value: unknown) {
+  return stringValue(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+function numericSnapshotPlayerIds(record: Record<string, unknown>) {
+  const values = [record.playerId, record.player_id, record.playerID, record.id]
+  const ids = new Set<number>()
+  values.forEach((value) => {
+    if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+      ids.add(value)
+      return
+    }
+    const text = stringValue(value)
+    if (!text) return
+    const exactNumber = Number(text)
+    if (Number.isInteger(exactNumber) && exactNumber > 0) {
+      ids.add(exactNumber)
+      return
+    }
+    const playerIdMatch = text.match(/^player[_-](\d+)$/i)
+    if (playerIdMatch) {
+      const parsed = Number(playerIdMatch[1])
+      if (Number.isInteger(parsed) && parsed > 0) ids.add(parsed)
+    }
+  })
+  return ids
+}
+
+function snapshotPlayerName(record: Record<string, unknown>) {
+  return (
+    normalizedCharacterLookup(record.character_name) ||
+    normalizedCharacterLookup(record.characterName) ||
+    normalizedCharacterLookup(record.name)
+  )
+}
+
+function healthStatusFromSnapshotPlayer(record: Record<string, unknown>): ActivePlayerHealth | null {
+  const health = isRecord(record.health) ? record.health : {}
+  const stats = isRecord(record.stats) ? record.stats : {}
+  const currentHp = numberValue(
+    health.currentHp ??
+      health.current_hp ??
+      health.current ??
+      health.hp ??
+      health.hitPoints ??
+      health.hit_points ??
+      record.currentHp ??
+      record.current_hp,
+  )
+  const maxHp = numberValue(
+    health.maxHp ??
+      health.max_hp ??
+      health.max ??
+      health.maximum ??
+      health.maxHitPoints ??
+      health.max_hit_points ??
+      record.maxHp ??
+      record.max_hp ??
+      stats.maxHp ??
+      stats.max_hp,
+  )
+  if (currentHp === null || maxHp === null || maxHp <= 0) return null
+  let tone: ActivePlayerHealthTone = 'wounded'
+  if (currentHp <= 0) {
+    tone = 'dead'
+  } else if (currentHp >= maxHp) {
+    tone = 'uninjured'
+  } else if (currentHp / maxHp <= 0.25) {
+    tone = 'badly-wounded'
+  }
+  return {
+    tone,
+    label: ACTIVE_PLAYER_HEALTH_LABELS[tone],
+    currentHp,
+    maxHp,
+  }
+}
+
+function activePlayersWithSnapshotHealth(activePlayers: ActivePlayer[], snapshot: unknown): ActivePlayer[] {
+  if (!activePlayers.length || !isRecord(snapshot) || !Array.isArray(snapshot.playerCharacters)) {
+    return activePlayers
+  }
+  const snapshotPlayers = snapshot.playerCharacters.filter(isRecord)
+  if (!snapshotPlayers.length) return activePlayers
+  return activePlayers.map((player) => {
+    const playerName = normalizedCharacterLookup(player.character_name)
+    const snapshotPlayer =
+      snapshotPlayers.find((record) => numericSnapshotPlayerIds(record).has(player.id)) ??
+      snapshotPlayers.find((record) => Boolean(playerName) && snapshotPlayerName(record) === playerName)
+    const health = snapshotPlayer ? healthStatusFromSnapshotPlayer(snapshotPlayer) : null
+    if (!health && player.health === undefined) return player
+    return { ...player, health }
+  })
 }
 
 function isPhoneLayoutViewport() {
@@ -308,6 +414,42 @@ function readInitialSelection(scope: string, name: SelectionStorageName, queryNa
 
 function pluralize(value: number, singular: string, plural = `${singular}s`) {
   return `${value} ${value === 1 ? singular : plural}`
+}
+
+function playerAdventureName(player: Player) {
+  return player.character_name?.trim() || player.name?.trim() || `Player ${player.player_id}`
+}
+
+function buildStartAdventurePrompt({
+  campaign,
+  sessionName,
+  players,
+  sessionState,
+}: {
+  campaign: Campaign | null
+  sessionName: string
+  players: Player[]
+  sessionState: SessionState | null
+}) {
+  const playerNames = Array.from(new Set(players.map(playerAdventureName).filter(Boolean)))
+  const roster = playerNames.length
+    ? `${pluralize(playerNames.length, 'player')} named: ${playerNames.join(', ')}`
+    : '0 players named yet'
+  const location = sessionState?.current_location || campaign?.location || ''
+  const quest = sessionState?.current_quest || campaign?.current_quest || ''
+  const context = [
+    `Campaign: ${campaign?.title || 'Untitled campaign'}.`,
+    `Session: ${sessionName}.`,
+    `The table currently has ${roster}.`,
+    location ? `Current location: ${location}.` : '',
+    quest ? `Current quest: ${quest}.` : '',
+  ].filter(Boolean)
+
+  return [
+    'Please narrate the opening scene for this campaign.',
+    ...context,
+    'Start the adventure by telling the players where they are, what they know, what is happening right now, and what immediate choice or prompt is in front of them.',
+  ].join(' ')
 }
 
 function worldDeleteErrorMessage(error: unknown) {
@@ -711,6 +853,10 @@ function App() {
   const dmResponseBlocking = Boolean(streamingTurn && !turnStatusAllowsNextSend(streamingTurnStatus))
   const pendingRollOptions = useMemo(() => pendingRollOptionsFromTimeline(timeline), [timeline])
   const turnControlSnapshot = isRecord(sessionState?.state_snapshot) ? sessionState.state_snapshot : null
+  const activePlayersWithHealth = useMemo(
+    () => activePlayersWithSnapshotHealth(activePlayers, turnControlSnapshot),
+    [activePlayers, turnControlSnapshot],
+  )
   const turnControl = useMemo(
     () => turnControlWithActiveName(turnControlFromSnapshot(turnControlSnapshot), activePlayers),
     [activePlayers, turnControlSnapshot],
@@ -869,6 +1015,16 @@ function App() {
     turnControl,
     pushError,
   })
+  const startAdventure = useCallback(() => {
+    submitAction(
+      buildStartAdventurePrompt({
+        campaign,
+        sessionName: activeSessionName,
+        players,
+        sessionState,
+      }),
+    )
+  }, [activeSessionName, campaign, players, sessionState, submitAction])
 
   const updateTurnControl = useCallback(
     (mode: TurnControlMode, activePlayerId?: number | null, source: TurnControlSource = 'manual') => {
@@ -1112,6 +1268,8 @@ function App() {
     closeCreateCampaignDialog,
     createCampaignError,
     createCampaignForm,
+    createCampaignPackOptions,
+    createCampaignPackOptionsPending,
     createCampaignOpen,
     createCampaignPending,
     openCreateCampaignDialog,
@@ -1142,6 +1300,12 @@ function App() {
     setInspectorTab,
     pushError,
   })
+  const selectedCreateCampaignPack = useMemo(
+    () =>
+      createCampaignPackOptions.find((pack) => pack.pack_id === createCampaignForm.packId) ??
+      null,
+    [createCampaignForm.packId, createCampaignPackOptions],
+  )
 
   const openCampaignPackImportDialog = useCallback(() => {
     rememberDialogTrigger()
@@ -2990,7 +3154,7 @@ function App() {
         mainTab={mainTab}
         setMainTab={setMainTab}
         showMobilePresenceStrip={mobileViewport}
-        activePlayers={activePlayers}
+        activePlayers={activePlayersWithHealth}
         downloadSessionJson={downloadSessionJson}
         sessionImportPending={sessionImportPending}
         sessionImportInputRef={sessionImportInputRef}
@@ -3029,6 +3193,7 @@ function App() {
         canonFacts={canonFacts}
         clarificationRequest={clarificationRequest}
         resolveClarification={resolveClarification}
+        onStartAdventure={startAdventure}
         actionComposerProps={{
           actionInputRef,
           actionText,
@@ -3109,7 +3274,7 @@ function App() {
         characterAvatarSrc={characterAvatarSrc}
         xpProgress={xpProgress}
         playersCount={players.length}
-        activePlayers={activePlayers}
+        activePlayers={activePlayersWithHealth}
         selectedPlayerId={selectedPlayerId}
         loadPlayer={openCharacterJoinDialog}
         createDefaultPlayer={promptCreatePlayer}
@@ -4942,6 +5107,46 @@ function App() {
             </header>
             <form onSubmit={(event) => void submitCreateCampaign(event)}>
               <label>
+                Campaign Pack
+                <select
+                  value={createCampaignForm.packId}
+                  onChange={(event) => {
+                    const packId = event.target.value
+                    const pack = createCampaignPackOptions.find((item) => item.pack_id === packId)
+                    setCreateCampaignForm((current) => ({
+                      ...current,
+                      packId,
+                      title: pack ? pack.title : current.title,
+                      description: pack ? pack.description : current.description,
+                      worldId: pack ? '' : current.worldId || (campaignWorldId ? String(campaignWorldId) : ''),
+                      worldName: pack ? '' : current.worldName,
+                    }))
+                  }}
+                  disabled={createCampaignPending || createCampaignPackOptionsPending}
+                >
+                  <option value="">
+                    {createCampaignPackOptionsPending ? 'Loading packs...' : 'Start from scratch'}
+                  </option>
+                  {createCampaignPackOptions.map((pack) => (
+                    <option key={pack.pack_id} value={pack.pack_id}>
+                      {pack.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedCreateCampaignPack ? (
+                <div className="campaign-pack-starter-summary">
+                  <strong>{selectedCreateCampaignPack.title}</strong>
+                  <span>
+                    {selectedCreateCampaignPack.short_description ||
+                      selectedCreateCampaignPack.description}
+                  </span>
+                  {selectedCreateCampaignPack.world_name ? (
+                    <small>{selectedCreateCampaignPack.world_name}</small>
+                  ) : null}
+                </div>
+              ) : null}
+              <label>
                 Campaign Name
                 <input
                   autoFocus
@@ -4954,7 +5159,7 @@ function App() {
                     }))
                   }
                   placeholder="Ashes Beyond the Gate"
-                  disabled={createCampaignPending}
+                  disabled={createCampaignPending || Boolean(selectedCreateCampaignPack)}
                 />
               </label>
               <label>
@@ -4969,13 +5174,19 @@ function App() {
                   }
                   rows={3}
                   placeholder="Opening premise, party goal, or tone..."
-                  disabled={createCampaignPending}
+                  disabled={createCampaignPending || Boolean(selectedCreateCampaignPack)}
                 />
               </label>
               <label>
                 World
                 <select
-                  value={createCampaignForm.worldName.trim() ? '' : createCampaignForm.worldId}
+                  value={
+                    selectedCreateCampaignPack
+                      ? createCampaignForm.worldId
+                      : createCampaignForm.worldName.trim()
+                        ? ''
+                        : createCampaignForm.worldId
+                  }
                   onChange={(event) =>
                     setCreateCampaignForm((current) => ({
                       ...current,
@@ -4985,7 +5196,9 @@ function App() {
                   }
                   disabled={createCampaignPending}
                 >
-                  <option value="">Create a new world</option>
+                  <option value="">
+                    {selectedCreateCampaignPack ? 'Use pack world' : 'Create a new world'}
+                  </option>
                   {worldSelectOptions.map((world) => (
                     <option key={world.world_id} value={world.world_id}>
                       {world.name}
@@ -4993,24 +5206,27 @@ function App() {
                   ))}
                 </select>
               </label>
-              <label>
-                New World Name
-                <input
-                  value={createCampaignForm.worldName}
-                  onChange={(event) =>
-                    setCreateCampaignForm((current) => ({
-                      ...current,
-                      worldId: '',
-                      worldName: event.target.value,
-                    }))
-                  }
-                  placeholder="Crystal Reach"
-                  disabled={createCampaignPending}
-                />
-              </label>
+              {selectedCreateCampaignPack ? null : (
+                <label>
+                  New World Name
+                  <input
+                    value={createCampaignForm.worldName}
+                    onChange={(event) =>
+                      setCreateCampaignForm((current) => ({
+                        ...current,
+                        worldId: '',
+                        worldName: event.target.value,
+                      }))
+                    }
+                    placeholder="Crystal Reach"
+                    disabled={createCampaignPending}
+                  />
+                </label>
+              )}
               <p>
-                Select an existing world, or enter a new world name to create one for this
-                campaign.
+                {selectedCreateCampaignPack
+                  ? 'Use the pack world, or attach this campaign to an existing world.'
+                  : 'Select an existing world, or enter a new world name to create one for this campaign.'}
               </p>
               {createCampaignError ? (
                 <div className="dialog-error">{createCampaignError}</div>

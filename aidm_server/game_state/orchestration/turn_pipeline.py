@@ -1004,6 +1004,7 @@ def pre_dm_pipeline(
             recent_timeline=recent_timeline,
             actor_id=actor_id,
             action_intent=action_intent,
+            force_helper=_turn_awaits_player_roll(turn),
         )
     pre_validation = validate_declared_actions(
         state=state,

@@ -18,6 +18,18 @@ export type CreateCampaignForm = {
   description: string
   worldId: string
   worldName: string
+  packId: string
+}
+
+export type CampaignPackExample = {
+  pack_id: string
+  title: string
+  description: string
+  short_description: string
+  version?: string
+  schema_version?: string
+  source_filename?: string
+  world_name?: string | null
 }
 
 export type CampaignActionDialogState = {
@@ -56,6 +68,7 @@ const emptyCreateCampaignForm: CreateCampaignForm = {
   description: '',
   worldId: '',
   worldName: '',
+  packId: '',
 }
 
 function parsePositiveInt(value: string | null) {
@@ -88,11 +101,31 @@ export function useCampaignActions({
   const [createCampaignOpen, setCreateCampaignOpen] = useState(false)
   const [createCampaignPending, setCreateCampaignPending] = useState(false)
   const [createCampaignError, setCreateCampaignError] = useState('')
+  const [createCampaignPackOptions, setCreateCampaignPackOptions] = useState<CampaignPackExample[]>([])
+  const [createCampaignPackOptionsPending, setCreateCampaignPackOptionsPending] = useState(false)
   const [createCampaignForm, setCreateCampaignForm] = useState<CreateCampaignForm>(
     emptyCreateCampaignForm,
   )
   const [campaignActionDialog, setCampaignActionDialog] =
     useState<CampaignActionDialogState>(null)
+
+  const loadCreateCampaignPackOptions = useCallback(async () => {
+    setCreateCampaignPackOptionsPending(true)
+    try {
+      const response = await apiFetch<{ packs: CampaignPackExample[] }>(
+        baseUrl,
+        '/api/campaigns/example-packs',
+        auth,
+      )
+      setCreateCampaignPackOptions(Array.isArray(response.packs) ? response.packs : [])
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setCreateCampaignPackOptions([])
+      pushError('persistence', `Could not load campaign packs: ${message}`)
+    } finally {
+      setCreateCampaignPackOptionsPending(false)
+    }
+  }, [auth, baseUrl, pushError])
 
   const openCreateCampaignDialog = useCallback(() => {
     rememberDialogTrigger()
@@ -102,7 +135,8 @@ export function useCampaignActions({
     })
     setCreateCampaignError('')
     setCreateCampaignOpen(true)
-  }, [defaultWorldId, rememberDialogTrigger])
+    void loadCreateCampaignPackOptions()
+  }, [defaultWorldId, loadCreateCampaignPackOptions, rememberDialogTrigger])
 
   const closeCreateCampaignDialog = useCallback(() => {
     if (createCampaignPending) return
@@ -129,7 +163,8 @@ export function useCampaignActions({
       event?.preventDefault()
       const title = createCampaignForm.title.trim()
       const description = createCampaignForm.description.trim()
-      if (!title) {
+      const selectedPackId = createCampaignForm.packId.trim()
+      if (!selectedPackId && !title) {
         setCreateCampaignError('Campaign name is required.')
         return
       }
@@ -138,6 +173,39 @@ export function useCampaignActions({
       setCreateCampaignError('')
 
       try {
+        if (selectedPackId) {
+          const selectedWorldId = parsePositiveInt(createCampaignForm.worldId)
+          const importBody: { world_id?: number } = {}
+          if (selectedWorldId) {
+            importBody.world_id = selectedWorldId
+          }
+          const result = await apiFetch<{ campaign_id: number; session_id?: number }>(
+            baseUrl,
+            `/api/campaigns/example-packs/${encodeURIComponent(selectedPackId)}/import`,
+            auth,
+            {
+              method: 'POST',
+              body: JSON.stringify(importBody),
+            },
+          )
+          setCreateCampaignOpen(false)
+          setCreateCampaignForm(emptyCreateCampaignForm)
+          setSelectedSessionId(null)
+          setLogEntries([])
+          setSessionState(null)
+          setOptimisticEntries([])
+          setStreamingTurn(null)
+          setMainTab('turns')
+          setInspectorTab('map')
+          await refreshRoot()
+          setSelectedCampaignId(result.campaign_id)
+          await refreshCampaignWorkspace(result.campaign_id)
+          if (result.session_id) {
+            setSelectedSessionId(result.session_id)
+          }
+          return
+        }
+
         let createdWorld = false
         let worldId: number | null = null
         const selectedWorldId = parsePositiveInt(createCampaignForm.worldId)
@@ -198,11 +266,13 @@ export function useCampaignActions({
       auth,
       baseUrl,
       createCampaignForm.description,
+      createCampaignForm.packId,
       createCampaignForm.title,
       createCampaignForm.worldId,
       createCampaignForm.worldName,
       createWorldForCampaign,
       pushError,
+      refreshCampaignWorkspace,
       refreshRoot,
       setInspectorTab,
       setLogEntries,
@@ -384,6 +454,8 @@ export function useCampaignActions({
     closeCreateCampaignDialog,
     createCampaignError,
     createCampaignForm,
+    createCampaignPackOptions,
+    createCampaignPackOptionsPending,
     createCampaignOpen,
     createCampaignPending,
     openArchiveCampaignDialog,

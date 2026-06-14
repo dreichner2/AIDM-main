@@ -183,6 +183,40 @@ def _pack_catalog(pack: dict[str, Any], key: str) -> list[dict[str, Any]]:
     return [record for record in (records or []) if isinstance(record, dict)]
 
 
+def _positive_int(value: Any, default: int = 1) -> int:
+    try:
+        amount = int(value)
+    except (TypeError, ValueError):
+        amount = default
+    return max(1, amount)
+
+
+def _encounter_enemy_specs(encounter: dict[str, Any]) -> list[tuple[str, int]]:
+    specs_by_id: dict[str, int] = {}
+    ordered_ids: list[str] = []
+
+    def add_spec(enemy_id: Any, count: Any, *, override: bool = False) -> None:
+        key = _text(enemy_id)
+        if not key:
+            return
+        if key not in specs_by_id:
+            ordered_ids.append(key)
+        if override or key not in specs_by_id:
+            specs_by_id[key] = _positive_int(count)
+
+    for enemy_id in _list(encounter.get('enemyIds') or encounter.get('enemy_ids')):
+        add_spec(enemy_id, 1)
+    groups = encounter.get('enemyGroups') or encounter.get('enemy_groups') or encounter.get('enemies')
+    if isinstance(groups, list):
+        for group in groups:
+            if isinstance(group, str):
+                add_spec(group, 1, override=True)
+            elif isinstance(group, dict):
+                enemy_id = group.get('enemyId') or group.get('enemy_id') or group.get('id') or group.get('creatureId')
+                add_spec(enemy_id, group.get('count'), override=True)
+    return [(enemy_id, specs_by_id[enemy_id]) for enemy_id in ordered_ids]
+
+
 def _pack_active_checkpoint(pack: dict[str, Any], flags: dict[str, Any], checkpoints: list[dict[str, Any]]) -> dict[str, Any] | None:
     active_id = _text(
         pack.get('activeCheckpointId')
@@ -228,7 +262,7 @@ def _campaign_pack_encounter_request(
 
     enemy_by_id = {_pack_record_id(enemy): enemy for enemy in enemies}
     enemy_groups = []
-    for index, enemy_id in enumerate(_list(encounter.get('enemyIds') or encounter.get('enemy_ids') or encounter.get('enemies'))):
+    for index, (enemy_id, count) in enumerate(_encounter_enemy_specs(encounter)):
         enemy = enemy_by_id.get(enemy_id)
         if not enemy:
             continue
@@ -236,7 +270,7 @@ def _campaign_pack_encounter_request(
             {
                 'id': f"pack_{enemy_id}",
                 'label': enemy.get('name') or enemy_id,
-                'count': 1,
+                'count': count,
                 'creature': enemy,
                 'themeTags': ['campaign_pack', f'pack:{pack_id}', *_list(enemy.get('tags') or enemy.get('visualTags'))],
                 'encounterPurpose': 'campaign_pack',

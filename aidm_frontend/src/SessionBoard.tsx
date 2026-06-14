@@ -6,6 +6,7 @@ import {
   Download,
   MoreHorizontal,
   Share2,
+  Sparkles,
   Trash2,
   Upload,
 } from 'lucide-react'
@@ -131,6 +132,7 @@ type SessionBoardProps = {
   canonFacts: CanonFact[]
   clarificationRequest: ClarificationRequest | null
   resolveClarification: (selectedItemId: string) => void
+  onStartAdventure: () => void
   actionComposerProps: ActionComposerProps
 }
 
@@ -232,6 +234,7 @@ function MobilePresenceStrip({
           {activePlayers.map((player) => {
             const isSelectedPlayer = player.id === selectedPlayerId
             const isOtherPlayerTyping = !isSelectedPlayer && player.is_typing
+            const health = player.health
             return (
               <li
                 key={player.id}
@@ -240,11 +243,21 @@ function MobilePresenceStrip({
                 <span className="mobile-presence-avatar" aria-hidden="true">
                   <img src={activePlayerAvatarSrc(player)} alt="" />
                   <span>{activePlayerInitial(player)}</span>
+                  {health ? <span className={`mobile-health-dot mobile-health-dot-${health.tone}`} /> : null}
                 </span>
                 <span className="mobile-presence-copy">
                   <strong>{player.character_name}</strong>
                   <small>{isSelectedPlayer ? 'You' : player.name}</small>
                 </span>
+                {health ? (
+                  <span
+                    className="mobile-health-label"
+                    aria-label={`${player.character_name} health: ${health.label}`}
+                    title={`${health.label}: ${health.currentHp}/${health.maxHp} HP`}
+                  >
+                    {health.label}
+                  </span>
+                ) : null}
                 {isOtherPlayerTyping ? (
                   <span className="mobile-typing-badge" aria-label={`${player.character_name} is typing`}>
                     Typing
@@ -314,6 +327,7 @@ export function SessionBoard({
   canonFacts,
   clarificationRequest,
   resolveClarification,
+  onStartAdventure,
   actionComposerProps,
 }: SessionBoardProps) {
   const loading = workspaceLoading || sessionLoading
@@ -325,6 +339,10 @@ export function SessionBoard({
       : sendPending || streamingTurnActive ? 'Streaming...' : 'Ready'
   const chatTextClassName = `chat-text-size-${chatTextSettings.size} chat-text-font-${chatTextSettings.font}`
   const rollWaitBanner = pendingRollNotice ? <RollWaitBanner notice={pendingRollNotice} /> : null
+  const showStartAdventure =
+    Boolean(activeSession) && !loading && turnRows.length === 0 && !currentResponseEntry
+  const startAdventureDisabled =
+    sendPending || streamingTurnActive || !sessionId || !actionComposerProps.selectedPlayerId
 
   const updateChatTextSettings = (nextSettings: ChatTextSettings) => {
     setChatTextSettings(nextSettings)
@@ -590,8 +608,19 @@ export function SessionBoard({
                 )
               })
             ) : (
-              <div className="empty-state">
-                {activeSession ? welcomeText : 'No turn log entries loaded for this session.'}
+              <div className={`empty-state ${showStartAdventure ? 'start-adventure-card' : ''}`}>
+                <span>{activeSession ? welcomeText : 'No turn log entries loaded for this session.'}</span>
+                {showStartAdventure ? (
+                  <button
+                    type="button"
+                    className="start-adventure-button"
+                    onClick={onStartAdventure}
+                    disabled={startAdventureDisabled}
+                  >
+                    <Sparkles size={15} />
+                    Start Adventure
+                  </button>
+                ) : null}
               </div>
             )}
 

@@ -43,6 +43,10 @@ from aidm_server.response_dtos import (
     isoformat,
 )
 from aidm_server.services.campaign_pack import CampaignPackImportError, import_campaign_pack
+from aidm_server.services.campaign_pack_examples import (
+    get_example_campaign_pack,
+    list_example_campaign_pack_summaries,
+)
 from aidm_server.services.campaign_pack_linter import lint_campaign_pack_manifest
 from aidm_server.services.workspace import campaign_workspace_payload
 from aidm_server.services.session_lifecycle import delete_session_record
@@ -406,6 +410,58 @@ def list_installed_campaign_packs():
             'count': len(rows),
         }
     )
+
+
+@campaigns_bp.route('/example-packs', methods=['GET'])
+def list_example_campaign_packs():
+    packs = list_example_campaign_pack_summaries()
+    return jsonify({'packs': packs, 'count': len(packs)})
+
+
+@campaigns_bp.route('/example-packs/<path:pack_id>/import', methods=['POST'])
+def import_example_campaign_pack(pack_id):
+    example_pack = get_example_campaign_pack(pack_id)
+    if not example_pack:
+        return error_response('example_campaign_pack_not_found', 'Example campaign pack not found.', 404)
+
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if payload is None or not isinstance(payload, dict):
+        return error_response('validation_error', 'Expected JSON request body.', 400)
+
+    import_payload = {
+        'pack': example_pack['manifest'],
+        'sourceFilename': example_pack['source_filename'],
+    }
+    for key in ('world_id', 'worldId', 'session_name', 'sessionName'):
+        if key in payload:
+            import_payload[key] = payload[key]
+
+    dry_run = _truthy_enabled(
+        request.args.get('dry_run')
+        or request.args.get('dryRun')
+        or payload.get('dry_run')
+        or payload.get('dryRun'),
+        default=False,
+    )
+    try:
+        result = import_campaign_pack(
+            import_payload,
+            workspace_id=current_workspace_id(),
+            dry_run=dry_run,
+            imported_by_account_id=current_account_id(),
+        )
+        if dry_run:
+            db.session.rollback()
+            return jsonify(result.payload), 200
+        db.session.commit()
+        return jsonify(result.payload), 201
+    except CampaignPackImportError as exc:
+        db.session.rollback()
+        return error_response(exc.error_code, str(exc), exc.status_code)
+    except Exception as exc:
+        db.session.rollback()
+        logger.error('Failed to import example campaign pack: %s', str(exc))
+        return error_response('campaign_pack_import_failed', 'Failed to import campaign pack.', 400)
 
 
 @campaigns_bp.route('/installed-packs/<int:installed_pack_id>', methods=['GET'])

@@ -1016,6 +1016,39 @@
     z-index: 1;
   }
 
+  .mobile-presence-avatar .mobile-health-dot {
+    position: absolute;
+    right: -1px;
+    bottom: -1px;
+    z-index: 2;
+    width: 7px;
+    height: 7px;
+    border: 1px solid #0f1516;
+    border-radius: 999px;
+    background: #90a49f;
+    box-shadow: 0 0 8px rgba(144, 164, 159, 0.42);
+  }
+
+  .mobile-health-dot-uninjured {
+    background: #73d79b;
+    box-shadow: 0 0 8px rgba(115, 215, 155, 0.46);
+  }
+
+  .mobile-health-dot-wounded {
+    background: #ffd27a;
+    box-shadow: 0 0 8px rgba(255, 210, 122, 0.44);
+  }
+
+  .mobile-health-dot-badly-wounded {
+    background: #ff8b5d;
+    box-shadow: 0 0 8px rgba(255, 139, 93, 0.46);
+  }
+
+  .mobile-health-dot-dead {
+    background: #ff6161;
+    box-shadow: 0 0 8px rgba(255, 97, 97, 0.44);
+  }
+
   .mobile-presence-copy {
     display: grid;
     min-width: 0;
@@ -1040,6 +1073,18 @@
   .mobile-presence-copy small {
     color: var(--muted);
     font-size: 0.62rem;
+  }
+
+  .mobile-health-label {
+    flex: 0 0 auto;
+    max-width: 74px;
+    overflow: hidden;
+    color: #dce7df;
+    font-size: 0.6rem;
+    font-weight: 700;
+    line-height: 1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .mobile-typing-badge {

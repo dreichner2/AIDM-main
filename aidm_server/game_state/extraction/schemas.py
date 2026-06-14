@@ -12,6 +12,14 @@ GENERIC_INTENT_SAFE_FIELDS = {'summary', 'intentDescription', 'intent_descriptio
 POSITIVE_INT_FIELDS = {'quantity', 'amount'}
 WEIGHT_FIELDS = ('weight', 'itemWeight', 'item_weight', 'weightLbs', 'weight_lbs')
 CURRENCY_FIELDS = ('currency', 'currencyType', 'currency_type', 'currencyName', 'currency_name', 'coinType', 'coin_type')
+ROLL_REQUIREMENT_KEYS = (
+    'rollRequirement',
+    'roll_requirement',
+    'rollRequired',
+    'roll_required',
+    'requiresRoll',
+    'requires_roll',
+)
 WORLD_FIELD_ALIASES = {
     'actor_id': 'actorId',
     'turn_id': 'turnId',
@@ -181,12 +189,71 @@ def _positive_number(value: Any) -> float | int | None:
     return int(number) if number.is_integer() else number
 
 
+def _bool_value(value: Any):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {'true', 'yes', 'y', '1'}:
+            return True
+        if normalized in {'false', 'no', 'n', '0'}:
+            return False
+    return _MISSING
+
+
+def _bounded_confidence(value: Any, default: float = 0.5) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0.0, min(1.0, parsed))
+
+
 def _currency_code(payload: dict[str, Any]) -> str:
     raw_value = _first_present(payload, CURRENCY_FIELDS)
     if raw_value is _MISSING:
         return ''
     normalized = re.sub(r'\s+', ' ', str(raw_value or '').strip().lower())
     return CURRENCY_ALIASES.get(normalized, normalized)
+
+
+def normalize_roll_requirement(raw_payload: dict[str, Any]) -> dict[str, Any] | None:
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    raw_requirement = _MISSING
+    for key in ROLL_REQUIREMENT_KEYS:
+        if key in payload:
+            raw_requirement = payload.get(key)
+            break
+    if raw_requirement is _MISSING:
+        return None
+
+    source = raw_requirement if isinstance(raw_requirement, dict) else {'requiresRoll': raw_requirement}
+    requires_roll = _MISSING
+    for key in ('requiresRoll', 'requires_roll', 'rollRequired', 'roll_required'):
+        if key in source:
+            requires_roll = _bool_value(source.get(key))
+            break
+    if requires_roll is _MISSING:
+        requires_roll = _bool_value(raw_requirement)
+    if requires_roll is _MISSING:
+        return None
+
+    reason = (
+        source.get('reason')
+        or source.get('rationale')
+        or source.get('summary')
+        or payload.get('rollReason')
+        or payload.get('roll_reason')
+        or ''
+    )
+    requirement = {
+        'requiresRoll': requires_roll,
+        'reason': str(reason or '').strip(),
+        'confidence': _bounded_confidence(source.get('confidence', payload.get('rollConfidence'))),
+    }
+    if source.get('rollType') or source.get('roll_type'):
+        requirement['rollType'] = str(source.get('rollType') or source.get('roll_type') or '').strip()
+    return requirement
 
 
 def normalize_declared_action(raw_action: Any, *, fallback_actor_id: str, fallback_id: str) -> dict[str, Any] | None:
@@ -297,7 +364,11 @@ def normalize_pre_extraction(raw_payload: dict[str, Any] | None, *, fallback_act
             if action:
                 actions.append(action)
     notes = _normalize_notes(payload.get('notes'))
-    return {'declaredActions': actions, 'notes': notes}
+    normalized = {'declaredActions': actions, 'notes': notes}
+    roll_requirement = normalize_roll_requirement(payload)
+    if roll_requirement:
+        normalized['rollRequirement'] = roll_requirement
+    return normalized
 
 
 def _normalize_notes(raw_notes: Any) -> list[str]:

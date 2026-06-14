@@ -1,3 +1,169 @@
+# Daily AIDM Codebase Improvement Audit - 2026-06-14 06:06 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: focused safe-improvement pass across frontend bestiary/debug UX, accessibility semantics, backend route capability boundaries, direct session-state writers, campaign-pack encounter-group work already in the worktree, tests, security scanning, and developer workflow checks. The worktree already contained unrelated pending changes in `aidm_server/blueprints/creatures.py`, `aidm_server/game_state/campaign_pack_encounters.py`, `docs/campaign_packs.md`, `docs/examples/the_road_of_unremembered_kings_campaign.json`, `scripts/launch_desktop_app.sh`, `tests/test_campaign_pack_linter.py`, and untracked `tests/test_campaign_pack_encounter_groups.py`; this run preserved those changes and only edited the bestiary frontend/test/style files plus this report.
+
+## What Was Inspected
+
+- Prior dated audit sections in `improvements_suggestions.md`, especially the recurring recommendations around combat/bestiary route authorization, debug payload exposure, direct session snapshot writes, and bestiary UI semantics.
+- Frontend bestiary/debug panel:
+  - `aidm_frontend/src/BestiaryDebugPanel.tsx`
+  - `aidm_frontend/src/BestiaryDebugPanel.test.tsx`
+  - `aidm_frontend/src/styles/inspector.css`
+  - `aidm_frontend/src/InspectorPanel.tsx`
+- Backend combat and bestiary route surface:
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/workspace_access.py`
+  - `aidm_server/blueprints/sessions.py`
+- Direct session snapshot mutation paths:
+  - `aidm_server/blueprints/players.py`
+  - `aidm_server/services/campaign_pack_progress.py`
+- Existing campaign-pack encounter-group changes already present in the worktree:
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/game_state/campaign_pack_encounters.py`
+  - `tests/test_campaign_pack_encounter_groups.py`
+  - `tests/test_campaign_pack_linter.py`
+- Developer workflow and safety checks:
+  - `Makefile`
+  - `aidm_frontend/package.json`
+  - `scripts/scan_secrets.py`
+
+## Small Safe Fixes Made
+
+### Keep bestiary browsing available when optional combat debug is unavailable
+
+Affected files:
+- `aidm_frontend/src/BestiaryDebugPanel.tsx`
+- `aidm_frontend/src/BestiaryDebugPanel.test.tsx`
+
+Problem:
+`BestiaryDebugPanel` loaded core bestiary, campaign bestiary, and combat debug events in one `Promise.all`. Combat debug data is optional, but any debug endpoint error would fail the whole panel and hide normal bestiary browsing. That is especially fragile because combat debug payloads should become admin/DM-only on the backend.
+
+Change:
+- Wrapped only the combat debug request in a local fallback that returns `{ events: [] }` when the optional debug fetch fails.
+- Preserved normal error handling for core and campaign bestiary requests.
+- Added a regression test proving a debug fetch failure does not show an error, does not render debug details, and still leaves bestiary browsing usable.
+
+Rationale:
+This is a narrow UX/security-prep fix. It makes future backend restriction of raw combat debug data less disruptive without weakening any current backend behavior.
+
+### Replace invalid bestiary listbox semantics with a normal list of buttons
+
+Affected files:
+- `aidm_frontend/src/BestiaryDebugPanel.tsx`
+- `aidm_frontend/src/styles/inspector.css`
+
+Problem:
+The bestiary creature picker declared `role="listbox"` but rendered plain buttons instead of ARIA `option` children and did not implement listbox keyboard behavior. That creates invalid semantics and unpredictable assistive-technology behavior.
+
+Change:
+- Replaced the fake listbox container with a semantic `<ul aria-label="Bestiary creatures">`.
+- Wrapped each creature button in an `<li>`.
+- Added `aria-pressed` to expose the selected creature button state.
+- Adjusted the list CSS to remove browser default bullets/spacing and keep the compact layout.
+
+Rationale:
+This is a low-risk accessibility correction that matches the component's actual interaction model: a short list of independent selectable buttons.
+
+## Verification
+
+- `npm run test:unit -- BestiaryDebugPanel.test.tsx`
+  - Passed: 1 test file, 2 tests.
+- `npm run typecheck`
+  - Passed.
+- `npm run lint -- src/BestiaryDebugPanel.tsx`
+  - Passed.
+- `git diff --check -- aidm_frontend/src/BestiaryDebugPanel.tsx aidm_frontend/src/BestiaryDebugPanel.test.tsx aidm_frontend/src/styles/inspector.css`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_campaign_pack_encounter_groups.py tests/test_campaign_pack_linter.py`
+  - Passed: 7 tests.
+- `./.venv/bin/python scripts/scan_secrets.py aidm_frontend/src/BestiaryDebugPanel.tsx aidm_frontend/src/BestiaryDebugPanel.test.tsx aidm_frontend/src/styles/inspector.css`
+  - Passed: no likely committed secrets found.
+
+## High-Priority Findings Refreshed This Run
+
+### Critical: Combat mutation, bestiary authoring, and combat debug routes still need DM/admin capability checks
+
+Current evidence:
+- `aidm_server/blueprints/creatures.py:352-379` creates campaign/region bestiary entries.
+- `aidm_server/blueprints/creatures.py:382-411` generates and optionally saves campaign bestiary packs.
+- `aidm_server/blueprints/creatures.py:458-493` evolves a creature and can save it to campaign/session bestiary scope.
+- `aidm_server/blueprints/creatures.py:518-614` starts combat, persists combat state, syncs the combat encounter record, and records debug payloads.
+- `aidm_server/blueprints/creatures.py:629-656` applies morale events directly to persisted combat state.
+- `aidm_server/blueprints/creatures.py:659-690` can apply combat-end state and campaign-pack progress when `apply` is set.
+- `aidm_server/blueprints/creatures.py:693-720` accepts arbitrary combat state changes and persists them.
+- `aidm_server/blueprints/creatures.py:723-748` returns raw combat debug events.
+- `aidm_server/blueprints/sessions.py:570-579` already demonstrates the desired pattern for campaign-pack progress control by rejecting non-admin operators.
+
+Risk:
+These routes perform source-of-truth DM/admin actions or expose raw internal debug payloads. A normal table participant in a shared/public deployment could potentially mutate combat state, author hidden bestiary content, start/end combat, or inspect internals.
+
+Recommended next step:
+Add route-level tests first: normal player should receive 403 for combat debug, combat start, arbitrary combat state changes, combat-end apply, morale apply, bestiary create/generate/save, and creature evolve/save. Then implement the smallest shared `workspace admin or local unauthenticated owner mode` helper that makes those tests pass.
+
+### High: Bestiary browsing, authoring, and debug UI still share one player-facing panel
+
+Current evidence:
+- `aidm_frontend/src/InspectorPanel.tsx` exposes the Bestiary tab through the general inspector.
+- `aidm_frontend/src/BestiaryDebugPanel.tsx:147-150` still attempts to load combat debug events when a session is selected, though this run made failures non-blocking.
+- `aidm_frontend/src/BestiaryDebugPanel.tsx:263-274` renders campaign-pack seeding controls in the same panel as normal browsing.
+- `aidm_frontend/src/BestiaryDebugPanel.tsx:329-338` renders recent combat debug summaries when the backend returns them.
+
+Risk:
+Even with the debug fallback fixed, the UI still blends player-safe catalog browsing with DM/admin authoring and debug tools. That makes authorization harder to reason about and increases accidental exposure risk.
+
+Recommended next step:
+Split the component into player-safe browsing and operator-only authoring/debug sections. Drive visibility from backend capability fields after backend route gates exist, not from client-side assumptions alone.
+
+### High: Direct session snapshot writers still bypass one serialized mutation boundary
+
+Current evidence:
+- `aidm_server/blueprints/players.py:425-462` manually reads session state, applies inventory equipment changes, and writes `session_obj.state_snapshot`.
+- `aidm_server/services/campaign_pack_progress.py:180-208` writes migrated/progressed campaign-pack state directly.
+- `aidm_server/services/campaign_pack_progress.py:396-407` writes manually controlled campaign-pack progress directly.
+- `aidm_server/blueprints/creatures.py:601`, `:649`, `:674`, and `:705` persist combat/session changes from REST routes outside the normal socket turn coordinator.
+
+Risk:
+REST/service writes can still race with active streamed turns and be overwritten by later post-DM persistence. The highest-risk visible symptoms remain equipment, HP/combat state, campaign-pack progress, and projection/canon refreshes that appear applied but later disappear.
+
+Recommended next step:
+Create one shared session-state mutation service that acquires the per-session coordinator, reloads inside the lock, applies validated changes, persists through one helper, and records revision/audit metadata. Start with a regression around manual equipment changes surviving a simulated active turn.
+
+### Medium-High: Campaign-pack encounter group support now has duplicated parsing helpers
+
+Current evidence:
+- The existing dirty worktree adds `_encounter_enemy_specs` in both `aidm_server/blueprints/creatures.py` and `aidm_server/game_state/campaign_pack_encounters.py`.
+- Targeted tests in `tests/test_campaign_pack_encounter_groups.py` and `tests/test_campaign_pack_linter.py` passed in this run.
+
+Risk:
+The behavior currently looks tested, but duplicated parsing logic can drift between the API preview path and the materialized combat-start path. A future change to `enemyGroups`, `enemyIds`, or count precedence could update one path and leave the other inconsistent.
+
+Recommended next step:
+After the current campaign-pack work settles, move encounter enemy-spec parsing into one shared campaign-pack utility and keep both API and materializer tests pointed at that shared behavior.
+
+## Larger Suggested Improvements
+
+- Define a route capability matrix for `workspace_admin`, `dm`, `player`, `local_debug`, and `server_owned` operations; enforce it with a small shared helper/decorator.
+- Split player-safe bestiary browsing from operator-only campaign bestiary authoring and combat debug inspection.
+- Route every `Session.state_snapshot` write through a coordinated mutation service with idempotency, optimistic revision checks, and audit metadata.
+- Add a frontend test that simulates backend 403 for operator-only bestiary/debug controls once route capabilities exist.
+- Add accessibility coverage for inspector panels, especially tab semantics, selected button states, and compact scrollable lists.
+- Consider a compact `make dev-check` target for touched-file secret scan, focused pytest, frontend typecheck/lint, and API contract checks once the current dirty campaign-pack worktree is merged or shelved.
+
+## Notes
+
+- No live backend restart, Tailscale tunnel check, or browser smoke was needed for these frontend-only fixes.
+- The campaign-pack encounter-group changes already in the worktree were not edited by this run, but their targeted tests passed.
+- The frontend bestiary panel now tolerates a future backend 403 for combat debug events, but the backend route is still not protected.
+
+## Recommended Next Run Focus
+
+1. Add non-admin 403 tests for `/api/sessions/<id>/combat/debug` and `/api/sessions/<id>/combat/apply-state-changes`, then implement the smallest shared capability helper needed to make them pass.
+2. Extend the same capability pattern to bestiary create/generate/save and creature evolve/save routes.
+3. Add the first concurrency-focused regression for manual equipment updates during an active streamed turn before designing the shared session-state mutation service.
+4. Consolidate campaign-pack encounter enemy-spec parsing after the current campaign-pack branch/worktree changes are ready to modify.
+
 # Daily AIDM Codebase Improvement Audit - 2026-06-13 16:04 MDT
 
 Automation ID: `daily-aidm-codebase-improvement-audit`

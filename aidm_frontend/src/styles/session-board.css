@@ -667,6 +667,48 @@
   --chat-response-font-style: normal;
 }
 
+.start-adventure-card {
+  display: grid;
+  justify-items: center;
+  gap: 11px;
+  min-height: 132px;
+  padding: 18px;
+  border: 1px dashed rgba(144, 164, 159, 0.28);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.018);
+  text-align: center;
+}
+
+.start-adventure-card span {
+  max-width: 520px;
+  line-height: 1.42;
+}
+
+.start-adventure-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid rgba(255, 176, 103, 0.34);
+  border-radius: 4px;
+  color: var(--heading);
+  background: rgba(255, 107, 44, 0.12);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.start-adventure-button:hover:not(:disabled) {
+  border-color: rgba(255, 176, 103, 0.58);
+  background: rgba(255, 107, 44, 0.18);
+}
+
+.start-adventure-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .jump-latest-button {
   position: absolute;
   left: 50%;

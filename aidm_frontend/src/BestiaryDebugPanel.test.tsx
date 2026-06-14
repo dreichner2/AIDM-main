@@ -156,4 +156,24 @@ describe('BestiaryDebugPanel', () => {
       )
     })
   })
+
+  it('keeps bestiary browsing available when optional combat debug fetch fails', async () => {
+    apiFetchMock.mockImplementation((_baseUrl: string, path: string) => {
+      if (path === '/api/bestiary/core') {
+        return Promise.resolve({ entries: [wolf] })
+      }
+      if (path === '/api/sessions/9/combat/debug?limit=12') {
+        return Promise.reject(new Error('debug forbidden'))
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`))
+    })
+
+    render(<BestiaryDebugPanel baseUrl="" auth="" selectedCampaignId={null} selectedSessionId={9} />)
+
+    const list = screen.getByLabelText('Bestiary creatures')
+    expect(await within(list).findByText('Wolf')).toBeInTheDocument()
+    expect(screen.getByText('1 creatures loaded')).toBeInTheDocument()
+    expect(screen.queryByText('debug forbidden')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Combat debug/)).not.toBeInTheDocument()
+  })
 })

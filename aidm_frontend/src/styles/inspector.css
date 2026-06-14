@@ -588,11 +588,18 @@
   max-height: 235px;
   overflow: auto;
   gap: 4px;
-  padding-right: 2px;
+  margin: 0;
+  padding: 0 2px 0 0;
+  list-style: none;
+}
+
+.bestiary-list li {
+  min-width: 0;
 }
 
 .bestiary-list button {
   display: grid;
+  width: 100%;
   gap: 2px;
   min-width: 0;
   padding: 7px 8px;
@@ -815,13 +822,31 @@
   gap: 8px;
   padding: 6px 7px;
   border: 1px solid var(--line);
+  border-left-width: 3px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(4, 8, 9, 0.28);
 }
 
 .active-player-list li.selected {
   border-color: rgba(115, 215, 155, 0.34);
   background: rgba(115, 215, 155, 0.07);
+}
+
+.active-player-list li.active-player-health-uninjured {
+  border-left-color: #65e864;
+}
+
+.active-player-list li.active-player-health-wounded {
+  border-left-color: #f2c94c;
+}
+
+.active-player-list li.active-player-health-badly-wounded {
+  border-left-color: #ff9860;
+}
+
+.active-player-list li.active-player-health-dead {
+  border-left-color: #d65f6a;
+  opacity: 0.78;
 }
 
 .active-player-avatar-wrap {
@@ -852,6 +877,12 @@
   box-shadow: 0 0 10px rgba(115, 215, 155, 0.42);
 }
 
+.active-player-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
 .active-player-list strong,
 .active-player-list small {
   display: block;
@@ -871,6 +902,15 @@
   margin-top: 2px;
   color: var(--muted);
   font-size: 0.72rem;
+}
+
+.active-player-health-text {
+  margin-top: 0;
+  font-size: 0.68rem;
+}
+
+.active-player-detail {
+  opacity: 0.82;
 }
 
 .presence-badge {

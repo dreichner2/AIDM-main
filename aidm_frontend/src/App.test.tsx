@@ -126,6 +126,20 @@ const ttsConfig: TtsRuntimeConfig = {
   model: 'aura-2-draco-en',
 }
 
+const exampleCampaignPacks = [
+  {
+    pack_id: 'bleakmoor_intro',
+    title: 'The Lanterns of Bleakmoor',
+    description: 'A short authored marsh adventure for testing campaign-pack import and checkpoint play.',
+    short_description: 'A short authored marsh adventure for testing campaign-pack import and checkpoint play.',
+    version: '1.0.0',
+    schema_version: '1',
+    source_filename: 'bleakmoor_intro_campaign_pack.json',
+    world_name: 'Bleakmoor',
+    source: 'bundled_example',
+  },
+]
+
 let campaigns: Campaign[]
 let worlds: World[]
 let sessionsByCampaign: Record<number, SessionSummary[]>
@@ -669,6 +683,12 @@ function installFetchMock() {
         )
       }
       if (method === 'GET' && path === '/api/campaigns') return jsonResponse(campaigns)
+      if (method === 'GET' && path === '/api/campaigns/example-packs') {
+        return jsonResponse({
+          packs: exampleCampaignPacks,
+          count: exampleCampaignPacks.length,
+        })
+      }
       if (method === 'GET' && path === '/api/worlds') return jsonResponse(worlds)
       if (method === 'GET' && path === '/api/beta/summary') return jsonResponse(metrics)
       if (method === 'GET' && path === '/api/llm/config') return jsonResponse(runtime)
@@ -880,6 +900,88 @@ function installFetchMock() {
         }
         worlds = worlds.filter((world) => world.world_id !== worldId)
         return jsonResponse({ deleted: true, world_id: worldId })
+      }
+
+      const examplePackImportMatch = path.match(/^\/api\/campaigns\/example-packs\/(.+)\/import$/)
+      if (method === 'POST' && examplePackImportMatch) {
+        const packId = decodeURIComponent(examplePackImportMatch[1])
+        const pack = exampleCampaignPacks.find((item) => item.pack_id === packId)
+        if (!pack) {
+          return jsonResponse(
+            { error: 'Example campaign pack not found.', error_code: 'example_campaign_pack_not_found' },
+            { status: 404 },
+          )
+        }
+        let worldId = Number((body as { world_id?: number } | null)?.world_id)
+        let selectedWorld = worlds.find((world) => world.world_id === worldId) ?? null
+        if (!selectedWorld) {
+          worldId = 77
+          selectedWorld = {
+            world_id: worldId,
+            name: pack.world_name ?? `${pack.title} World`,
+            description: null,
+            created_at: fixedNow.toISOString(),
+          }
+          worlds = [...worlds, selectedWorld]
+        }
+        const campaignId = 101
+        const sessionId = 201
+        const campaign: Campaign = {
+          campaign_id: campaignId,
+          title: pack.title,
+          description: pack.description,
+          world_id: worldId,
+          world_name: selectedWorld.name,
+          created_at: fixedNow.toISOString(),
+          updated_at: fixedNow.toISOString(),
+          status: 'active',
+          is_archived: false,
+          current_quest: 'Find the Missing Caravan',
+          location: 'Bleakmoor Gate',
+          session_count: 1,
+          latest_session_id: sessionId,
+          latest_activity_at: fixedNow.toISOString(),
+        }
+        const session: SessionSummary = {
+          session_id: sessionId,
+          campaign_id: campaignId,
+          created_at: fixedNow.toISOString(),
+          updated_at: fixedNow.toISOString(),
+          latest_activity_at: fixedNow.toISOString(),
+          display_name: 'The Lanterns of Bleakmoor',
+          status: 'active',
+          deleted_at: null,
+          turn_count: 0,
+          latest_summary: '',
+          is_archived: false,
+          state_snapshot: { campaignPack: { packId: pack.pack_id, title: pack.title } },
+        }
+        campaigns = [campaign, ...campaigns]
+        sessionsByCampaign[campaignId] = [session]
+        playersByCampaign[campaignId] = []
+        mapsByCampaign[campaignId] = []
+        segmentsByCampaign[campaignId] = []
+        sessionLogs[sessionId] = []
+        sessionStates[sessionId] = {
+          session_id: sessionId,
+          campaign_id: campaignId,
+          current_location: 'Bleakmoor Gate',
+          current_quest: 'Find the Missing Caravan',
+          rolling_summary: '',
+          active_segments: [],
+          memory_snippets: [],
+          state_snapshot: { campaignPack: { packId: pack.pack_id, title: pack.title } },
+          updated_at: fixedNow.toISOString(),
+        }
+        return jsonResponse({
+          imported: true,
+          pack_id: pack.pack_id,
+          campaign_id: campaignId,
+          session_id: sessionId,
+          campaign,
+          session,
+          counts: {},
+        })
       }
 
       if (method === 'POST' && path === '/api/campaigns') {
@@ -1227,6 +1329,55 @@ describe('App user workflow regressions', () => {
         }),
       ),
     )
+  })
+
+  it('starts an empty adventure with a generated DM opening prompt and roster', async () => {
+    sessionLogs[20] = []
+    sessionStates[20] = {
+      ...sessionStates[20],
+      rolling_summary: '',
+    }
+    playersByCampaign[10] = [
+      ...playersByCampaign[10],
+      {
+        player_id: 31,
+        workspace_id: 'owner',
+        account_id: null,
+        username: null,
+        campaign_id: 10,
+        name: 'Mira Player',
+        character_name: 'Mira',
+        race: 'Elf',
+        sex: 'female',
+        profile_image: '/profile-icons/elf_female.png',
+        class_: 'Ranger',
+        char_class: 'Ranger',
+        level: 1,
+        created_at: '2026-06-06T10:38:00.000Z',
+        updated_at: '2026-06-06T10:39:00.000Z',
+      },
+    ]
+    await renderLoadedApp()
+
+    const startButton = await screen.findByRole('button', { name: 'Start Adventure' })
+    socketMock.socket.emit.mockClear()
+    fireEvent.click(startButton)
+
+    await waitFor(() =>
+      expect(socketMock.socket.emit).toHaveBeenCalledWith(
+        'send_message',
+        expect.objectContaining({
+          message: expect.stringContaining('Please narrate the opening scene for this campaign.'),
+        }),
+      ),
+    )
+    const sendPayload = socketMock.socket.emit.mock.calls.find(([event]) => event === 'send_message')?.[1] as {
+      message?: string
+    }
+    expect(sendPayload.message).toContain('Campaign: Smoke Campaign.')
+    expect(sendPayload.message).toContain('The table currently has 2 players named: Ember, Mira.')
+    expect(sendPayload.message).toContain('Current location: Ash Hall.')
+    expect(sendPayload.message).toContain('what immediate choice or prompt is in front of them')
   })
 
   it('allows the next send while the previous saved turn is only canon pending', async () => {
@@ -1752,6 +1903,92 @@ describe('App user workflow regressions', () => {
 
     expect(screen.getByText('Active Players (0)')).toBeInTheDocument()
     expect(screen.getByText('No active players connected.')).toBeInTheDocument()
+  })
+
+  it('shows health states on active player cards from the session snapshot', async () => {
+    sessionStates[20] = {
+      ...sessionStates[20],
+      state_snapshot: {
+        playerCharacters: [
+          { playerId: 30, name: 'Ember', health: { currentHp: 16, maxHp: 16 } },
+          { playerId: 31, name: 'Borin', health: { currentHp: 9, maxHp: 18 } },
+          { playerId: 32, name: 'Kara', health: { currentHp: 3, maxHp: 18 } },
+          { playerId: 33, name: 'Moss', health: { currentHp: 0, maxHp: 12 } },
+        ],
+      },
+    }
+    await renderLoadedApp()
+
+    await act(async () => {
+      socketHandler<
+        Array<{
+          id: number
+          character_name: string
+          name: string
+          race?: string
+          sex?: string
+          profile_image?: string
+          class_?: string
+          char_class?: string
+          is_typing?: boolean
+        }>
+      >('active_players')([
+        {
+          id: 30,
+          character_name: 'Ember',
+          name: 'Danny',
+          race: 'Human',
+          sex: 'female',
+          profile_image: '/profile-icons/human_female.png',
+          class_: 'Wizard',
+          char_class: 'Wizard',
+        },
+        {
+          id: 31,
+          character_name: 'Borin',
+          name: 'Maya',
+          race: 'Dwarf',
+          sex: 'male',
+          profile_image: '/profile-icons/dwarf_male.png',
+          class_: 'Fighter',
+          char_class: 'Fighter',
+        },
+        {
+          id: 32,
+          character_name: 'Kara',
+          name: 'Tess',
+          race: 'Elf',
+          sex: 'female',
+          profile_image: '/profile-icons/elf_female.png',
+          class_: 'Rogue',
+          char_class: 'Rogue',
+        },
+        {
+          id: 33,
+          character_name: 'Moss',
+          name: 'Ike',
+          race: 'Gnome',
+          sex: 'male',
+          profile_image: '/profile-icons/gnome_male.png',
+          class_: 'Cleric',
+          char_class: 'Cleric',
+        },
+      ])
+    })
+
+    const roster = screen.getByLabelText('Active players in this session')
+    const emberHealth = await within(roster).findByLabelText('Ember health: Uninjured')
+    expect(emberHealth).toHaveTextContent('Uninjured')
+    expect(emberHealth.closest('li')).toHaveClass('active-player-health-uninjured')
+    const borinHealth = within(roster).getByLabelText('Borin health: Wounded')
+    expect(borinHealth).toHaveTextContent('Wounded')
+    expect(borinHealth.closest('li')).toHaveClass('active-player-health-wounded')
+    const karaHealth = within(roster).getByLabelText('Kara health: Badly wounded')
+    expect(karaHealth).toHaveTextContent('Badly wounded')
+    expect(karaHealth.closest('li')).toHaveClass('active-player-health-badly-wounded')
+    const mossHealth = within(roster).getByLabelText('Moss health: Dead')
+    expect(mossHealth).toHaveTextContent('Dead')
+    expect(mossHealth.closest('li')).toHaveClass('active-player-health-dead')
   })
 
   it('shows a compact active-player presence strip on mobile', async () => {
@@ -3186,6 +3423,36 @@ describe('App user workflow regressions', () => {
     )
   })
 
+  it('can create a campaign from a bundled example campaign pack', async () => {
+    await renderLoadedApp()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add campaign' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Create New Campaign' })
+    await within(dialog).findByRole('option', { name: 'The Lanterns of Bleakmoor' })
+    fireEvent.change(within(dialog).getByLabelText('Campaign Pack'), {
+      target: { value: 'bleakmoor_intro' },
+    })
+
+    expect(within(dialog).getAllByText('The Lanterns of Bleakmoor').length).toBeGreaterThan(0)
+    expect(
+      within(dialog).getAllByText('A short authored marsh adventure for testing campaign-pack import and checkpoint play.').length,
+    ).toBeGreaterThan(0)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Campaign' }))
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Create New Campaign' })).not.toBeInTheDocument(),
+    )
+    await waitFor(() => expect(screen.getAllByText('The Lanterns of Bleakmoor').length).toBeGreaterThan(0))
+    const importCall = fetchCalls.find(
+      (call) => call.method === 'POST' && call.path === '/api/campaigns/example-packs/bleakmoor_intro/import',
+    )
+    expect(importCall?.body).toEqual({})
+    expect(
+      fetchCalls.some((call) => call.method === 'POST' && call.path === '/api/campaigns'),
+    ).toBe(false)
+  })
+
   it('opens the session menu and supports rename and delete actions', async () => {
     await renderLoadedApp()
 
@@ -3310,7 +3577,7 @@ describe('App user workflow regressions', () => {
     await renderLoadedApp()
 
     expect(screen.queryByText(/Hidden tail for expansion verification/i)).not.toBeInTheDocument()
-    const expandButtons = screen.getAllByRole('button', { name: 'Expand turn' })
+    const expandButtons = await screen.findAllByRole('button', { name: 'Expand turn' })
     fireEvent.click(expandButtons[1])
 
     expect(screen.getByText(/Hidden tail for expansion verification/i)).toBeInTheDocument()

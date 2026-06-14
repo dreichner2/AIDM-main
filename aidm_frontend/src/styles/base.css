@@ -1962,6 +1962,27 @@ select:focus-visible {
   line-height: 1.35;
 }
 
+.campaign-pack-starter-summary {
+  display: grid;
+  gap: 5px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.campaign-pack-starter-summary strong {
+  color: var(--heading);
+  font-size: 0.86rem;
+}
+
+.campaign-pack-starter-summary span,
+.campaign-pack-starter-summary small {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
 .saved-workspace-list {
   display: grid;
   gap: 7px;

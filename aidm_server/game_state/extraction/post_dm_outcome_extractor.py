@@ -280,7 +280,11 @@ ENEMY_DEFEAT_NEGATION_PATTERN = re.compile(
     r'hurt\s*,?\s+but\s+not\s+down|wounded\s*,?\s+but\s+not\s+down)\b',
     re.IGNORECASE,
 )
-ENEMY_FLEE_PATTERN = re.compile(r'\b(?:flees?|runs? away|retreats?|escapes?|withdraws?)\b', re.IGNORECASE)
+ENEMY_FLEE_PATTERN = re.compile(
+    r'\b(?:flees?|runs? away|retreats?|escapes?|withdraws?|wants? out|vanish(?:es)?|slips? away|'
+    r'staggers? deeper|staggered deeper)\b',
+    re.IGNORECASE,
+)
 ENEMY_SURRENDER_PATTERN = re.compile(r'\b(?:surrenders?|yields?|drops? (?:its|their|his|her) weapon|begs? for mercy)\b', re.IGNORECASE)
 COMBAT_CONDITIONS = {
     'blinded',
@@ -1594,12 +1598,9 @@ def _heuristic_active_npc_changes(
 
 def _combat_enemy_match(sentence: str, enemy: dict[str, Any], enemy_count: int) -> bool:
     normalized = normalize_item_name(sentence)
-    name = normalize_item_name(enemy.get('name'))
-    enemy_id = normalize_item_name(enemy.get('id'))
-    if name and name in normalized:
-        return True
-    if enemy_id and enemy_id in normalized:
-        return True
+    for ref in _combat_enemy_refs(enemy, max(2, enemy_count)):
+        if re.search(rf'\b(?:the\s+)?{_regex_ref(ref)}\b', normalized):
+            return True
     return enemy_count == 1 and re.search(r'\b(?:enemy|creature|monster|foe|it)\b', normalized)
 
 
@@ -1609,9 +1610,65 @@ def _combat_enemy_refs(enemy: dict[str, Any], enemy_count: int) -> list[str]:
         normalized = normalize_item_name(value)
         if normalized and normalized not in refs:
             refs.append(normalized)
+        if normalized.endswith('s') and len(normalized) > 3:
+            singular = normalized[:-1]
+            if singular and singular not in refs:
+                refs.append(singular)
     if enemy_count == 1:
         refs.extend(['enemy', 'creature', 'monster', 'foe', 'it'])
     return refs
+
+
+def _combat_enemy_ref_spans(normalized_sentence: str, enemy: dict[str, Any], enemy_count: int) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for ref in _combat_enemy_refs(enemy, enemy_count):
+        ref_pattern = _regex_ref(ref)
+        spans.extend((match.start(), match.end()) for match in re.finditer(rf'\b(?:the\s+)?{ref_pattern}\b', normalized_sentence))
+    return sorted(set(spans))
+
+
+def _sentence_makes_enemy_flee(sentence: str, enemy: dict[str, Any], enemies: list[dict[str, Any]]) -> bool:
+    normalized = normalize_item_name(sentence)
+    flee_matches = list(ENEMY_FLEE_PATTERN.finditer(normalized))
+    if not flee_matches:
+        return False
+    enemy_count = len(enemies)
+    target_spans = _combat_enemy_ref_spans(normalized, enemy, enemy_count)
+    if not target_spans:
+        return False
+    competing_spans: list[tuple[int, int]] = []
+    for other_enemy in enemies:
+        if other_enemy is enemy:
+            continue
+        competing_spans.extend(_combat_enemy_ref_spans(normalized, other_enemy, max(2, enemy_count)))
+
+    for flee_match in flee_matches:
+        preceding_target_distances = [
+            flee_match.start() - end
+            for start, end in target_spans
+            if end <= flee_match.start() and flee_match.start() - end <= 120
+        ]
+        following_target_distances = [
+            start - flee_match.end()
+            for start, end in target_spans
+            if start >= flee_match.end() and start - flee_match.end() <= 60
+        ]
+        if not preceding_target_distances and not following_target_distances:
+            continue
+        target_distance = min([*preceding_target_distances, *following_target_distances])
+        competing_distances = [
+            flee_match.start() - end
+            for start, end in competing_spans
+            if end <= flee_match.start() and flee_match.start() - end <= 120
+        ]
+        competing_distances.extend(
+            start - flee_match.end()
+            for start, end in competing_spans
+            if start >= flee_match.end() and start - flee_match.end() <= 60
+        )
+        if not competing_distances or target_distance < min(competing_distances):
+            return True
+    return False
 
 
 def _regex_ref(ref: str) -> str:
@@ -1970,7 +2027,7 @@ def _heuristic_combat_changes(
                     reason=f"DM narration defeated {enemy.get('name') or enemy_id}.",
                     already=already,
                 )
-            elif ENEMY_FLEE_PATTERN.search(sentence):
+            elif _sentence_makes_enemy_flee(sentence, enemy, enemies):
                 resolved_enemy_ids.add(enemy_id)
                 _add_combat_change(
                     changes,

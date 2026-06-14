@@ -85,6 +85,92 @@ def test_create_campaign_can_opt_out_of_bestiary_seed(client, app):
         assert BestiaryEntry.query.filter_by(campaign_id=payload['campaign_id']).count() == 0
 
 
+def test_example_campaign_pack_library_lists_bundled_pack_summaries(client):
+    response = client.get('/api/campaigns/example-packs')
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    pack_ids = {pack['pack_id'] for pack in payload['packs']}
+    assert {
+        'bleakmoor_intro',
+        'middle_earth.shadow_over_the_greenway',
+        'original_fantasy.road_of_unremembered_kings',
+    }.issubset(pack_ids)
+
+    bleakmoor = next(pack for pack in payload['packs'] if pack['pack_id'] == 'bleakmoor_intro')
+    assert bleakmoor['title'] == 'The Lanterns of Bleakmoor'
+    assert bleakmoor['source'] == 'bundled_example'
+    assert bleakmoor['source_filename'] == 'bleakmoor_intro_campaign_pack.json'
+    assert bleakmoor['world_name'] == 'Bleakmoor'
+    assert len(bleakmoor['short_description']) <= 183
+    assert 'manifest' not in bleakmoor
+    assert payload['count'] == len(payload['packs'])
+
+    road = next(pack for pack in payload['packs'] if pack['pack_id'] == 'original_fantasy.road_of_unremembered_kings')
+    assert road['title'] == 'The Road of Unremembered Kings'
+    assert road['source_filename'] == 'the_road_of_unremembered_kings_campaign.json'
+    assert road['world_name'] == 'The Western Roadlands'
+
+
+def test_import_example_campaign_pack_creates_playable_campaign(client, app):
+    response = client.post('/api/campaigns/example-packs/bleakmoor_intro/import', json={})
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload['pack_id'] == 'bleakmoor_intro'
+    assert payload['campaign_id']
+    assert payload['session_id']
+    assert payload['installed_campaign_pack']['source_filename'] == 'bleakmoor_intro_campaign_pack.json'
+
+    with app.app_context():
+        campaign = db.session.get(Campaign, payload['campaign_id'])
+        session = db.session.get(Session, payload['session_id'])
+        world = db.session.get(World, campaign.world_id)
+        snapshot = json.loads(session.state_snapshot)
+        assert campaign.title == 'The Lanterns of Bleakmoor'
+        assert world.name == 'Bleakmoor'
+        assert snapshot['campaignPack']['packId'] == 'bleakmoor_intro'
+        assert CampaignPackSession.query.filter_by(
+            campaign_id=payload['campaign_id'],
+            session_id=payload['session_id'],
+            pack_id='bleakmoor_intro',
+        ).one()
+
+
+def test_import_road_of_unremembered_kings_example_pack_dry_run(client, app):
+    response = client.post(
+        '/api/campaigns/example-packs/original_fantasy.road_of_unremembered_kings/import?dry_run=true',
+        json={},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['dry_run'] is True
+    assert payload['pack_id'] == 'original_fantasy_road_of_unremembered_kings'
+    assert payload['preview']['title'] == 'The Road of Unremembered Kings'
+    assert payload['preview']['starting_location_id'] == 'loc_lantern_post_inn'
+    with app.app_context():
+        assert Campaign.query.filter_by(title='The Road of Unremembered Kings').count() == 0
+
+
+def test_import_example_campaign_pack_can_use_existing_world(client, app):
+    with app.app_context():
+        world = World(name='Shared Table World', description='Existing setting')
+        db.session.add(world)
+        db.session.commit()
+        world_id = world.world_id
+
+    response = client.post(
+        '/api/campaigns/example-packs/bleakmoor_intro/import',
+        json={'world_id': world_id},
+    )
+
+    assert response.status_code == 201
+    with app.app_context():
+        campaign = db.session.get(Campaign, response.get_json()['campaign_id'])
+        assert campaign.world_id == world_id
+
+
 def test_import_campaign_pack_seeds_structured_campaign_content(client, app):
     with app.app_context():
         world = World(name='Bleakmoor', description='A marshland test world')

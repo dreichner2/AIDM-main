@@ -58,6 +58,23 @@ def test_rules_classifier_ignores_retrospective_attack_references():
     assert hint.roll_type is None
 
 
+def test_rules_classifier_ignores_reported_threat_references():
+    hint = classify_player_action(
+        "Sorry Sir but we've come to ask about this stone. "
+        'We have already run into 2 people trying to kill us for it.'
+    )
+    assert hint.requires_roll is False
+    assert hint.roll_type is None
+
+    warning = classify_player_action('I tell the dwarf that people are trying to kill us for the stone.')
+    assert warning.requires_roll is False
+    assert warning.roll_type is None
+
+    question = classify_player_action('I ask the bandit why did you attack us?')
+    assert question.requires_roll is False
+    assert question.roll_type is None
+
+
 def test_rules_classifier_marks_resolved_when_roll_is_provided():
     hint = classify_player_action('I attack and rolled a d20: 17')
     assert hint.requires_roll is True
