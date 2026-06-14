@@ -79,7 +79,12 @@ jobs:
         env:
           PYTHON: python
         run: |
-          npx playwright install chromium
+          if command -v google-chrome >/dev/null 2>&1; then
+            echo "Using system Chrome for browser smoke."
+            export PLAYWRIGHT_CHROMIUM_CHANNEL=chrome
+          else
+            npx playwright install chromium
+          fi
           npm run smoke:browser
 
   visual-smoke:
@@ -110,7 +115,12 @@ jobs:
         env:
           PYTHON: python
         run: |
-          npx playwright install chromium
+          if command -v google-chrome >/dev/null 2>&1; then
+            echo "Using system Chrome for visual smoke."
+            export PLAYWRIGHT_CHROMIUM_CHANNEL=chrome
+          else
+            npx playwright install chromium
+          fi
           npm run smoke:visual
       - name: Upload visual smoke artifacts
         if: always()

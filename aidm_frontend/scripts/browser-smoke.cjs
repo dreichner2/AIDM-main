@@ -11,6 +11,7 @@ const { chromium, expect } = require('@playwright/test')
 const REPO_ROOT = path.resolve(__dirname, '..', '..')
 const FRONTEND_ROOT = path.resolve(__dirname, '..')
 const PYTHON = process.env.PYTHON || path.join(REPO_ROOT, '.venv', 'bin', 'python')
+const CHROMIUM_CHANNEL = process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || ''
 const SMOKE_TIMEOUT_MS = Number(process.env.AIDM_BROWSER_SMOKE_TIMEOUT_MS || 90_000)
 const SMOKE_TOTAL_TIMEOUT_MS = Number(process.env.AIDM_BROWSER_SMOKE_TOTAL_TIMEOUT_MS || 480_000)
 const SHUTDOWN_GRACE_MS = Number(process.env.AIDM_BROWSER_SMOKE_SHUTDOWN_GRACE_MS || 2_000)
@@ -166,7 +167,7 @@ async function waitForRouteIds(page) {
 }
 
 async function runBrowserFlow(frontendUrl, backendUrl) {
-  const browser = await chromium.launch()
+  const browser = await chromium.launch(CHROMIUM_CHANNEL ? { channel: CHROMIUM_CHANNEL } : {})
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
   const consoleErrors = []
 

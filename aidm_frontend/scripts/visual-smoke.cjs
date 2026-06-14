@@ -11,6 +11,7 @@ const { chromium, expect } = require('@playwright/test')
 const REPO_ROOT = path.resolve(__dirname, '..', '..')
 const FRONTEND_ROOT = path.resolve(__dirname, '..')
 const PYTHON = process.env.PYTHON || path.join(REPO_ROOT, '.venv', 'bin', 'python')
+const CHROMIUM_CHANNEL = process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || ''
 const SMOKE_TIMEOUT_MS = Number(process.env.AIDM_VISUAL_SMOKE_TIMEOUT_MS || 90_000)
 const ARTIFACT_ROOT = path.join(REPO_ROOT, 'tmp', 'verification_artifacts', 'visual-smoke')
 
@@ -253,7 +254,7 @@ async function assertLayoutHealth(page, viewport) {
 }
 
 async function runVisualFlow(frontendUrl, backendUrl, ids, artifactDir) {
-  const browser = await chromium.launch()
+  const browser = await chromium.launch(CHROMIUM_CHANNEL ? { channel: CHROMIUM_CHANNEL } : {})
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
   const consoleErrors = []
 
