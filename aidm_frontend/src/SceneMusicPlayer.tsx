@@ -23,6 +23,19 @@ type MusicPlayerLayout = {
   height: number
 }
 
+type LoadedMusicPlayerLayout = {
+  fromStorage: boolean
+  layout: MusicPlayerLayout
+}
+
+type MusicPlayerBounds = {
+  fromSessionBoard: boolean
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
 type MusicPanelDragState = {
   mode: 'move' | 'resize'
   startX: number
@@ -65,6 +78,7 @@ const REWIND_SECONDS = 15
 const MUSIC_SYNC_HEARTBEAT_MS = 10000
 const MUSIC_MAX_POSITION_SECONDS = 24 * 60 * 60
 const MUSIC_PANEL_MARGIN = 12
+const DEFAULT_MUSIC_PANEL_TOP_OFFSET = 116
 const DEFAULT_MUSIC_PANEL_WIDTH = 560
 const DEFAULT_MUSIC_PANEL_HEIGHT = 178
 const MIN_MUSIC_PANEL_WIDTH = 72
@@ -130,27 +144,58 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
 }
 
-function defaultMusicLayout(): MusicPlayerLayout {
+function viewportMusicBounds(): MusicPlayerBounds {
   const viewport = viewportSize()
-  const width = Math.min(DEFAULT_MUSIC_PANEL_WIDTH, Math.max(MIN_MUSIC_PANEL_WIDTH, viewport.width - MUSIC_PANEL_MARGIN * 2))
-  const height = Math.min(DEFAULT_MUSIC_PANEL_HEIGHT, Math.max(MIN_MUSIC_PANEL_HEIGHT, viewport.height - MUSIC_PANEL_MARGIN * 2))
   return {
-    left: Math.max(MUSIC_PANEL_MARGIN, viewport.width - width - 18),
-    top: Math.min(118, Math.max(MUSIC_PANEL_MARGIN, viewport.height - height - MUSIC_PANEL_MARGIN)),
+    fromSessionBoard: false,
+    left: MUSIC_PANEL_MARGIN,
+    top: MUSIC_PANEL_MARGIN,
+    right: Math.max(MUSIC_PANEL_MARGIN + MIN_MUSIC_PANEL_WIDTH, viewport.width - MUSIC_PANEL_MARGIN),
+    bottom: Math.max(MUSIC_PANEL_MARGIN + MIN_MUSIC_PANEL_HEIGHT, viewport.height - MUSIC_PANEL_MARGIN),
+  }
+}
+
+function sessionBoardMusicBounds(): MusicPlayerBounds {
+  const fallbackBounds = viewportMusicBounds()
+  if (typeof document === 'undefined') return fallbackBounds
+  const sessionBoard = document.querySelector<HTMLElement>('.session-board')
+  if (!sessionBoard) return fallbackBounds
+  const rect = sessionBoard.getBoundingClientRect()
+  if (rect.width < MIN_MUSIC_PANEL_WIDTH + MUSIC_PANEL_MARGIN * 2) return fallbackBounds
+  if (rect.height < MIN_MUSIC_PANEL_HEIGHT + MUSIC_PANEL_MARGIN * 2) return fallbackBounds
+
+  const left = clampNumber(rect.left + MUSIC_PANEL_MARGIN, fallbackBounds.left, fallbackBounds.right)
+  const top = clampNumber(rect.top + MUSIC_PANEL_MARGIN, fallbackBounds.top, fallbackBounds.bottom)
+  const right = clampNumber(rect.right - MUSIC_PANEL_MARGIN, left + MIN_MUSIC_PANEL_WIDTH, fallbackBounds.right)
+  const bottom = clampNumber(rect.bottom - MUSIC_PANEL_MARGIN, top + MIN_MUSIC_PANEL_HEIGHT, fallbackBounds.bottom)
+  return { fromSessionBoard: true, left, top, right, bottom }
+}
+
+function defaultMusicLayout(): MusicPlayerLayout {
+  const bounds = sessionBoardMusicBounds()
+  const maxWidth = Math.max(MIN_MUSIC_PANEL_WIDTH, bounds.right - bounds.left)
+  const maxHeight = Math.max(MIN_MUSIC_PANEL_HEIGHT, bounds.bottom - bounds.top)
+  const width = Math.min(DEFAULT_MUSIC_PANEL_WIDTH, maxWidth)
+  const height = Math.min(DEFAULT_MUSIC_PANEL_HEIGHT, maxHeight)
+  return {
+    left: bounds.fromSessionBoard
+      ? bounds.left
+      : clampNumber(bounds.right - width - 6, bounds.left, Math.max(bounds.left, bounds.right - width)),
+    top: clampNumber(bounds.top + DEFAULT_MUSIC_PANEL_TOP_OFFSET, bounds.top, Math.max(bounds.top, bounds.bottom - height)),
     width,
     height,
   }
 }
 
 function clampMusicLayout(layout: MusicPlayerLayout): MusicPlayerLayout {
-  const viewport = viewportSize()
-  const maxWidth = Math.max(MIN_MUSIC_PANEL_WIDTH, viewport.width - MUSIC_PANEL_MARGIN * 2)
-  const maxHeight = Math.max(MIN_MUSIC_PANEL_HEIGHT, viewport.height - MUSIC_PANEL_MARGIN * 2)
+  const bounds = sessionBoardMusicBounds()
+  const maxWidth = Math.max(MIN_MUSIC_PANEL_WIDTH, bounds.right - bounds.left)
+  const maxHeight = Math.max(MIN_MUSIC_PANEL_HEIGHT, bounds.bottom - bounds.top)
   const width = clampNumber(layout.width, MIN_MUSIC_PANEL_WIDTH, maxWidth)
   const height = clampNumber(layout.height, MIN_MUSIC_PANEL_HEIGHT, maxHeight)
   return {
-    left: clampNumber(layout.left, MUSIC_PANEL_MARGIN, Math.max(MUSIC_PANEL_MARGIN, viewport.width - width - MUSIC_PANEL_MARGIN)),
-    top: clampNumber(layout.top, MUSIC_PANEL_MARGIN, Math.max(MUSIC_PANEL_MARGIN, viewport.height - height - MUSIC_PANEL_MARGIN)),
+    left: clampNumber(layout.left, bounds.left, Math.max(bounds.left, bounds.right - width)),
+    top: clampNumber(layout.top, bounds.top, Math.max(bounds.top, bounds.bottom - height)),
     width,
     height,
   }
@@ -166,19 +211,22 @@ function musicPanelMode(layout: MusicPlayerLayout): MusicPanelMode {
   return 'full'
 }
 
-function loadMusicLayout(): MusicPlayerLayout {
+function loadMusicLayout(): LoadedMusicPlayerLayout {
   try {
     const rawValue = localStorage.getItem(MUSIC_LAYOUT_STORAGE_KEY)
-    if (!rawValue) return defaultMusicLayout()
+    if (!rawValue) return { fromStorage: false, layout: defaultMusicLayout() }
     const parsed = JSON.parse(rawValue) as Partial<MusicPlayerLayout>
-    return clampMusicLayout({
-      left: Number(parsed.left),
-      top: Number(parsed.top),
-      width: Number(parsed.width),
-      height: Number(parsed.height),
-    })
+    return {
+      fromStorage: true,
+      layout: clampMusicLayout({
+        left: Number(parsed.left),
+        top: Number(parsed.top),
+        width: Number(parsed.width),
+        height: Number(parsed.height),
+      }),
+    }
   } catch {
-    return defaultMusicLayout()
+    return { fromStorage: false, layout: defaultMusicLayout() }
   }
 }
 
@@ -241,7 +289,9 @@ export function SceneMusicPlayer({
   const pendingRemoteSyncRef = useRef<SceneMusicSyncState | null>(null)
   const lastAppliedSyncRef = useRef<number | null>(null)
   const [storedPreferences] = useState(() => initialMusicState())
-  const [panelLayout, setPanelLayout] = useState(() => loadMusicLayout())
+  const [loadedPanelLayout] = useState(() => loadMusicLayout())
+  const [panelLayout, setPanelLayout] = useState(loadedPanelLayout.layout)
+  const [hasCustomPanelLayout, setHasCustomPanelLayout] = useState(loadedPanelLayout.fromStorage)
   const [mobileStaticLayout, setMobileStaticLayout] = useState(() => isMobileMusicLayout())
   const [isMovingPanel, setIsMovingPanel] = useState(false)
   const [selectedTag, setSelectedTag] = useState<MusicFilter>(storedPreferences.selectedTag)
@@ -268,6 +318,16 @@ export function SceneMusicPlayer({
   }, [mobileStaticLayout, panelLayout])
 
   useEffect(() => {
+    if (mobileStaticLayout || hasCustomPanelLayout) return
+    if (typeof window.requestAnimationFrame === 'function') {
+      const frameId = window.requestAnimationFrame(() => setPanelLayout(defaultMusicLayout()))
+      return () => window.cancelAnimationFrame(frameId)
+    }
+    const timerId = window.setTimeout(() => setPanelLayout(defaultMusicLayout()), 0)
+    return () => window.clearTimeout(timerId)
+  }, [hasCustomPanelLayout, mobileStaticLayout])
+
+  useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
     const mediaQuery = window.matchMedia(MOBILE_MUSIC_LAYOUT_QUERY)
     const handleLayoutChange = () => setMobileStaticLayout(mediaQuery.matches)
@@ -277,11 +337,11 @@ export function SceneMusicPlayer({
 
   useEffect(() => {
     const handleWindowResize = () => {
-      setPanelLayout((current) => clampMusicLayout(current))
+      setPanelLayout((current) => (hasCustomPanelLayout ? clampMusicLayout(current) : defaultMusicLayout()))
     }
     window.addEventListener('resize', handleWindowResize)
     return () => window.removeEventListener('resize', handleWindowResize)
-  }, [])
+  }, [hasCustomPanelLayout])
 
   useEffect(() => {
     const audio = audioRef.current
@@ -331,6 +391,7 @@ export function SceneMusicPlayer({
     (mode: MusicPanelDragState['mode'], event: ReactPointerEvent<HTMLElement>) => {
       if (event.button !== 0) return
       event.preventDefault()
+      setHasCustomPanelLayout(true)
       dragStateRef.current = {
         mode,
         startX: event.clientX,

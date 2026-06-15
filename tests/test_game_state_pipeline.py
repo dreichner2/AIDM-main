@@ -5298,6 +5298,126 @@ def test_post_dm_helper_filters_other_player_combat_mutations(app, monkeypatch):
     assert 'filtered_actor_ownership' in result['notes']
 
 
+def test_post_dm_helper_allows_dm_confirmed_enemy_damage_to_other_player(app, monkeypatch):
+    class FakeProvider:
+        def generate(self, _request):
+            return ProviderResponse(
+                text=(
+                    '{"proposedChanges":['
+                    '{"id":"confirmed_damage","type":"health.damage","actorId":"player_2","amount":3},'
+                    '{"id":"confirmed_participant","type":"combat.participant.update",'
+                    '"participantId":"player_2","hp":{"current":9,"max":12}}'
+                    '],"uncertainChanges":[]}'
+                ),
+                provider='fake',
+                model='fake-helper',
+            )
+
+    monkeypatch.setattr(post_extractor_module, 'get_helper_provider', lambda: FakeProvider())
+    state = _two_player_state()
+    state['combat'] = {
+        'status': 'active',
+        'round': 1,
+        'participants': [
+            {'id': 'player_1', 'team': 'player', 'name': 'Kael', 'hp': {'current': 10, 'max': 20}},
+            {'id': 'player_2', 'team': 'player', 'name': 'Borin', 'hp': {'current': 12, 'max': 12}},
+            {'id': 'enemy_1', 'team': 'enemy', 'name': 'Bandit', 'hp': {'current': 6, 'max': 6}},
+        ],
+    }
+
+    with app.app_context():
+        app.config['AIDM_STATE_PIPELINE_HELPER_IN_TESTS'] = True
+        result = extract_post_dm_outcomes(
+            state_before_dm=state,
+            player_message='I miss the bandit.',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response='The Bandit rolls 14 against Borin. The attack hits. Borin takes 3 slashing damage.',
+            recent_timeline=[],
+            actor_id='player_1',
+            turn_id=57,
+        )
+
+    damage = next(change for change in result['proposedChanges'] if change.get('type') == 'health.damage')
+    assert damage['actorId'] == 'player_2'
+    assert damage['amount'] == 3
+    assert damage['id'] in result['authorizedCrossActorChangeIds']
+    assert not any(
+        change.get('type') == 'combat.participant.update'
+        and change.get('participantId') == 'player_2'
+        for change in result['proposedChanges']
+    )
+
+    validation = validate_state_changes(
+        state=state,
+        changes=result['proposedChanges'],
+        expected_actor_id='player_1',
+        authorized_cross_actor_change_ids=result['authorizedCrossActorChangeIds'],
+    )
+    applied = apply_state_changes(state, validated_changes_for_application(validation))
+    victim = applied['nextState']['playerCharacters'][1]
+    participant = applied['nextState']['combat']['participants'][1]
+    assert victim['health']['currentHp'] == 9
+    assert participant['hp']['current'] == 9
+
+
+def test_post_dm_helper_allows_dm_confirmed_cross_player_participant_hp_drop(app, monkeypatch):
+    class FakeProvider:
+        def generate(self, _request):
+            return ProviderResponse(
+                text=(
+                    '{"proposedChanges":['
+                    '{"id":"confirmed_drop","type":"combat.participant.update",'
+                    '"participantId":"player_2","hp":{"current":0,"max":12},'
+                    '"isAlive":false,"isConscious":false}'
+                    '],"uncertainChanges":[]}'
+                ),
+                provider='fake',
+                model='fake-helper',
+            )
+
+    monkeypatch.setattr(post_extractor_module, 'get_helper_provider', lambda: FakeProvider())
+    state = _two_player_state()
+    state['combat'] = {
+        'status': 'ended',
+        'round': 2,
+        'participants': [
+            {'id': 'player_1', 'team': 'player', 'name': 'Kael', 'hp': {'current': 10, 'max': 20}},
+            {'id': 'player_2', 'team': 'player', 'name': 'Borin', 'hp': {'current': 12, 'max': 12}},
+        ],
+    }
+
+    with app.app_context():
+        app.config['AIDM_STATE_PIPELINE_HELPER_IN_TESTS'] = True
+        result = extract_post_dm_outcomes(
+            state_before_dm=state,
+            player_message='Can the bandit still hit Borin?',
+            validated_actions={},
+            already_applied_changes=[],
+            dm_response='Borin takes 15 slashing damage. Borin drops to 0 HP.',
+            recent_timeline=[],
+            actor_id='player_1',
+            turn_id=58,
+        )
+
+    hp_update = next(change for change in result['proposedChanges'] if change.get('type') == 'combat.participant.update')
+    assert hp_update['participantId'] == 'player_2'
+    assert hp_update['hp']['current'] == 0
+    assert hp_update['id'] in result['authorizedCrossActorChangeIds']
+
+    validation = validate_state_changes(
+        state=state,
+        changes=result['proposedChanges'],
+        expected_actor_id='player_1',
+        authorized_cross_actor_change_ids=result['authorizedCrossActorChangeIds'],
+    )
+    applied = apply_state_changes(state, validated_changes_for_application(validation))
+    victim = applied['nextState']['playerCharacters'][1]
+    participant = applied['nextState']['combat']['participants'][1]
+    assert victim['health']['currentHp'] == 0
+    assert participant['hp']['current'] == 0
+
+
 def test_post_dm_helper_inventory_remove_missing_quantity_does_not_apply_or_fallback(app, monkeypatch):
     class FakeProvider:
         def generate(self, _request):

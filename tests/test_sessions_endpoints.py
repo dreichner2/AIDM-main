@@ -10,6 +10,7 @@ from aidm_server.database import db
 from aidm_server.models import (
     Campaign,
     DmTurn,
+    OperatorActionAudit,
     Session,
     SessionLogEntry,
     SessionState,
@@ -321,6 +322,11 @@ def test_import_session_from_export_restores_state_events_and_projected_log(clie
         assert imported_state.rolling_summary == 'The party found the gate in an exported file.'
         assert json.loads(imported_state.active_segments) == [{'title': 'Gate'}]
         assert json.loads(imported_state.memory_snippets) == [{'summary': 'Exported memory'}]
+        audit = OperatorActionAudit.query.filter_by(action='session.import', session_id=imported_session_id).one()
+        assert audit.resource_id == str(imported_session_id)
+        audit_details = json.loads(audit.details_json)
+        assert audit_details['turnEventsImported'] == 2
+        assert audit_details['projectedLogEntries'] == 2
 
         events = TurnEvent.query.filter_by(session_id=imported_session_id).order_by(TurnEvent.event_id.asc()).all()
         assert [event.event_type for event in events] == [PLAYER_MESSAGE_EVENT, DM_RESPONSE_EVENT]
@@ -805,6 +811,13 @@ def test_delete_session_archives_and_restore_resurfaces_in_lists(client, app):
     assert restore_payload['restored'] is True
     assert restore_payload['session']['status'] == 'active'
     assert restore_payload['session']['deleted_at'] is None
+    with app.app_context():
+        audits = (
+            OperatorActionAudit.query.filter_by(session_id=ids['session_id'])
+            .order_by(OperatorActionAudit.operator_audit_id.asc())
+            .all()
+        )
+        assert [audit.action for audit in audits] == ['session.archive', 'session.restore']
 
 
 def test_delete_missing_and_repeated_hard_delete_returns_404(client, app):
@@ -816,6 +829,9 @@ def test_delete_missing_and_repeated_hard_delete_returns_404(client, app):
 
     first_response = client.delete(f"/api/sessions/{ids['session_id']}?hard=true")
     assert first_response.status_code == 200
+    with app.app_context():
+        audit = OperatorActionAudit.query.filter_by(action='session.delete_hard', resource_id=str(ids['session_id'])).one()
+        assert audit.campaign_id == ids['campaign_id']
 
     repeated_response = client.delete(f"/api/sessions/{ids['session_id']}?hard=true")
     assert repeated_response.status_code == 404

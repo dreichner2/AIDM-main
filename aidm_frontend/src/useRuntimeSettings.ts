@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { addNgrokBrowserWarningBypassHeader, normalizeBaseUrl } from './api'
+import { addCookieCsrfHeader, addNgrokBrowserWarningBypassHeader, normalizeBaseUrl } from './api'
 import type { Account, AccountSession, AccountWorkspace } from './types'
 
 export type RuntimeSettingsForm = {
@@ -40,6 +40,8 @@ type RuntimeApiError = Error & {
 
 const ACCOUNT_TOKEN_COOKIE = 'aidm_account_token'
 const ACCOUNT_TOKEN_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
+const ACCOUNT_TOKEN_TRANSPORT_KEY = 'aidm:accountTokenTransport'
+const HTTP_ONLY_COOKIE_TRANSPORT = 'http_only_cookie'
 const LEGACY_PASSWORD_SETUP_ERROR_CODE = 'legacy_password_setup_required'
 export const LEGACY_PASSWORD_SETUP_MESSAGE =
   'Legacy account found. Use Sign Up with this username, the exact first and last name originally used, and a new password.'
@@ -90,6 +92,29 @@ function storeSessionAuthToken(value: string) {
     sessionStorage.removeItem('aidm:authToken')
     clearCookie(ACCOUNT_TOKEN_COOKIE)
   }
+}
+
+function loadAccountTokenTransport() {
+  return sessionStorage.getItem(ACCOUNT_TOKEN_TRANSPORT_KEY) ?? localStorage.getItem(ACCOUNT_TOKEN_TRANSPORT_KEY) ?? ''
+}
+
+function storeAccountTokenTransport(value: string | null | undefined) {
+  const transport = String(value || '').trim()
+  if (transport) {
+    sessionStorage.setItem(ACCOUNT_TOKEN_TRANSPORT_KEY, transport)
+    localStorage.setItem(ACCOUNT_TOKEN_TRANSPORT_KEY, transport)
+  } else {
+    sessionStorage.removeItem(ACCOUNT_TOKEN_TRANSPORT_KEY)
+    localStorage.removeItem(ACCOUNT_TOKEN_TRANSPORT_KEY)
+  }
+}
+
+function accountSessionTokenTransport(session: AccountSession) {
+  return String(session.account_token_transport || '').trim()
+}
+
+function hasCookieAccountSession(transport: string) {
+  return transport === HTTP_ONLY_COOKIE_TRANSPORT
 }
 
 function loadSessionWorkspaceToken() {
@@ -269,6 +294,7 @@ async function submitAccountSession(
   if (accountToken.trim()) {
     headers.set('Authorization', `Bearer ${accountToken.trim()}`)
   }
+  addCookieCsrfHeader(headers)
   addNgrokBrowserWarningBypassHeader(headers, baseUrl)
 
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${'/api/accounts/login'}`, {
@@ -303,6 +329,7 @@ async function fetchAccountSnapshot(baseUrl: string, accountToken: string, works
   if (workspaceToken.trim()) {
     headers.set('X-AIDM-Workspace-Token', workspaceToken.trim())
   }
+  addCookieCsrfHeader(headers)
   addNgrokBrowserWarningBypassHeader(headers, baseUrl)
 
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${'/api/accounts/me'}`, { headers })
@@ -326,6 +353,7 @@ async function submitWorkspaceSession(
   if (payload.workspace_token?.trim()) {
     headers.set('X-AIDM-Workspace-Token', payload.workspace_token.trim())
   }
+  addCookieCsrfHeader(headers)
   addNgrokBrowserWarningBypassHeader(headers, baseUrl)
 
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${'/api/accounts/workspace'}`, {
@@ -350,6 +378,7 @@ async function createWorkspaceSession(
   if (accountToken.trim()) {
     headers.set('Authorization', `Bearer ${accountToken.trim()}`)
   }
+  addCookieCsrfHeader(headers)
   addNgrokBrowserWarningBypassHeader(headers, baseUrl)
 
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${'/api/accounts/workspaces'}`, {
@@ -370,6 +399,7 @@ async function selectWorkspaceSession(baseUrl: string, workspaceId: string, acco
   if (accountToken.trim()) {
     headers.set('Authorization', `Bearer ${accountToken.trim()}`)
   }
+  addCookieCsrfHeader(headers)
   addNgrokBrowserWarningBypassHeader(headers, baseUrl)
 
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}${'/api/accounts/workspace/select'}`, {
@@ -392,6 +422,7 @@ async function deleteWorkspaceSession(baseUrl: string, workspaceId: string, acco
   if (accountToken.trim()) {
     headers.set('Authorization', `Bearer ${accountToken.trim()}`)
   }
+  addCookieCsrfHeader(headers)
   addNgrokBrowserWarningBypassHeader(headers, baseUrl)
 
   const response = await fetch(
@@ -418,6 +449,16 @@ async function deleteWorkspaceSession(baseUrl: string, workspaceId: string, acco
   return payload as AccountSession
 }
 
+async function deleteAccountSessionCookie(baseUrl: string) {
+  const headers = new Headers()
+  addNgrokBrowserWarningBypassHeader(headers, baseUrl)
+  addCookieCsrfHeader(headers)
+  await fetch(`${normalizeBaseUrl(baseUrl)}${'/api/accounts/session'}`, {
+    method: 'DELETE',
+    headers,
+  })
+}
+
 type UseRuntimeSettingsOptions = {
   defaultBaseUrl: string
   resetRuntimeState: () => void
@@ -431,6 +472,7 @@ export function useRuntimeSettings({
 }: UseRuntimeSettingsOptions) {
   const [baseUrl, setBaseUrl] = useState(() => loadInitialBaseUrl(defaultBaseUrl))
   const [authToken, setAuthToken] = useState(() => loadSessionAuthToken())
+  const [accountTokenTransport, setAccountTokenTransport] = useState(() => loadAccountTokenTransport())
   const [pendingAuthToken, setPendingAuthToken] = useState('')
   const [workspaceToken, setWorkspaceToken] = useState(() => loadSessionWorkspaceToken())
   const [workspaceId, setWorkspaceId] = useState(() => loadStoredWorkspaceId())
@@ -438,7 +480,9 @@ export function useRuntimeSettings({
   const [runtimeSettingsOpen, setRuntimeSettingsOpen] = useState(false)
   const [runtimeSettingsMode, setRuntimeSettingsMode] = useState<RuntimeSettingsMode>('settings')
   const [runtimeAuthIntent, setRuntimeAuthIntent] = useState<RuntimeAuthIntent>('login')
-  const [runtimeAuthStep, setRuntimeAuthStep] = useState<RuntimeAuthStep>(() => (loadSessionAuthToken() ? 'workspace' : 'account'))
+  const [runtimeAuthStep, setRuntimeAuthStep] = useState<RuntimeAuthStep>(() =>
+    loadSessionAuthToken() || hasCookieAccountSession(loadAccountTokenTransport()) ? 'workspace' : 'account',
+  )
   const [runtimeWorkspaceAction, setRuntimeWorkspaceAction] = useState<RuntimeWorkspaceAction>('join')
   const [runtimeWorkspaceJoinMethod, setRuntimeWorkspaceJoinMethod] = useState<RuntimeWorkspaceJoinMethod>('token')
   const [runtimeWorkspaceCreateAccessMode, setRuntimeWorkspaceCreateAccessMode] =
@@ -478,13 +522,18 @@ export function useRuntimeSettings({
   const refreshRuntimeAccount = useCallback(
     async (options: { reportError?: boolean } = {}) => {
       const accountStepToken = pendingAuthToken.trim() || authToken.trim() || loadSessionAuthToken().trim()
-      if (!accountStepToken) return null
+      const cookieAuthAvailable = hasCookieAccountSession(accountTokenTransport || loadAccountTokenTransport())
+      if (!accountStepToken && !cookieAuthAvailable) return null
 
       try {
         const nextBaseUrl = normalizeBaseUrl(runtimeSettingsForm.baseUrl || baseUrl)
         const accountSnapshot = await fetchAccountSnapshot(nextBaseUrl, accountStepToken, workspaceToken)
         const account = mergeAccountWorkspaceState(accountSnapshot, runtimeAccount, workspaceId)
         storeSessionAuthToken(accountStepToken)
+        if (cookieAuthAvailable) {
+          storeAccountTokenTransport(HTTP_ONLY_COOKIE_TRANSPORT)
+          setAccountTokenTransport(HTTP_ONLY_COOKIE_TRANSPORT)
+        }
         storeSessionAccount(account)
         setRuntimeAccount(account)
         setRuntimeSettingsForm((current) => ({
@@ -512,6 +561,7 @@ export function useRuntimeSettings({
       }
     },
     [
+      accountTokenTransport,
       authToken,
       baseUrl,
       pendingAuthToken,
@@ -525,15 +575,16 @@ export function useRuntimeSettings({
 
   useEffect(() => {
     const accountStepToken = authToken.trim()
-    if (!accountStepToken) {
+    if (!accountStepToken && !hasCookieAccountSession(accountTokenTransport)) {
       accountRefreshTokenRef.current = ''
       return
     }
-    if (accountRefreshTokenRef.current === accountStepToken) return
+    const refreshKey = accountStepToken || accountTokenTransport
+    if (accountRefreshTokenRef.current === refreshKey) return
 
-    accountRefreshTokenRef.current = accountStepToken
+    accountRefreshTokenRef.current = refreshKey
     void refreshRuntimeAccount()
-  }, [authToken, refreshRuntimeAccount])
+  }, [accountTokenTransport, authToken, refreshRuntimeAccount])
 
   const openRuntimeSettings = useCallback((mode: RuntimeSettingsMode = 'settings') => {
     const needsPasswordSetup = runtimeAccount?.requiresPasswordSetup === true
@@ -556,11 +607,9 @@ export function useRuntimeSettings({
     setRuntimeWorkspaceAction('join')
     setRuntimeWorkspaceJoinMethod('token')
     setRuntimeCreatedWorkspaceToken('')
-    setRuntimeAuthStep(
-      needsPasswordSetup || !(mode === 'auth' && (authToken.trim() || pendingAuthToken.trim()))
-        ? 'account'
-        : 'workspace',
-    )
+    const accountSessionAvailable =
+      authToken.trim() || pendingAuthToken.trim() || hasCookieAccountSession(accountTokenTransport)
+    setRuntimeAuthStep(needsPasswordSetup || !(mode === 'auth' && accountSessionAvailable) ? 'account' : 'workspace')
     if (needsPasswordSetup) {
       setRuntimeAuthIntent('signup')
     }
@@ -568,10 +617,11 @@ export function useRuntimeSettings({
     setRuntimeSettingsError(needsPasswordSetup ? LEGACY_PASSWORD_SETUP_MESSAGE : '')
     setLegacyPasswordSetupRequired(needsPasswordSetup)
     setRuntimeSettingsOpen(true)
-    if (mode === 'auth' && (authToken.trim() || pendingAuthToken.trim())) {
+    if (mode === 'auth' && accountSessionAvailable) {
       void refreshRuntimeAccount({ reportError: true })
     }
   }, [
+    accountTokenTransport,
     authToken,
     baseUrl,
     pendingAuthToken,
@@ -633,6 +683,7 @@ export function useRuntimeSettings({
             { intent: runtimeAuthIntent, legacyClaim: legacyPasswordSetupAttempt },
           )
           const accountToken = accountSession.account_token.trim()
+          const tokenTransport = accountSessionTokenTransport(accountSession)
           const account = accountFromSession(accountSession)
           if (nextBaseUrl) {
             localStorage.setItem('aidm:baseUrl', nextBaseUrl)
@@ -640,10 +691,12 @@ export function useRuntimeSettings({
             localStorage.removeItem('aidm:baseUrl')
           }
           storeSessionAuthToken(accountToken)
+          storeAccountTokenTransport(tokenTransport)
           storeSessionWorkspaceToken('')
           storeWorkspaceId(account.workspaceId)
           storeSessionAccount(account)
           setBaseUrl(nextBaseUrl)
+          setAccountTokenTransport(tokenTransport)
           setPendingAuthToken(accountToken)
           setWorkspaceToken('')
           setWorkspaceId(account.workspaceId ?? '')
@@ -677,7 +730,8 @@ export function useRuntimeSettings({
           return
         }
         const accountStepToken = pendingAuthToken.trim() || nextAuthToken
-        if (!accountStepToken) {
+        const cookieAuthAvailable = hasCookieAccountSession(accountTokenTransport)
+        if (!accountStepToken && !cookieAuthAvailable) {
           setRuntimeSettingsError('Log in or sign up before joining a table.')
           setRuntimeAuthStep('account')
           return
@@ -729,6 +783,7 @@ export function useRuntimeSettings({
             })
           }
           const accountToken = accountSession.account_token.trim()
+          const tokenTransport = accountSessionTokenTransport(accountSession) || accountTokenTransport
           const account = accountFromSession(accountSession)
           if (nextBaseUrl) {
             localStorage.setItem('aidm:baseUrl', nextBaseUrl)
@@ -736,11 +791,13 @@ export function useRuntimeSettings({
             localStorage.removeItem('aidm:baseUrl')
           }
           storeSessionAuthToken(accountToken)
+          storeAccountTokenTransport(tokenTransport)
           storeSessionWorkspaceToken(storedWorkspaceToken)
           storeWorkspaceId(account.workspaceId)
           storeSessionAccount(account)
           setBaseUrl(nextBaseUrl)
           setAuthToken(accountToken)
+          setAccountTokenTransport(tokenTransport)
           setPendingAuthToken('')
           setWorkspaceToken(storedWorkspaceToken)
           setWorkspaceId(account.workspaceId ?? '')
@@ -807,6 +864,7 @@ export function useRuntimeSettings({
       setLegacyPasswordSetupRequired(false)
     },
     [
+      accountTokenTransport,
       authToken,
       pendingAuthToken,
       reconnectSocket,
@@ -826,12 +884,17 @@ export function useRuntimeSettings({
   )
 
   const clearAuthToken = useCallback(() => {
+    if (hasCookieAccountSession(accountTokenTransport)) {
+      void deleteAccountSessionCookie(baseUrl).catch(() => undefined)
+    }
     storeSessionAuthToken('')
+    storeAccountTokenTransport('')
     storeSessionWorkspaceToken('')
     storeWorkspaceId('')
     storeSessionAccount(null)
     accountRefreshTokenRef.current = ''
     setAuthToken('')
+    setAccountTokenTransport('')
     setPendingAuthToken('')
     setWorkspaceToken('')
     setWorkspaceId('')
@@ -850,13 +913,14 @@ export function useRuntimeSettings({
       password: '',
     }))
     reconnectSocket()
-  }, [reconnectSocket])
+  }, [accountTokenTransport, baseUrl, reconnectSocket])
 
   const selectSavedWorkspace = useCallback(
     async (nextWorkspaceId: string) => {
       const cleanWorkspaceId = nextWorkspaceId.trim()
       const accountStepToken = pendingAuthToken.trim() || authToken.trim()
-      if (!accountStepToken) {
+      const cookieAuthAvailable = hasCookieAccountSession(accountTokenTransport)
+      if (!accountStepToken && !cookieAuthAvailable) {
         setRuntimeSettingsError('Log in or sign up before choosing a workspace.')
         setRuntimeAuthStep('account')
         return
@@ -873,6 +937,7 @@ export function useRuntimeSettings({
         }
         const accountSession = await selectWorkspaceSession(nextBaseUrl, cleanWorkspaceId, accountStepToken)
         const accountToken = accountSession.account_token.trim()
+        const tokenTransport = accountSessionTokenTransport(accountSession) || accountTokenTransport
         const account = accountFromSession(accountSession)
         if (nextBaseUrl) {
           localStorage.setItem('aidm:baseUrl', nextBaseUrl)
@@ -880,11 +945,13 @@ export function useRuntimeSettings({
           localStorage.removeItem('aidm:baseUrl')
         }
         storeSessionAuthToken(accountToken)
+        storeAccountTokenTransport(tokenTransport)
         storeSessionWorkspaceToken('')
         storeWorkspaceId(account.workspaceId)
         storeSessionAccount(account)
         setBaseUrl(nextBaseUrl)
         setAuthToken(accountToken)
+        setAccountTokenTransport(tokenTransport)
         setPendingAuthToken('')
         setWorkspaceToken('')
         setWorkspaceId(account.workspaceId ?? '')
@@ -906,6 +973,7 @@ export function useRuntimeSettings({
       }
     },
     [
+      accountTokenTransport,
       authToken,
       pendingAuthToken,
       promptForLegacyPasswordSetup,
@@ -920,7 +988,8 @@ export function useRuntimeSettings({
     async (nextWorkspaceId: string): Promise<DeleteSavedWorkspaceResult> => {
       const cleanWorkspaceId = nextWorkspaceId.trim()
       const accountStepToken = pendingAuthToken.trim() || authToken.trim()
-      if (!accountStepToken) {
+      const cookieAuthAvailable = hasCookieAccountSession(accountTokenTransport)
+      if (!accountStepToken && !cookieAuthAvailable) {
         const message = 'Log in or sign up before deleting a saved table.'
         setRuntimeSettingsError(message)
         setRuntimeAuthStep('account')
@@ -940,6 +1009,7 @@ export function useRuntimeSettings({
         }
         const accountSession = await deleteWorkspaceSession(nextBaseUrl, cleanWorkspaceId, accountStepToken)
         const accountToken = accountSession.account_token.trim()
+        const tokenTransport = accountSessionTokenTransport(accountSession) || accountTokenTransport
         const removedCurrentWorkspace =
           cleanWorkspaceId === workspaceId.trim() || cleanWorkspaceId === runtimeAccount?.workspaceId
         const account = removedCurrentWorkspace
@@ -952,11 +1022,13 @@ export function useRuntimeSettings({
           localStorage.removeItem('aidm:baseUrl')
         }
         storeSessionAuthToken(accountToken)
+        storeAccountTokenTransport(tokenTransport)
         storeSessionWorkspaceToken(nextWorkspaceToken)
         storeWorkspaceId(account.workspaceId)
         storeSessionAccount(account)
         setBaseUrl(nextBaseUrl)
         setAuthToken(accountToken)
+        setAccountTokenTransport(tokenTransport)
         setPendingAuthToken('')
         setWorkspaceToken(nextWorkspaceToken)
         setWorkspaceId(account.workspaceId ?? '')
@@ -979,6 +1051,7 @@ export function useRuntimeSettings({
       }
     },
     [
+      accountTokenTransport,
       authToken,
       pendingAuthToken,
       promptForLegacyPasswordSetup,

@@ -19,7 +19,7 @@ from aidm_server.game_state.models import (
     stable_change_id,
 )
 from aidm_server.game_state.validation.validator import validate_state_changes, validated_changes_for_application
-from aidm_server.models import DmTurn, Player, PlayerAction, TurnEvent, safe_json_dumps, safe_json_loads
+from aidm_server.models import Player, safe_json_dumps, safe_json_loads
 from aidm_server.pagination import jsonify_page, limited_page
 from aidm_server.response_dtos import player_detail_payload, player_summary_payload
 from aidm_server.race_system import (
@@ -28,6 +28,12 @@ from aidm_server.race_system import (
 )
 from aidm_server.spellbook import ensure_character_sheet_spellbook
 from aidm_server.starting_inventory import starting_inventory_for_class
+from aidm_server.services.session_state_mutation import (
+    expected_state_revision_from_payload,
+    mutate_session_state,
+    state_conflict_response,
+)
+from aidm_server.services.player_lifecycle import delete_player_record
 from aidm_server.validation import (
     coerce_int,
     missing_fields,
@@ -124,7 +130,7 @@ def _equipment_session_from_payload(payload: dict, player: Player):
     return session_obj, None
 
 
-def _equipment_state_for_player(player: Player, session_obj):
+def _equipment_state_for_player(player: Player, session_obj, existing_state: dict | None = None):
     actor_id = display_actor_id(player.player_id)
     if not session_obj:
         return {
@@ -140,8 +146,11 @@ def _equipment_state_for_player(player: Player, session_obj):
             'stateChangeLedger': [],
         }
 
-    snapshot = safe_json_loads(session_obj.state_snapshot, {})
-    state = snapshot if isinstance(snapshot, dict) else {}
+    if existing_state is None:
+        snapshot = safe_json_loads(session_obj.state_snapshot, {})
+        state = snapshot if isinstance(snapshot, dict) else {}
+    else:
+        state = existing_state
     if not isinstance(state.get('playerCharacters'), list):
         state['playerCharacters'] = []
     actor = find_actor(state, actor_id)
@@ -424,42 +433,70 @@ def update_player_equipment(player_id):
 
     try:
         actor_id = display_actor_id(player.player_id)
-        state = _equipment_state_for_player(player, session_obj)
-        ledger_size = len(state.get('stateChangeLedger') or []) if isinstance(state.get('stateChangeLedger'), list) else 0
-        change = {
-            'id': stable_change_id(
-                'manual_equipment',
-                session_obj.session_id if session_obj else 'player_only',
-                player.player_id,
-                action,
-                item_id,
-                item_name,
-                payload.get('slot'),
-                ledger_size,
-            ),
-            'type': f'inventory.{action}',
-            'source': 'manual',
-            'actorId': actor_id,
-            'itemId': item_id or None,
-            'itemName': item_name or None,
-            'slot': payload.get('slot') or payload.get('equipmentSlot') or payload.get('equipment_slot'),
-            'visible': True,
-            'reason': f"Manual inventory {action}.",
-        }
-        validation = validate_state_changes(state=state, changes=[change])
-        if validation.get('rejected'):
-            reason = validation['rejected'][0].get('reason') or 'Equipment update was rejected.'
-            return error_response('validation_error', reason, 400, {'validation': validation})
+        slot = payload.get('slot') or payload.get('equipmentSlot') or payload.get('equipment_slot')
 
-        result = apply_state_changes(state, validated_changes_for_application(validation))
-        next_state = result.get('nextState') if isinstance(result.get('nextState'), dict) else state
-        next_actor = find_actor(next_state, actor_id) or {}
-        next_inventory = next_actor.get('inventory') if isinstance(next_actor.get('inventory'), dict) else {}
-        player.inventory = dump_inventory_items(next_inventory.get('items') or [])
-        snapshot_changed = bool(session_obj and result.get('appliedChanges'))
+        def equipment_change(state: dict, state_session_id: int | str) -> dict:
+            ledger_size = len(state.get('stateChangeLedger') or []) if isinstance(state.get('stateChangeLedger'), list) else 0
+            return {
+                'id': stable_change_id(
+                    'manual_equipment',
+                    state_session_id,
+                    player.player_id,
+                    action,
+                    item_id,
+                    item_name,
+                    slot,
+                    ledger_size,
+                ),
+                'type': f'inventory.{action}',
+                'source': 'manual',
+                'actorId': actor_id,
+                'itemId': item_id or None,
+                'itemName': item_name or None,
+                'slot': slot,
+                'visible': True,
+                'reason': f"Manual inventory {action}.",
+            }
+
         if session_obj:
-            session_obj.state_snapshot = safe_json_dumps(next_state, {})
-        db.session.commit()
+            def build_equipment_change(locked_session, state):
+                equipment_state = _equipment_state_for_player(player, locked_session, state)
+                return [equipment_change(equipment_state, locked_session.session_id)]
+
+            mutation = mutate_session_state(
+                session_obj.session_id,
+                build_changes=build_equipment_change,
+                source='api.player.equipment',
+                expected_revision=expected_state_revision_from_payload(payload),
+                reject_on_validation_error=True,
+            )
+            if mutation.conflict:
+                return state_conflict_response(mutation)
+            validation = mutation.validation
+            if validation.get('rejected'):
+                reason = validation['rejected'][0].get('reason') or 'Equipment update was rejected.'
+                return error_response('validation_error', reason, 400, {'validation': validation})
+            next_state = mutation.state
+            applied_changes = mutation.applied_changes
+            snapshot_changed = bool(applied_changes)
+            db.session.refresh(player)
+            state_revision = mutation.state_revision
+        else:
+            state = _equipment_state_for_player(player, None)
+            change = equipment_change(state, 'player_only')
+            validation = validate_state_changes(state=state, changes=[change])
+            if validation.get('rejected'):
+                reason = validation['rejected'][0].get('reason') or 'Equipment update was rejected.'
+                return error_response('validation_error', reason, 400, {'validation': validation})
+            result = apply_state_changes(state, validated_changes_for_application(validation))
+            next_state = result.get('nextState') if isinstance(result.get('nextState'), dict) else state
+            next_actor = find_actor(next_state, actor_id) or {}
+            next_inventory = next_actor.get('inventory') if isinstance(next_actor.get('inventory'), dict) else {}
+            player.inventory = dump_inventory_items(next_inventory.get('items') or [])
+            applied_changes = result.get('appliedChanges') or []
+            snapshot_changed = False
+            state_revision = None
+            db.session.commit()
         return jsonify(
             {
                 **player_detail_payload(player),
@@ -468,8 +505,9 @@ def update_player_equipment(player_id):
                     'action': action,
                     'session_id': session_obj.session_id if session_obj else None,
                     'snapshot_changed': snapshot_changed,
-                    'applied_changes': result.get('appliedChanges') or [],
+                    'applied_changes': applied_changes,
                     'validation': validation,
+                    'state_revision': state_revision,
                 },
             }
         )
@@ -485,14 +523,10 @@ def delete_player(player_id):
     if not player:
         return error_response('player_not_found', 'Player not found.', 404)
 
-    campaign_id = player.campaign_id
     try:
-        PlayerAction.query.filter_by(player_id=player_id).delete(synchronize_session=False)
-        DmTurn.query.filter_by(player_id=player_id).update({DmTurn.player_id: None}, synchronize_session=False)
-        TurnEvent.query.filter_by(player_id=player_id).update({TurnEvent.player_id: None}, synchronize_session=False)
-        db.session.delete(player)
+        payload = delete_player_record(player)
         db.session.commit()
-        return jsonify({'deleted': True, 'player_id': player_id, 'campaign_id': campaign_id})
+        return jsonify(payload)
     except Exception as exc:
         db.session.rollback()
         logger.error('Failed to delete player: %s', str(exc))

@@ -3,7 +3,7 @@ from __future__ import annotations
 from aidm_server.api_type_contract import API_TYPE_CONTRACT_BY_NAME
 from aidm_server.database import db
 from aidm_server.models import CampaignSegment, Map
-from scripts.generate_api_types import OUTPUT, render_types
+from scripts.generate_api_types import OUTPUT, main as generate_api_types_main, render_types
 from tests.helpers import seed_world_campaign_player_session
 
 
@@ -24,6 +24,10 @@ def _contract_field_type(type_name: str, field_name: str) -> str:
 
 def test_generated_frontend_api_contract_is_current():
     assert OUTPUT.read_text(encoding='utf-8') == render_types()
+
+
+def test_generated_frontend_api_contract_check_mode_passes():
+    assert generate_api_types_main(['--check']) == 0
 
 
 def test_frontend_api_contract_marks_nullable_backend_strings():

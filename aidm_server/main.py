@@ -16,6 +16,8 @@ from aidm_server.auth import (
     claim_legacy_players_for_account,
     ensure_account_workspace_membership,
     request_account,
+    request_account_cookie_csrf_valid,
+    request_uses_account_cookie_auth,
     request_account_token,
     request_workspace_id,
     workspace_role_is_admin,
@@ -51,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 FRONTEND_RESERVED_PREFIXES = ('api/', 'socket.io/', 'admin/')
+UNSAFE_HTTP_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
 
 
 def request_route_key() -> str:
@@ -117,6 +120,11 @@ def create_app() -> Flask:
         AIDM_AUTH_REQUIRED=config.auth_required,
         AIDM_API_AUTH_TOKENS=config.api_auth_tokens,
         AIDM_API_AUTH_TOKEN_WORKSPACES=config.api_auth_token_workspaces,
+        AIDM_ACCOUNT_COOKIE_AUTH_ENABLED=config.account_cookie_auth_enabled,
+        AIDM_ACCOUNT_COOKIE_NAME=config.account_cookie_name,
+        AIDM_ACCOUNT_COOKIE_SECURE=config.account_cookie_secure,
+        AIDM_ACCOUNT_COOKIE_SAMESITE=config.account_cookie_samesite,
+        AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=config.account_token_response_enabled,
         AIDM_LLM_PROVIDER=config.llm_provider,
         AIDM_LLM_MODEL=config.llm_model,
         AIDM_LLM_FALLBACK_MODELS=config.llm_fallback_models,
@@ -137,14 +145,21 @@ def create_app() -> Flask:
         AIDM_CORS_ALLOW_PRIVATE_NETWORK=config.cors_allow_private_network,
         AIDM_SOCKET_CORS_ALLOWLIST=config.socketio_cors_allowlist,
         AIDM_SOCKETIO_ASYNC_MODE=config.socketio_async_mode,
+        AIDM_SOCKETIO_WORKER_MODEL=config.socketio_worker_model,
+        AIDM_SOCKETIO_WORKER_MODEL_EXPLICIT=config.socketio_worker_model_explicit,
+        AIDM_SOCKETIO_MESSAGE_QUEUE=config.socketio_message_queue,
         AIDM_AUTO_CREATE_SCHEMA=config.auto_create_schema,
         AIDM_SERVE_FRONTEND=config.serve_frontend,
         AIDM_FRONTEND_DIST_DIR=str(frontend_dist_dir(config.frontend_dist_dir)),
+        AIDM_SECURITY_HEADERS_ENABLED=config.security_headers_enabled,
+        AIDM_CONTENT_SECURITY_POLICY=config.content_security_policy,
         AIDM_ADMIN_ENABLED=config.admin_enabled,
         AIDM_ADMIN_PASSCODE=config.admin_passcode,
         AIDM_TELEMETRY_ENABLED=config.telemetry_enabled,
         AIDM_TELEMETRY_ENDPOINT=config.telemetry_endpoint,
         AIDM_TELEMETRY_API_KEY=config.telemetry_api_key,
+        AIDM_OBSERVABILITY_PROVIDER=config.observability_provider,
+        AIDM_ALERT_OWNER=config.alert_owner,
         AIDM_TELEMETRY_TIMEOUT_SECONDS=config.telemetry_timeout_seconds,
         AIDM_TELEMETRY_MAX_QUEUE_SIZE=config.telemetry_max_queue_size,
         AIDM_TRUSTED_PROXY_COUNT=config.trusted_proxy_count,
@@ -201,6 +216,23 @@ def create_app() -> Flask:
 
         if request.method == 'OPTIONS':
             return None
+
+        if (
+            request.method in UNSAFE_HTTP_METHODS
+            and request.path != '/api/accounts/login'
+            and request_uses_account_cookie_auth()
+            and not request_account_cookie_csrf_valid()
+        ):
+            telemetry_event(
+                'api.csrf_rejected',
+                payload={'path': route_key, 'method': request.method, 'remote_addr': request.remote_addr},
+                severity='warning',
+            )
+            return error_response(
+                code='csrf_required',
+                message='Missing or invalid CSRF token for cookie-authenticated request.',
+                status=403,
+            )
 
         if request.path.startswith('/api/accounts'):
             return None
@@ -261,8 +293,19 @@ def create_app() -> Flask:
         return None
 
     @app.after_request
-    def _add_response_correlation_id(response):
+    def _add_response_headers(response):
         response.headers['X-Request-ID'] = getattr(g, 'aidm_correlation_id', get_correlation_id())
+        if app.config.get('AIDM_SECURITY_HEADERS_ENABLED', True):
+            csp = str(app.config.get('AIDM_CONTENT_SECURITY_POLICY') or '').strip()
+            if csp:
+                response.headers.setdefault('Content-Security-Policy', csp)
+            response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+            response.headers.setdefault('X-Frame-Options', 'DENY')
+            response.headers.setdefault('Referrer-Policy', 'no-referrer')
+            response.headers.setdefault(
+                'Permissions-Policy',
+                'camera=(), microphone=(), geolocation=(), payment=()',
+            )
         clear_logging_context()
         return response
 
@@ -293,6 +336,7 @@ def create_app() -> Flask:
 def create_socketio(app: Flask) -> SocketIO:
     allowed_origins = app.config.get('AIDM_SOCKET_CORS_ALLOWLIST', ['*'])
     async_mode = app.config.get('AIDM_SOCKETIO_ASYNC_MODE', 'threading')
+    message_queue = app.config.get('AIDM_SOCKETIO_MESSAGE_QUEUE') or None
     cors_allowed_origins = (
         '*'
         if allowed_origins == ['*']
@@ -300,11 +344,13 @@ def create_socketio(app: Flask) -> SocketIO:
         if not allowed_origins
         else allowed_origins
     )
-    return SocketIO(
-        app,
-        cors_allowed_origins=cors_allowed_origins,
-        async_mode=async_mode,
-    )
+    socketio_kwargs = {
+        'cors_allowed_origins': cors_allowed_origins,
+        'async_mode': async_mode,
+    }
+    if message_queue:
+        socketio_kwargs['message_queue'] = message_queue
+    return SocketIO(app, **socketio_kwargs)
 
 
 def build_runtime(*, ensure_schema_created: bool | None = None) -> tuple[Flask, SocketIO]:

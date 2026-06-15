@@ -1,3 +1,42 @@
+# AIDM Beta-Hardening Implementation Update - 2026-06-15
+
+Scope: implementation pass for the prior closed-beta hardening recommendations across route authorization, serialized session-state mutation, operator/player UI separation, frontend decomposition, accessibility coverage, observability, deployment readiness, release workflow, and beta feedback loops. Older dated audit entries below are preserved as historical evidence; items listed there as open may now be resolved by this pass.
+
+## Implemented Since The 2026-06-14 Audit
+
+- Added a central route capability layer and applied admin/local-operator gates to operator-grade combat and bestiary routes, including combat start, morale apply, combat-end apply, raw combat state changes, combat debug reads, campaign bestiary authoring/generation, and creature evolve/save flows.
+- Added non-admin 403 and admin-success tests for the previously player-reachable combat and bestiary mutation surfaces.
+- Added a shared session-state mutation service that acquires the per-session coordinator, reloads state inside the lock, validates/applies changes, persists with revision/audit metadata, and returns structured conflict responses.
+- Routed player equipment and combat REST mutations through the shared mutation path, and wrapped campaign-pack progress service entrypoints in the same reentrant turn coordinator boundary.
+- Added durable snapshot-diff audit rows for equipment, combat, and campaign-pack progress writes, plus a generic operator-action audit for bestiary authoring/generation/evolve-save, campaign/session archive/restore/delete, session import, and campaign-pack import.
+- Split bestiary/debug behavior into player-safe browsing and operator-only authoring/debug surfaces, with backend capability responses driving frontend visibility while preserving graceful 403 handling.
+- Extracted remaining App dialog orchestration into focused modules for worlds, campaigns, sessions, players, saved workspaces, shared modal shell, focus trap, and danger confirmation flows.
+- Added modal accessibility regressions for focus placement, Escape behavior, focus trapping, focus return, accessible descriptions, and danger confirmation cancellation.
+- Added bad-turn reporting tied to turn/provider/model metadata, plus operator-only beta incident and audit APIs for failed turns, failed canon jobs, telemetry incidents, tester reports, state mutations, and operator actions.
+- Added deterministic scenario quality regressions for opening narration, impossible actions, combat roll prompts, item use, campaign-pack checkpoint triggers, NPC continuity, and canon recall.
+- Added a safe-mode banner when the deterministic fallback provider is active.
+- Added production cookie-auth posture support with HttpOnly account cookies, optional suppression of raw account tokens in account JSON, CSRF enforcement for unsafe cookie-authenticated REST requests, and required security headers.
+- Added a hosted deployment readiness gate (`scripts/deployment_readiness_check.py`, `make deployment-readiness`) for production env, auth, secrets, CORS, DB-backed rate limiting/turn coordination, Socket.IO worker model proof, observability ownership, telemetry, security headers, cookie posture, fallback-provider posture, and optional live health/metrics/header checks.
+- Added a static observability bundle validator (`scripts/check_observability_bundle.py`, `make observability-check`) covering Prometheus/Grafana files, dashboard metrics, provisioning paths, and optional `docker compose config`.
+- Added an executable SQLite backup/restore drill (`scripts/backup_restore_drill.py`, `make backup-restore-drill`) and wired it into the closed-beta RC gate against an isolated migrated database.
+- Added a closed-beta RC command/workflow, scenario gate, release checklist updates, production env example, issue templates, PR template, license, and changelog.
+
+## Current Verification
+
+- `make closed-beta-rc` passes with the observability check and backup/restore drill included.
+- The latest full run included backend tests, smoke flow, scenario regressions, API type drift check, secret scan, Python dependency audit, frontend typecheck/lint/unit tests, build, bundle budget, frontend dependency audit, and browser smoke.
+- Focused deployment-readiness, observability-check, audit-log, and coordinator serialization tests pass.
+- `git diff --check` passes.
+
+## Remaining Work That Requires Target Infrastructure
+
+- Run `make deployment-readiness DEPLOYMENT_READINESS_ARGS="--env-file <target-env> --target-url <target-url> --auth-token <token>"` against the actual hosted/staging target.
+- Prove hosted metrics and alert ingestion at the selected observability provider with the named alert owner.
+- Prove the chosen Socket.IO deployment model in staging, especially sticky-session affinity or shared message-queue delivery for multi-worker deployments.
+- Run the Docker-backed observability validation on a Docker-capable release machine when that environment is available: `make observability-check OBSERVABILITY_CHECK_ARGS="--check-docker-compose --require-docker"`.
+- For a hosted database, run and record the provider-specific backup/restore rehearsal; the bundled backup/restore drill covers local/private SQLite beta data only.
+- Record the release checklist as checked evidence for the actual RC tag/build.
+
 # Daily AIDM Codebase Improvement Audit - 2026-06-14 16:05 MDT
 
 Automation ID: `daily-aidm-codebase-improvement-audit`

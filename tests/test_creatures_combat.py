@@ -33,7 +33,7 @@ from aidm_server.creatures.schemas import normalize_creature_definition
 from aidm_server.game_state.application.applier import apply_state_changes
 from aidm_server.game_state.validation.validator import validate_state_changes, validated_changes_for_application
 from aidm_server.database import db
-from aidm_server.models import BestiaryEntry, Campaign, CombatEncounter, DmTurn, Session, safe_json_dumps
+from aidm_server.models import BestiaryEntry, Campaign, CombatEncounter, DmTurn, Session, SessionStateMutationAudit, safe_json_dumps
 from tests.helpers import seed_world_campaign_player_session
 
 
@@ -2632,10 +2632,24 @@ def test_combat_apply_state_changes_uses_request_scoped_ids_unless_keyed(client,
     with app.app_context():
         session = db.session.get(Session, ids['session_id'])
         snapshot = json.loads(session.state_snapshot)
+        audits = (
+            SessionStateMutationAudit.query.filter_by(
+                session_id=ids['session_id'],
+                source='api.combat.apply_state_changes',
+            )
+            .order_by(SessionStateMutationAudit.mutation_audit_id.asc())
+            .all()
+        )
     actor = next(character for character in snapshot['playerCharacters'] if character['id'] == actor_id)
     assert actor['inventory']['currency']['gp'] == 10
     ledger_ids = {entry.get('id') for entry in snapshot['stateChangeLedger']}
     assert {first_id, second_id}.issubset(ledger_ids)
+    assert len(audits) == 2
+    assert [audit.applied_change_count for audit in audits] == [1, 1]
+    assert audits[0].state_revision == 1
+    assert audits[1].state_revision == 2
+    first_diff_paths = {entry['path'] for entry in json.loads(audits[0].diff_json)}
+    assert any(path.endswith('.inventory.currency.gp') for path in first_diff_paths)
 
     keyed_ids = seed_world_campaign_player_session(app)
     keyed_actor_id = f"player_{keyed_ids['player_id']}"
@@ -2680,6 +2694,61 @@ def test_combat_apply_state_changes_uses_request_scoped_ids_unless_keyed(client,
         entry for entry in keyed_snapshot['stateChangeLedger'] if entry.get('id') == keyed_generated_id
     ]
     assert len(keyed_ledger_entries) == 1
+
+
+def test_combat_apply_state_changes_rejects_stale_session_state_revision(client, app):
+    ids = seed_world_campaign_player_session(app)
+    actor_id = f"player_{ids['player_id']}"
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        assert session is not None
+        session.state_snapshot = safe_json_dumps(
+            {
+                'stateRevision': 4,
+                'playerCharacters': [
+                    {
+                        'id': actor_id,
+                        'playerId': ids['player_id'],
+                        'name': 'Seraphina',
+                        'inventory': {'items': [], 'currency': {}},
+                        'metadata': {},
+                    }
+                ],
+                'stateChangeLedger': [],
+            },
+            {},
+        )
+        db.session.commit()
+
+    response = client.post(
+        f"/api/sessions/{ids['session_id']}/combat/apply-state-changes",
+        json={
+            'expectedStateRevision': 3,
+            'changes': [
+                {
+                    'id': 'stale_currency_attempt',
+                    'type': 'currency.add',
+                    'actorId': actor_id,
+                    'currency': 'gp',
+                    'amount': 5,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    payload = response.get_json()
+    assert payload['error_code'] == 'state_conflict'
+    assert payload['details']['expected_state_revision'] == 3
+    assert payload['details']['actual_state_revision'] == 4
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        snapshot = json.loads(session.state_snapshot)
+    actor = next(character for character in snapshot['playerCharacters'] if character['id'] == actor_id)
+    assert actor['inventory']['currency'] == {}
+    assert snapshot['stateRevision'] == 4
+    assert snapshot['stateChangeLedger'] == []
+    assert 'stateMutationAudit' not in snapshot
 
 
 def test_creature_deep_api_endpoints_for_pack_evolution_morale_and_debug(client, app):

@@ -1,4 +1,4 @@
-import { useState, type Dispatch, type FormEvent, type SetStateAction } from 'react'
+import { lazy, Suspense, useEffect, useState, type Dispatch, type FormEvent, type SetStateAction } from 'react'
 import { ChevronDown, Coins, ExternalLink, ShieldCheck, ShieldOff, Swords } from 'lucide-react'
 import { ThinIcon } from './AppChrome'
 import { BestiaryDebugPanel } from './BestiaryDebugPanel'
@@ -17,7 +17,11 @@ import { profileIconSrcForCharacter } from './profileIcons'
 import type { ActivePlayer, Campaign, CampaignSegment, JsonRecord, MapItem } from './types'
 import type { MainTab } from './SessionBoard'
 
-export type InspectorTab = 'party' | 'map' | 'magic' | 'canon' | 'inventory' | 'bestiary'
+const BetaIncidentPanel = lazy(() =>
+  import('./BetaIncidentPanel').then((module) => ({ default: module.BetaIncidentPanel })),
+)
+
+export type InspectorTab = 'party' | 'map' | 'magic' | 'canon' | 'inventory' | 'bestiary' | 'ops'
 
 type DisplayCharacter = {
   name: string
@@ -49,6 +53,7 @@ type InspectorPanelProps = {
   setMainTab: Dispatch<SetStateAction<MainTab>>
   baseUrl: string
   auth: string
+  canUseOperatorTools: boolean
   displayCharacter: DisplayCharacter
   characterAvatarSrc: string
   xpProgress: XpProgress
@@ -133,6 +138,7 @@ export function InspectorPanel({
   setMainTab,
   baseUrl,
   auth,
+  canUseOperatorTools,
   displayCharacter,
   characterAvatarSrc,
   xpProgress,
@@ -184,6 +190,12 @@ export function InspectorPanel({
 }: InspectorPanelProps) {
   const [showAllKnownNpcs, setShowAllKnownNpcs] = useState(false)
   const [showAllKnownLocations, setShowAllKnownLocations] = useState(false)
+  useEffect(() => {
+    if (!canUseOperatorTools && inspectorTab === 'ops') {
+      setInspectorTab('party')
+    }
+  }, [canUseOperatorTools, inspectorTab, setInspectorTab])
+
   const visibleKnownNpcs = showAllKnownNpcs
     ? worldStatePanel.knownNpcs
     : worldStatePanel.knownNpcs.slice(0, VISIBLE_WORLD_STATE_ITEMS)
@@ -257,6 +269,17 @@ export function InspectorPanel({
         >
           Bestiary
         </button>
+        {canUseOperatorTools ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={inspectorTab === 'ops'}
+            className={inspectorTab === 'ops' ? 'active' : ''}
+            onClick={() => setInspectorTab('ops')}
+          >
+            Ops
+          </button>
+        ) : null}
       </div>
 
       {inspectorTab === 'party' || inspectorTab === 'inventory' ? (
@@ -719,7 +742,20 @@ export function InspectorPanel({
           auth={auth}
           selectedCampaignId={selectedCampaignId}
           selectedSessionId={selectedSessionId}
+          canUseOperatorTools={canUseOperatorTools}
         />
+      ) : null}
+
+      {inspectorTab === 'ops' && canUseOperatorTools ? (
+        <Suspense
+          fallback={
+            <section className="inspector-box beta-incident-panel" aria-label="Beta incidents">
+              <div className="empty-row">Loading incidents...</div>
+            </section>
+          }
+        >
+          <BetaIncidentPanel baseUrl={baseUrl} auth={auth} />
+        </Suspense>
       ) : null}
 
       {inspectorTab === 'party' || inspectorTab === 'map' ? (

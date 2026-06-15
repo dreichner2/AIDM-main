@@ -266,6 +266,136 @@ describe('useRuntimeSettings', () => {
     expect(reconnectSocket).toHaveBeenCalledOnce()
   })
 
+  it('allows http-only cookie account sessions to join a table without a bearer token', async () => {
+    const fetchCalls: Array<{ method: string; path: string; authorization: string | null; csrf: string | null }> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(input), 'http://localhost').pathname
+        const method = init?.method ?? 'GET'
+        const headers = new Headers(init?.headers)
+        fetchCalls.push({
+          method,
+          path,
+          authorization: headers.get('Authorization'),
+          csrf: headers.get('X-AIDM-CSRF-Token'),
+        })
+        const workspacePayload = path === '/api/accounts/workspace'
+        const workspaces = workspacePayload
+          ? [
+              {
+                workspace_id: 'owner',
+                workspace_role: 'player',
+                is_workspace_admin: false,
+                created_at: null,
+                updated_at: null,
+              },
+            ]
+          : []
+        if (path === '/api/accounts/me') {
+          return new Response(
+            JSON.stringify({
+              account_id: 1,
+              username: 'cookie-player',
+              first_name: 'Cookie',
+              last_name: 'Player',
+              display_name: 'Cookie Player',
+              workspace_id: null,
+              workspace_role: null,
+              is_workspace_admin: false,
+              workspaces,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        return new Response(
+          JSON.stringify({
+            account: {
+              account_id: 1,
+              username: 'cookie-player',
+              first_name: 'Cookie',
+              last_name: 'Player',
+              display_name: 'Cookie Player',
+              workspace_id: workspacePayload ? 'owner' : null,
+              workspace_role: workspacePayload ? 'player' : null,
+              is_workspace_admin: false,
+              workspaces,
+            },
+            account_token: '',
+            account_token_transport: 'http_only_cookie',
+            workspace_id: workspacePayload ? 'owner' : null,
+            workspace_role: workspacePayload ? 'player' : null,
+            is_workspace_admin: false,
+            claimed_player_ids: [],
+            workspaces,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }),
+    )
+    const resetRuntimeState = vi.fn()
+    const reconnectSocket = vi.fn()
+    const { result } = renderHook(() =>
+      useRuntimeSettings({
+        defaultBaseUrl: '',
+        resetRuntimeState,
+        reconnectSocket,
+      }),
+    )
+
+    act(() => {
+      result.current.openAuthTokenPrompt()
+      result.current.setRuntimeAuthIntent('signup')
+      result.current.setRuntimeSettingsForm({
+        baseUrl: '',
+        workspaceToken: '',
+        workspaceName: '',
+        workspacePassword: '',
+        username: 'CookiePlayer',
+        firstName: 'Cookie',
+        lastName: 'Player',
+        password: 'secret',
+      })
+    })
+    await act(async () => {
+      await result.current.submitRuntimeSettings(submitEvent())
+    })
+
+    expect(result.current.authToken).toBe('')
+    expect(sessionStorage.getItem('aidm:authToken')).toBeNull()
+    expect(sessionStorage.getItem('aidm:accountTokenTransport')).toBe('http_only_cookie')
+    expect(result.current.runtimeAuthStep).toBe('workspace')
+    document.cookie = 'aidm_csrf_token=csrf-token; Path=/; SameSite=Lax'
+
+    act(() => {
+      result.current.setRuntimeSettingsForm((current) => ({ ...current, workspaceToken: ' owner-token ' }))
+    })
+    await act(async () => {
+      await result.current.submitRuntimeSettings(submitEvent())
+    })
+
+    const workspaceCall = fetchCalls.find((call) => call.path === '/api/accounts/workspace')
+    expect(workspaceCall?.authorization).toBeNull()
+    expect(workspaceCall?.csrf).toBe('csrf-token')
+    expect(result.current.workspaceId).toBe('owner')
+    expect(result.current.runtimeSettingsOpen).toBe(false)
+    expect(resetRuntimeState).toHaveBeenCalledOnce()
+    expect(reconnectSocket).toHaveBeenCalledOnce()
+
+    act(() => {
+      result.current.clearAuthToken()
+    })
+
+    await waitFor(() =>
+      expect(fetchCalls).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ method: 'DELETE', path: '/api/accounts/session', csrf: 'csrf-token' }),
+        ]),
+      ),
+    )
+    expect(sessionStorage.getItem('aidm:accountTokenTransport')).toBeNull()
+  })
+
   it('sends the selected auth intent and displays username intent errors', async () => {
     const requestBodies: Array<Record<string, unknown>> = []
     vi.stubGlobal(

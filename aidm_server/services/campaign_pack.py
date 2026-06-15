@@ -20,6 +20,7 @@ from aidm_server.models import (
     World,
     safe_json_dumps,
 )
+from aidm_server.operator_audit import record_operator_action
 from aidm_server.response_dtos import campaign_payload, session_payload
 from aidm_server.services.campaign_pack_storage import sync_campaign_pack_progress, upsert_campaign_pack_definition
 from aidm_server.time_utils import utc_now
@@ -415,6 +416,22 @@ def import_campaign_pack(
             bestiary_count=bestiary_count,
         ),
     }
+    record_operator_action(
+        action='campaign_pack.import',
+        resource_type='campaign_pack',
+        workspace_id=workspace_id,
+        campaign_id=campaign.campaign_id,
+        session_id=session_obj.session_id,
+        resource_id=pack_id,
+        details={
+            'packId': pack_id,
+            'packVersion': version,
+            'packHash': pack_hash,
+            'installedCampaignPackId': installed_pack.installed_pack_id,
+            'bestiaryCount': bestiary_count,
+            'counts': result_payload['counts'],
+        },
+    )
     return CampaignPackImportResult(payload=result_payload)
 
 

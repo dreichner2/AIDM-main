@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import func, or_
+from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
 
 from aidm_server.canon_jobs import canon_job_status_counts
@@ -16,22 +16,11 @@ from aidm_server.models import (
     CampaignPack,
     CampaignPackRecord,
     CampaignPackSession,
-    CampaignSegment,
-    CanonJob,
-    BestiaryEntry,
-    CombatDebugEvent,
-    CombatEncounter,
-    DmCoherenceFeedback,
-    DmTurn,
-    Map,
-    Player,
     Session,
     StoryEntity,
-    StoryEvent,
     StoryFact,
     StoryThread,
     TurnCanonUpdate,
-    TurnEvent,
     InstalledCampaignPack,
     safe_json_loads,
 )
@@ -48,8 +37,13 @@ from aidm_server.services.campaign_pack_examples import (
     list_example_campaign_pack_summaries,
 )
 from aidm_server.services.campaign_pack_linter import lint_campaign_pack_manifest
+from aidm_server.services.campaign_lifecycle import (
+    CampaignHasSessionsError,
+    archive_campaign_record,
+    delete_campaign_record,
+    restore_campaign_record,
+)
 from aidm_server.services.workspace import campaign_workspace_payload
-from aidm_server.services.session_lifecycle import delete_session_record
 from aidm_server.time_utils import utc_now
 from aidm_server.validation import (
     coerce_int,
@@ -72,7 +66,6 @@ logger = logging.getLogger(__name__)
 campaigns_bp = Blueprint('campaigns', __name__)
 CAMPAIGN_TITLE_MAX_LENGTH = 120
 CAMPAIGN_TEXT_MAX_LENGTH = 2000
-ACTIVE_STATUS = 'active'
 ARCHIVED_STATUS = 'archived'
 
 
@@ -183,54 +176,6 @@ def _optional_limit_arg(name: str, maximum: int = 500) -> int | None:
 
 def _active_campaigns_query():
     return campaign_query().filter(or_(Campaign.status.is_(None), Campaign.status != ARCHIVED_STATUS))
-
-
-def _force_delete_campaign(campaign: Campaign) -> dict:
-    campaign_id = campaign.campaign_id
-    session_rows = Session.query.filter_by(campaign_id=campaign_id).all()
-    session_ids = [session.session_id for session in session_rows]
-    detached_player_ids = [
-        player.player_id for player in Player.query.filter_by(campaign_id=campaign_id).all()
-    ]
-    for session_obj in session_rows:
-        delete_session_record(session_obj, hard_delete=True)
-
-    Player.query.filter_by(campaign_id=campaign_id).update(
-        {Player.campaign_id: None},
-        synchronize_session=False,
-    )
-    CanonJob.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    TurnCanonUpdate.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    TurnEvent.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    CombatDebugEvent.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    CombatEncounter.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    BestiaryEntry.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    DmCoherenceFeedback.query.filter(
-        DmCoherenceFeedback.turn_id.in_(
-            db.session.query(DmTurn.turn_id).filter_by(campaign_id=campaign_id),
-        )
-    ).delete(synchronize_session=False)
-    DmTurn.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    StoryFact.query.filter_by(campaign_id=campaign_id).update(
-        {StoryFact.supersedes_fact_id: None},
-        synchronize_session=False,
-    )
-    StoryFact.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    StoryThread.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    StoryEntity.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    StoryEvent.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    CampaignSegment.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    Map.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    Session.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-    db.session.delete(campaign)
-    return {
-        'deleted': True,
-        'campaign_id': campaign_id,
-        'archived': False,
-        'hard_deleted': True,
-        'deleted_session_ids': session_ids,
-        'detached_player_ids': detached_player_ids,
-    }
 
 
 def _entity_payload(entity: StoryEntity) -> dict:
@@ -776,22 +721,9 @@ def archive_campaign(campaign_id):
         return error_response('campaign_not_found', 'Campaign not found.', 404)
 
     try:
-        campaign.status = ARCHIVED_STATUS
-        campaign.updated_at = utc_now()
-        Session.query.filter(
-            Session.campaign_id == campaign_id,
-            or_(Session.status.is_(None), Session.status != ARCHIVED_STATUS),
-        ).update(
-            {
-                Session.status: ARCHIVED_STATUS,
-                Session.deleted_at: campaign.updated_at,
-                Session.updated_at: campaign.updated_at,
-                Session.archived_by_campaign_id: campaign_id,
-            },
-            synchronize_session=False,
-        )
+        payload = archive_campaign_record(campaign)
         db.session.commit()
-        return jsonify({'archived': True, 'campaign': campaign_payload(campaign)})
+        return jsonify({'archived': True, 'campaign': payload})
     except Exception as exc:
         db.session.rollback()
         logger.error('Failed to archive campaign: %s', str(exc))
@@ -805,19 +737,9 @@ def restore_campaign(campaign_id):
         return error_response('campaign_not_found', 'Campaign not found.', 404)
 
     try:
-        campaign.status = ACTIVE_STATUS
-        campaign.updated_at = utc_now()
-        Session.query.filter_by(campaign_id=campaign_id, archived_by_campaign_id=campaign_id).update(
-            {
-                Session.status: ACTIVE_STATUS,
-                Session.deleted_at: None,
-                Session.updated_at: campaign.updated_at,
-                Session.archived_by_campaign_id: None,
-            },
-            synchronize_session=False,
-        )
+        payload = restore_campaign_record(campaign)
         db.session.commit()
-        return jsonify({'restored': True, 'campaign': campaign_payload(campaign)})
+        return jsonify({'restored': True, 'campaign': payload})
     except Exception as exc:
         db.session.rollback()
         logger.error('Failed to restore campaign: %s', str(exc))
@@ -832,47 +754,29 @@ def delete_campaign(campaign_id):
     if not campaign:
         return error_response('campaign_not_found', 'Campaign not found.', 404)
 
-    if hard_delete:
-        session_count = db.session.query(func.count(Session.session_id)).filter_by(campaign_id=campaign_id).scalar() or 0
-        if session_count and not force_delete:
-            return error_response(
-                'campaign_has_sessions',
-                'Hard deleting a campaign with sessions is not supported. Archive it instead.',
-                409,
-                {'session_count': int(session_count)},
-            )
-        try:
-            if force_delete:
-                payload = _force_delete_campaign(campaign)
-            else:
-                detached_player_ids = [
-                    player.player_id for player in Player.query.filter_by(campaign_id=campaign_id).all()
-                ]
-                Player.query.filter_by(campaign_id=campaign_id).update(
-                    {Player.campaign_id: None},
-                    synchronize_session=False,
-                )
-                CombatDebugEvent.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-                CombatEncounter.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-                BestiaryEntry.query.filter_by(campaign_id=campaign_id).delete(synchronize_session=False)
-                payload = {
-                    'deleted': True,
-                    'campaign_id': campaign_id,
-                    'archived': False,
-                    'hard_deleted': True,
-                    'deleted_session_ids': [],
-                    'detached_player_ids': detached_player_ids,
-                }
-            if not force_delete:
-                db.session.delete(campaign)
-            db.session.commit()
-            return jsonify(payload)
-        except Exception as exc:
-            db.session.rollback()
+    try:
+        payload = delete_campaign_record(
+            campaign,
+            hard_delete=hard_delete,
+            force_delete=force_delete,
+        )
+        db.session.commit()
+        return jsonify(payload)
+    except CampaignHasSessionsError as exc:
+        db.session.rollback()
+        return error_response(
+            'campaign_has_sessions',
+            'Hard deleting a campaign with sessions is not supported. Archive it instead.',
+            409,
+            {'session_count': exc.session_count},
+        )
+    except Exception as exc:
+        db.session.rollback()
+        if hard_delete:
             logger.error('Failed to hard delete campaign: %s', str(exc))
             return error_response('campaign_delete_failed', 'Failed to delete campaign.', 400)
-
-    return archive_campaign(campaign_id)
+        logger.error('Failed to archive campaign: %s', str(exc))
+        return error_response('campaign_archive_failed', 'Failed to archive campaign.', 400)
 
 
 @campaigns_bp.route('/<int:campaign_id>/workspace', methods=['GET'])

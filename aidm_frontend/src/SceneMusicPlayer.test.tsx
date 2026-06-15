@@ -67,6 +67,15 @@ function installLegacyMatchMediaMock(matches: boolean) {
   return { addListener, removeListener }
 }
 
+function mockRect(rect: { bottom: number; height: number; left: number; right: number; top: number; width: number }) {
+  return {
+    ...rect,
+    x: rect.left,
+    y: rect.top,
+    toJSON: () => rect,
+  } as DOMRect
+}
+
 describe('SceneMusicPlayer', () => {
   let playMock: ReturnType<typeof vi.spyOn>
   let pauseMock: ReturnType<typeof vi.spyOn>
@@ -241,6 +250,29 @@ describe('SceneMusicPlayer', () => {
     expect(screen.getByRole('button', { name: 'Previous music track' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Move music player' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Resize music player' })).not.toBeInTheDocument()
+  })
+
+  it('places the default floating panel inside the session board bounds', async () => {
+    const sessionBoard = document.createElement('main')
+    sessionBoard.className = 'session-board'
+    sessionBoard.getBoundingClientRect = vi.fn(() =>
+      mockRect({ left: 248, top: 106, right: 1052, bottom: 900, width: 804, height: 794 }),
+    )
+    document.body.append(sessionBoard)
+
+    try {
+      render(<SceneMusicPlayer />)
+      const player = screen.getByLabelText('Scene music player')
+
+      await waitFor(() => {
+        const left = Number.parseFloat(player.style.left)
+        const width = Number.parseFloat(player.style.width)
+        expect(left).toBeGreaterThanOrEqual(260)
+        expect(left + width).toBeLessThanOrEqual(1040)
+      })
+    } finally {
+      sessionBoard.remove()
+    }
   })
 
   it('mounts mobile layout with legacy MediaQueryList listeners', () => {

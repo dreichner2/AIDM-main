@@ -13,7 +13,10 @@ from werkzeug.security import check_password_hash, generate_password_hash
 DEFAULT_WORKSPACE_ID = "owner"
 WORKSPACE_TOKEN_HEADER = "X-AIDM-Workspace-Token"
 WORKSPACE_ID_HEADER = "X-AIDM-Workspace-Id"
+CSRF_HEADER = "X-AIDM-CSRF-Token"
 ACCOUNT_TOKEN_BYTES = 32
+DEFAULT_ACCOUNT_COOKIE_NAME = "aidm_account_session"
+DEFAULT_ACCOUNT_CSRF_COOKIE_NAME = "aidm_csrf_token"
 _WORKSPACE_ID_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _USERNAME_RE = re.compile(r"[^a-z0-9_.-]+")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -156,7 +159,38 @@ def workspace_id_for_token(token: str | None) -> str | None:
 
 
 def request_account_token() -> str | None:
-    return extract_bearer_token(request.headers.get("Authorization"))
+    return extract_bearer_token(request.headers.get("Authorization")) or request_account_cookie_token()
+
+
+def account_cookie_auth_enabled() -> bool:
+    return bool(current_app.config.get("AIDM_ACCOUNT_COOKIE_AUTH_ENABLED", False))
+
+
+def account_cookie_name() -> str:
+    return str(current_app.config.get("AIDM_ACCOUNT_COOKIE_NAME") or DEFAULT_ACCOUNT_COOKIE_NAME)
+
+
+def account_csrf_cookie_name() -> str:
+    return str(current_app.config.get("AIDM_ACCOUNT_CSRF_COOKIE_NAME") or DEFAULT_ACCOUNT_CSRF_COOKIE_NAME)
+
+
+def request_account_cookie_token() -> str | None:
+    if not account_cookie_auth_enabled():
+        return None
+    token = str(request.cookies.get(account_cookie_name()) or "").strip()
+    return token or None
+
+
+def request_uses_account_cookie_auth() -> bool:
+    return bool(request_account_cookie_token()) and not bool(extract_bearer_token(request.headers.get("Authorization")))
+
+
+def request_account_cookie_csrf_valid() -> bool:
+    if not request_uses_account_cookie_auth():
+        return True
+    header_token = str(request.headers.get(CSRF_HEADER) or "").strip()
+    cookie_token = str(request.cookies.get(account_csrf_cookie_name()) or "").strip()
+    return bool(header_token and cookie_token and secrets.compare_digest(header_token, cookie_token))
 
 
 def request_account():
@@ -274,6 +308,9 @@ def extract_socket_account_token(auth_payload: dict | None = None) -> str | None
     header_token = extract_bearer_token(request.headers.get("Authorization"))
     if header_token and account_for_token(header_token):
         return header_token
+    cookie_token = request_account_cookie_token()
+    if cookie_token and account_for_token(cookie_token):
+        return cookie_token
     return None
 
 

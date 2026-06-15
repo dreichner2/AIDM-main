@@ -113,3 +113,19 @@ def test_configured_turn_coordinator_uses_database_store(app):
             assert coordinator.lock_count() == 1
 
         assert coordinator.lock_count() == 0
+
+
+def test_configured_turn_coordinator_allows_nested_same_session_lock(app):
+    ids = seed_world_campaign_player_session(app)
+    session_id = ids['session_id']
+
+    with app.app_context():
+        coordinator = ConfiguredSessionTurnCoordinator()
+
+        with coordinator.serialized(session_id) as outer_wait_ms:
+            with coordinator.serialized(session_id) as inner_wait_ms:
+                assert outer_wait_ms >= 0
+                assert inner_wait_ms == 0.0
+                assert coordinator.lock_count() == 1
+
+        assert coordinator.discard_session(session_id) is True

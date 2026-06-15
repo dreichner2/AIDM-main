@@ -8,7 +8,7 @@ from aidm_server.database import db
 from aidm_server.models import Account, AccountWorkspaceMembership, Campaign, Player, Workspace, World
 
 
-def _build_account_runtime(tmp_path, monkeypatch):
+def _build_account_runtime(tmp_path, monkeypatch, extra_env: dict[str, str] | None = None):
     db_path = tmp_path / 'accounts.db'
     monkeypatch.setenv('AIDM_DATABASE_URI', f'sqlite:///{db_path}')
     monkeypatch.setenv('AIDM_AUTO_CREATE_SCHEMA', 'true')
@@ -21,6 +21,8 @@ def _build_account_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv('AIDM_TELEMETRY_ENABLED', 'false')
     monkeypatch.setenv('AIDM_RATE_LIMIT_MAX_API_REQUESTS', '1000')
     monkeypatch.setenv('AIDM_RATE_LIMIT_MAX_SOCKET_MESSAGES', '1000')
+    for key, value in (extra_env or {}).items():
+        monkeypatch.setenv(key, value)
 
     import aidm_server.main as main_module
     main_module = importlib.reload(main_module)
@@ -69,6 +71,15 @@ def _create_legacy_passwordless_account(app, *, username: str, first_name: str, 
         db.session.add(account)
         db.session.commit()
     return token
+
+
+def _csrf_header_from_response(response) -> dict[str, str]:
+    csrf_cookie = next(
+        value
+        for value in response.headers.getlist('Set-Cookie')
+        if value.startswith('aidm_csrf_token=')
+    )
+    return {'X-AIDM-CSRF-Token': csrf_cookie.split(';', 1)[0].split('=', 1)[1]}
 
 
 def test_account_login_issues_session_token_and_uses_password_plus_workspace_token(tmp_path, monkeypatch):
@@ -159,6 +170,61 @@ def test_account_login_issues_session_token_and_uses_password_plus_workspace_tok
         json={'workspace_id': 'unknown'},
     )
     assert missing_workspace.status_code == 403
+
+
+def test_cookie_auth_can_run_account_and_workspace_flow_without_token_response(tmp_path, monkeypatch):
+    app = _build_account_runtime(
+        tmp_path,
+        monkeypatch,
+        extra_env={
+            'AIDM_ACCOUNT_COOKIE_AUTH_ENABLED': 'true',
+            'AIDM_ACCOUNT_COOKIE_SECURE': 'false',
+            'AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED': 'false',
+        },
+    )
+    client = app.test_client()
+
+    login = _login(
+        client,
+        username='CookiePlayer',
+        first_name='Cookie',
+        last_name='Player',
+        password='secret',
+        intent='signup',
+    )
+
+    assert login.status_code == 201
+    login_payload = login.get_json()
+    assert login_payload['account_token'] == ''
+    assert login_payload['account_token_transport'] == 'http_only_cookie'
+    assert 'aidm_account_session=' in login.headers.get('Set-Cookie', '')
+    assert 'HttpOnly' in login.headers.get('Set-Cookie', '')
+    assert any(value.startswith('aidm_csrf_token=') for value in login.headers.getlist('Set-Cookie'))
+    csrf_headers = _csrf_header_from_response(login)
+
+    missing_csrf = client.post('/api/accounts/workspace', json={'workspace_token': 'owner-token'})
+    assert missing_csrf.status_code == 403
+    assert missing_csrf.get_json()['error_code'] == 'csrf_required'
+
+    join_owner = client.post('/api/accounts/workspace', headers=csrf_headers, json={'workspace_token': 'owner-token'})
+    assert join_owner.status_code == 200
+    join_payload = join_owner.get_json()
+    assert join_payload['account_token'] == ''
+    assert join_payload['workspace_id'] == 'owner'
+
+    worlds_response = client.post(
+        '/api/worlds',
+        headers={**csrf_headers, 'X-AIDM-Workspace-Token': 'owner-token'},
+        json={'name': 'Cookie Auth World'},
+    )
+    assert worlds_response.status_code == 201
+
+    logout = client.delete('/api/accounts/session', headers=csrf_headers)
+    assert logout.status_code == 200
+    assert 'aidm_account_session=;' in logout.headers.get('Set-Cookie', '')
+
+    after_logout = client.get('/api/accounts/me')
+    assert after_logout.status_code == 401
 
 
 def test_account_can_create_password_table_and_join_by_name_password(tmp_path, monkeypatch):

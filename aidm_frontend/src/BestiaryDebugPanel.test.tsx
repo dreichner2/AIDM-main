@@ -122,9 +122,19 @@ describe('BestiaryDebugPanel', () => {
       return Promise.reject(new Error(`Unexpected path ${path}`))
     })
 
-    render(<BestiaryDebugPanel baseUrl="" auth="" selectedCampaignId={7} selectedSessionId={9} />)
+    render(
+      <BestiaryDebugPanel
+        baseUrl=""
+        auth=""
+        selectedCampaignId={7}
+        selectedSessionId={9}
+        canUseOperatorTools
+      />,
+    )
 
     const panel = screen.getByLabelText('Bestiary debug panel')
+    expect(screen.getByLabelText('Player bestiary')).toBeInTheDocument()
+    expect(screen.getByLabelText('Bestiary operator tools')).toBeInTheDocument()
     const list = screen.getByLabelText('Bestiary creatures')
     expect(await within(list).findByText('Ashen Goblin')).toBeInTheDocument()
     expect(within(list).getByText('Wolf')).toBeInTheDocument()
@@ -168,12 +178,53 @@ describe('BestiaryDebugPanel', () => {
       return Promise.reject(new Error(`Unexpected path ${path}`))
     })
 
-    render(<BestiaryDebugPanel baseUrl="" auth="" selectedCampaignId={null} selectedSessionId={9} />)
+    render(
+      <BestiaryDebugPanel
+        baseUrl=""
+        auth=""
+        selectedCampaignId={null}
+        selectedSessionId={9}
+        canUseOperatorTools
+      />,
+    )
 
     const list = screen.getByLabelText('Bestiary creatures')
     expect(await within(list).findByText('Wolf')).toBeInTheDocument()
     expect(screen.getByText('1 creatures loaded')).toBeInTheDocument()
     expect(screen.queryByText('debug forbidden')).not.toBeInTheDocument()
     expect(screen.queryByText(/Combat debug/)).not.toBeInTheDocument()
+  })
+
+  it('keeps player bestiary browsing separate from operator-only tools', async () => {
+    apiFetchMock.mockImplementation((_baseUrl: string, path: string) => {
+      if (path === '/api/bestiary/core') {
+        return Promise.resolve({ entries: [wolf] })
+      }
+      if (path === '/api/campaigns/7/bestiary') {
+        return Promise.resolve({ campaign_id: 7, entries: [] })
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`))
+    })
+
+    render(
+      <BestiaryDebugPanel
+        baseUrl=""
+        auth=""
+        selectedCampaignId={7}
+        selectedSessionId={9}
+        canUseOperatorTools={false}
+      />,
+    )
+
+    const playerSurface = screen.getByLabelText('Player bestiary')
+    expect(await within(within(playerSurface).getByLabelText('Bestiary creatures')).findByText('Wolf')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Bestiary operator tools')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Campaign pack themes')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Combat debug/)).not.toBeInTheDocument()
+    expect(apiFetchMock).not.toHaveBeenCalledWith(
+      '',
+      '/api/sessions/9/combat/debug?limit=12',
+      '',
+    )
   })
 })

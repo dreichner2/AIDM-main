@@ -8,6 +8,7 @@ from typing import Any
 
 from aidm_server.database import db
 from aidm_server.models import Campaign, Player, Session, SessionLogEntry, SessionState, TurnEvent, safe_json_dumps
+from aidm_server.operator_audit import record_operator_action
 from aidm_server.response_dtos import session_payload
 from aidm_server.services.campaign_pack_snapshot import migrate_campaign_pack_snapshot
 from aidm_server.time_utils import utc_now
@@ -112,6 +113,21 @@ def import_session_export(
             'session_state': 1 if state_imported else 0,
         },
     }
+    record_operator_action(
+        action='session.import',
+        resource_type='session',
+        workspace_id=campaign.workspace_id or 'owner',
+        campaign_id=campaign.campaign_id,
+        session_id=session_obj.session_id,
+        resource_id=session_obj.session_id,
+        details={
+            'turnEventsImported': events_imported,
+            'projectedLogEntries': projected_log_entries,
+            'logEntriesImported': log_entries_imported,
+            'sessionStateImported': bool(state_imported),
+            'campaignPackStateAllowed': allow_campaign_pack_state,
+        },
+    )
     return SessionImportResult(payload=result_payload)
 
 

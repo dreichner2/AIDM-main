@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
 
@@ -34,8 +35,27 @@ def render_types() -> str:
     return '\n'.join(chunks).rstrip() + '\n'
 
 
-def main() -> int:
-    OUTPUT.write_text(render_types(), encoding='utf-8')
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description='Generate frontend API contract TypeScript types.')
+    parser.add_argument(
+        '--check',
+        action='store_true',
+        help='Exit non-zero when the generated API contract file is stale.',
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    rendered = render_types()
+    if args.check:
+        current = OUTPUT.read_text(encoding='utf-8') if OUTPUT.exists() else ''
+        if current != rendered:
+            print(f'{OUTPUT.relative_to(ROOT)} is stale. Run scripts/generate_api_types.py.', file=sys.stderr)
+            return 1
+        return 0
+
+    OUTPUT.write_text(rendered, encoding='utf-8')
     return 0
 
 

@@ -10,7 +10,21 @@ from flask import Flask
 
 from aidm_server.auth import extract_socket_token, hash_secret
 from aidm_server.database import db
-from aidm_server.models import Account, AccountWorkspaceMembership, Campaign, Player, Session, TurnEvent, World, safe_json_dumps
+from aidm_server.creatures.core_bestiary import core_creature
+from aidm_server.models import (
+    Account,
+    AccountWorkspaceMembership,
+    BestiaryEntry,
+    Campaign,
+    DmTurn,
+    OperatorActionAudit,
+    Player,
+    Session,
+    TurnEvent,
+    World,
+    safe_json_dumps,
+    safe_json_loads,
+)
 
 
 def _build_auth_runtime(tmp_path, monkeypatch, extra_env: dict[str, str] | None = None):
@@ -65,6 +79,127 @@ def test_rest_auth_required(tmp_path, monkeypatch):
         headers={'Authorization': 'Bearer token-123'},
     )
     assert authorized.status_code == 201
+
+
+def test_capabilities_endpoint_reports_account_role_capabilities(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+    with app.app_context():
+        player_account = Account(
+            username='cap-player',
+            first_name='Cap',
+            last_name='Player',
+            password_hash='configured',
+            account_token_hash=hash_secret('cap-player-token'),
+        )
+        admin_account = Account(
+            username='cap-admin',
+            first_name='Cap',
+            last_name='Admin',
+            password_hash='configured',
+            account_token_hash=hash_secret('cap-admin-token'),
+        )
+        db.session.add_all([player_account, admin_account])
+        db.session.flush()
+        db.session.add_all(
+            [
+                AccountWorkspaceMembership(account_id=player_account.account_id, workspace_id='owner', role='player'),
+                AccountWorkspaceMembership(account_id=admin_account.account_id, workspace_id='owner', role='admin'),
+            ]
+        )
+        db.session.commit()
+
+    unauthenticated = client.get('/api/capabilities')
+    player = client.get(
+        '/api/capabilities',
+        headers={'Authorization': 'Bearer cap-player-token', 'X-AIDM-Workspace-Id': 'owner'},
+    )
+    admin = client.get(
+        '/api/capabilities',
+        headers={'Authorization': 'Bearer cap-admin-token', 'X-AIDM-Workspace-Id': 'owner'},
+    )
+
+    assert unauthenticated.status_code == 401
+    assert player.status_code == 200
+    player_payload = player.get_json()
+    assert player_payload['capabilities'] == ['player_action', 'player_read']
+    assert player_payload['is_workspace_admin'] is False
+    assert 'dm_authoring' not in player_payload['capabilities']
+
+    assert admin.status_code == 200
+    admin_payload = admin.get_json()
+    assert admin_payload['is_workspace_admin'] is True
+    assert 'dm_authoring' in admin_payload['capabilities']
+    assert 'dm_runtime_control' in admin_payload['capabilities']
+    assert admin_payload['descriptions']['dm_runtime_control']
+
+
+def test_beta_incidents_require_workspace_admin_account_but_players_can_report(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+    with app.app_context():
+        account = Account(
+            username='incident-player',
+            first_name='Incident',
+            last_name='Player',
+            password_hash='configured',
+            account_token_hash=hash_secret('incident-token'),
+        )
+        db.session.add(account)
+        db.session.flush()
+        membership = AccountWorkspaceMembership(account_id=account.account_id, workspace_id='owner', role='player')
+        db.session.add(membership)
+        world = World(name='Incident World', description='incident auth')
+        db.session.add(world)
+        db.session.flush()
+        campaign = Campaign(title='Incident Campaign', world_id=world.world_id, workspace_id='owner')
+        db.session.add(campaign)
+        db.session.flush()
+        player = Player(campaign_id=campaign.campaign_id, workspace_id='owner', name='Mira', character_name='Mira')
+        db.session.add(player)
+        db.session.flush()
+        session = Session(campaign_id=campaign.campaign_id)
+        db.session.add(session)
+        db.session.flush()
+        turn = DmTurn(
+            session_id=session.session_id,
+            campaign_id=campaign.campaign_id,
+            player_id=player.player_id,
+            player_input='I test the bad report.',
+            dm_output='',
+            status='failed',
+            llm_provider='fallback',
+            llm_model='deterministic-v1',
+        )
+        db.session.add(turn)
+        db.session.commit()
+        account_id = account.account_id
+        session_id = session.session_id
+        turn_id = turn.turn_id
+
+    headers = {'Authorization': 'Bearer incident-token', 'X-AIDM-Workspace-Id': 'owner'}
+    report_response = client.post(
+        '/api/feedback/bad-turn',
+        headers=headers,
+        json={'session_id': session_id, 'turn_id': turn_id, 'category': 'state'},
+    )
+    player_incidents = client.get('/api/beta/incidents', headers=headers)
+
+    assert report_response.status_code == 201
+    assert report_response.get_json()['feedback']['provider'] == 'fallback'
+    assert player_incidents.status_code == 403
+    assert player_incidents.get_json()['details']['required_capability'] == 'debug_read'
+
+    with app.app_context():
+        membership = AccountWorkspaceMembership.query.filter_by(account_id=account_id, workspace_id='owner').one()
+        membership.role = 'admin'
+        db.session.commit()
+
+    admin_incidents = client.get('/api/beta/incidents', headers=headers)
+    assert admin_incidents.status_code == 200
+    payload = admin_incidents.get_json()
+    assert payload['summary']['bad_turn_report_count'] == 1
+    assert payload['summary']['failed_turn_count'] == 1
 
 
 def test_auth_required_allows_cors_preflight_without_token(tmp_path, monkeypatch):
@@ -373,7 +508,7 @@ def test_llm_config_update_requires_owner_account_admin_role(tmp_path, monkeypat
     assert app.config['AIDM_LLM_PROVIDER'] == 'fallback'
 
 
-def test_combat_state_and_debug_endpoints_require_workspace_admin_account(tmp_path, monkeypatch):
+def test_combat_operator_endpoints_require_workspace_admin_account(tmp_path, monkeypatch):
     app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
     client = app.test_client()
     with app.app_context():
@@ -394,16 +529,26 @@ def test_combat_state_and_debug_endpoints_require_workspace_admin_account(tmp_pa
         campaign = Campaign(title='Combat Auth Campaign', world_id=world.world_id, workspace_id='owner')
         db.session.add(campaign)
         db.session.flush()
-        session = Session(
-            campaign_id=campaign.campaign_id,
-            state_snapshot=safe_json_dumps({'combat': {'status': 'none', 'participants': [], 'flags': {}}}, {}),
-        )
+        player = Player(campaign_id=campaign.campaign_id, workspace_id='owner', name='Kael', character_name='Kael')
+        db.session.add(player)
+        db.session.flush()
+        session = Session(campaign_id=campaign.campaign_id)
         db.session.add(session)
         db.session.commit()
         account_id = account.account_id
         session_id = session.session_id
 
     headers = {'Authorization': 'Bearer combat-token', 'X-AIDM-Workspace-Id': 'owner'}
+    player_start = client.post(
+        f'/api/sessions/{session_id}/combat/start',
+        headers=headers,
+        json={'creature': core_creature('wolf'), 'enemyCount': 1},
+    )
+    player_morale = client.post(
+        f'/api/sessions/{session_id}/combat/apply-morale-event',
+        headers=headers,
+        json={'participantId': 'enemy_wolf_1', 'event': 'took_heavy_damage'},
+    )
     player_apply = client.post(
         f'/api/sessions/{session_id}/combat/apply-state-changes',
         headers=headers,
@@ -411,30 +556,231 @@ def test_combat_state_and_debug_endpoints_require_workspace_admin_account(tmp_pa
     )
     player_debug = client.get(f'/api/sessions/{session_id}/combat/debug', headers=headers)
 
+    with app.app_context():
+        session = db.session.get(Session, session_id)
+        session.state_snapshot = safe_json_dumps(
+            {
+                'combat': {
+                    'status': 'active',
+                    'participants': [
+                        {'id': 'player_1', 'team': 'player', 'hp': {'current': 12, 'max': 12}, 'isAlive': True},
+                        {'id': 'enemy_wolf_1', 'team': 'enemy', 'hp': {'current': 0, 'max': 11}, 'isAlive': False},
+                    ],
+                    'flags': {},
+                }
+            },
+            {},
+        )
+        db.session.commit()
+    player_check_end = client.post(
+        f'/api/sessions/{session_id}/combat/check-end',
+        headers=headers,
+        json={'apply': True},
+    )
+
+    assert player_start.status_code == 403
+    assert player_start.get_json()['error_code'] == 'forbidden'
+    assert player_morale.status_code == 403
+    assert player_morale.get_json()['error_code'] == 'forbidden'
     assert player_apply.status_code == 403
     assert player_apply.get_json()['error_code'] == 'forbidden'
     assert player_debug.status_code == 403
     assert player_debug.get_json()['error_code'] == 'forbidden'
+    assert player_check_end.status_code == 403
+    assert player_check_end.get_json()['error_code'] == 'forbidden'
+
+    with app.app_context():
+        session = db.session.get(Session, session_id)
+        session.state_snapshot = safe_json_dumps({'combat': {'status': 'none', 'participants': [], 'flags': {}}}, {})
+        membership = AccountWorkspaceMembership.query.filter_by(account_id=account_id, workspace_id='owner').one()
+        membership.role = 'admin'
+        db.session.commit()
+
+    admin_start = client.post(
+        f'/api/sessions/{session_id}/combat/start',
+        headers=headers,
+        json={'creature': core_creature('wolf'), 'enemyCount': 1},
+    )
+    enemy_id = next(
+        participant['id']
+        for participant in admin_start.get_json()['combat']['participants']
+        if participant['team'] == 'enemy'
+    )
+    admin_morale = client.post(
+        f'/api/sessions/{session_id}/combat/apply-morale-event',
+        headers=headers,
+        json={'participantId': enemy_id, 'event': 'took_heavy_damage'},
+    )
+    admin_apply = client.post(
+        f'/api/sessions/{session_id}/combat/apply-state-changes',
+        headers=headers,
+        json={
+            'changes': [
+                {
+                    'id': 'defeat_enemy_for_auth_test',
+                    'type': 'combat.participant.update',
+                    'participantId': enemy_id,
+                    'hp': {'current': 0, 'max': 11},
+                }
+            ]
+        },
+    )
+    admin_check_end = client.post(
+        f'/api/sessions/{session_id}/combat/check-end',
+        headers=headers,
+        json={'apply': True},
+    )
+    admin_debug = client.get(f'/api/sessions/{session_id}/combat/debug', headers=headers)
+    admin_debug_bad_limit = client.get(f'/api/sessions/{session_id}/combat/debug?limit=invalid', headers=headers)
+
+    assert admin_start.status_code == 200
+    assert admin_start.get_json()['combat']['status'] == 'active'
+    assert admin_morale.status_code == 200
+    assert admin_morale.get_json()['validation']['rejected'] == []
+    assert admin_apply.status_code == 200
+    assert len(admin_apply.get_json()['appliedChanges']) == 1
+    assert admin_check_end.status_code == 200
+    assert admin_check_end.get_json()['endReason'] == 'all_enemies_defeated'
+    assert admin_debug.status_code == 200
+    assert admin_debug.get_json()['events']
+    assert admin_debug_bad_limit.status_code == 200
+    assert admin_debug_bad_limit.get_json()['events']
+
+
+def test_bestiary_authoring_endpoints_require_workspace_admin_account(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+    with app.app_context():
+        account = Account(
+            username='bestiary-player',
+            first_name='Bestiary',
+            last_name='Player',
+            password_hash='configured',
+            account_token_hash=hash_secret('bestiary-token'),
+        )
+        db.session.add(account)
+        db.session.flush()
+        membership = AccountWorkspaceMembership(account_id=account.account_id, workspace_id='owner', role='player')
+        db.session.add(membership)
+        world = World(name='Bestiary Auth World', description='bestiary auth')
+        db.session.add(world)
+        db.session.flush()
+        campaign = Campaign(title='Bestiary Auth Campaign', world_id=world.world_id, workspace_id='owner')
+        db.session.add(campaign)
+        db.session.flush()
+        session = Session(campaign_id=campaign.campaign_id)
+        db.session.add(session)
+        db.session.commit()
+        account_id = account.account_id
+        campaign_id = campaign.campaign_id
+        session_id = session.session_id
+
+    headers = {'Authorization': 'Bearer bestiary-token', 'X-AIDM-Workspace-Id': 'owner'}
+    player_create = client.post(
+        f'/api/campaigns/{campaign_id}/bestiary',
+        headers=headers,
+        json={'creature': core_creature('wolf')},
+    )
+    player_generate_pack = client.post(
+        f'/api/campaigns/{campaign_id}/bestiary/generate-pack',
+        headers=headers,
+        json={'themes': ['ash'], 'count': 1},
+    )
+    player_evolve_save = client.post(
+        '/api/creatures/evolve',
+        headers=headers,
+        json={
+            'campaignId': campaign_id,
+            'sessionId': session_id,
+            'baseCreature': core_creature('goblin_skirmisher'),
+            'eventContext': {'eventTags': ['fire'], 'grudgeTargetId': 'player_1'},
+        },
+    )
+    player_evolve_preview = client.post(
+        '/api/creatures/evolve',
+        headers=headers,
+        json={
+            'campaignId': campaign_id,
+            'saveGenerated': False,
+            'baseCreature': core_creature('goblin_skirmisher'),
+            'eventContext': {'eventTags': ['fire']},
+        },
+    )
+
+    assert player_create.status_code == 403
+    assert player_create.get_json()['error_code'] == 'forbidden'
+    assert player_generate_pack.status_code == 403
+    assert player_generate_pack.get_json()['error_code'] == 'forbidden'
+    assert player_evolve_save.status_code == 403
+    assert player_evolve_save.get_json()['error_code'] == 'forbidden'
+    assert player_evolve_preview.status_code == 200
+    assert player_evolve_preview.get_json()['entry'] is None
+    with app.app_context():
+        assert BestiaryEntry.query.filter_by(campaign_id=campaign_id).count() == 0
+        assert OperatorActionAudit.query.filter_by(campaign_id=campaign_id).count() == 0
+
+    player_audits = client.get('/api/beta/audits', headers=headers)
+    assert player_audits.status_code == 403
+    assert player_audits.get_json()['error_code'] == 'forbidden'
 
     with app.app_context():
         membership = AccountWorkspaceMembership.query.filter_by(account_id=account_id, workspace_id='owner').one()
         membership.role = 'admin'
         db.session.commit()
 
-    admin_apply = client.post(
-        f'/api/sessions/{session_id}/combat/apply-state-changes',
+    admin_create = client.post(
+        f'/api/campaigns/{campaign_id}/bestiary',
         headers=headers,
-        json={'changes': []},
+        json={'creature': core_creature('wolf')},
     )
-    admin_debug = client.get(f'/api/sessions/{session_id}/combat/debug', headers=headers)
-    admin_debug_bad_limit = client.get(f'/api/sessions/{session_id}/combat/debug?limit=invalid', headers=headers)
+    admin_generate_pack = client.post(
+        f'/api/campaigns/{campaign_id}/bestiary/generate-pack',
+        headers=headers,
+        json={'themes': ['ash'], 'count': 1},
+    )
+    admin_evolve_save = client.post(
+        '/api/creatures/evolve',
+        headers=headers,
+        json={
+            'campaignId': campaign_id,
+            'sessionId': session_id,
+            'baseCreature': core_creature('goblin_skirmisher'),
+            'eventContext': {'eventTags': ['fire'], 'grudgeTargetId': 'player_1'},
+        },
+    )
 
-    assert admin_apply.status_code == 200
-    assert admin_apply.get_json()['appliedChanges'] == []
-    assert admin_debug.status_code == 200
-    assert admin_debug.get_json()['events'] == []
-    assert admin_debug_bad_limit.status_code == 200
-    assert admin_debug_bad_limit.get_json()['events'] == []
+    assert admin_create.status_code == 201
+    assert admin_create.get_json()['entry']['creature']['id'] == 'wolf'
+    assert admin_generate_pack.status_code == 200
+    assert len(admin_generate_pack.get_json()['entries']) == 3
+    assert admin_evolve_save.status_code == 200
+    assert admin_evolve_save.get_json()['entry']['source'] == 'evolved'
+    with app.app_context():
+        audits = (
+            OperatorActionAudit.query.filter_by(campaign_id=campaign_id)
+            .order_by(OperatorActionAudit.operator_audit_id.asc())
+            .all()
+        )
+        assert [audit.action for audit in audits] == [
+            'bestiary.create',
+            'bestiary.generate_pack',
+            'bestiary.evolve_save',
+        ]
+        assert {audit.actor_role for audit in audits} == {'admin'}
+        assert {audit.actor_account_id for audit in audits} == {account_id}
+        generate_details = safe_json_loads(audits[1].details_json, {})
+        assert generate_details['savedCount'] == 3
+        evolve_details = safe_json_loads(audits[2].details_json, {})
+        assert evolve_details['scope'] == 'session'
+    admin_audits = client.get('/api/beta/audits?limit=5', headers=headers)
+    assert admin_audits.status_code == 200
+    audit_payload = admin_audits.get_json()
+    assert audit_payload['summary']['operator_action_count'] == 3
+    assert [row['action'] for row in reversed(audit_payload['operator_actions'])] == [
+        'bestiary.create',
+        'bestiary.generate_pack',
+        'bestiary.evolve_save',
+    ]
 
 
 def test_example_campaign_pack_import_requires_workspace_admin_account(tmp_path, monkeypatch):
@@ -561,6 +907,27 @@ def test_socket_token_extraction_ignores_query_and_event_payloads(tmp_path, monk
 
     with app.test_request_context('/socket.io/'):
         assert extract_socket_token(auth_payload={'token': 'token-123'}) == 'token-123'
+
+
+def test_socket_token_extraction_accepts_http_only_account_cookie(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(
+        tmp_path,
+        monkeypatch,
+        extra_env={'AIDM_ACCOUNT_COOKIE_AUTH_ENABLED': 'true'},
+    )
+    with app.app_context():
+        db.session.add(
+            Account(
+                username='socket-cookie',
+                first_name='Socket',
+                last_name='Cookie',
+                account_token_hash=hash_secret('socket-cookie-token'),
+            )
+        )
+        db.session.commit()
+
+    with app.test_request_context('/socket.io/', headers={'Cookie': 'aidm_account_session=socket-cookie-token'}):
+        assert extract_socket_token() == 'socket-cookie-token'
 
 
 def test_admin_denies_access_when_auth_is_disabled(tmp_path, monkeypatch):

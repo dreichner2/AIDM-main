@@ -9,6 +9,7 @@ from aidm_server.errors import error_response
 from aidm_server.models import Campaign, Map, Npc, World
 from aidm_server.pagination import jsonify_page, limited_page
 from aidm_server.response_dtos import world_payload
+from aidm_server.services.campaign_lifecycle import delete_campaign_record
 from aidm_server.validation import coerce_int, optional_text, parse_json_body, required_text
 from aidm_server.workspace_access import current_workspace_id, get_world as workspace_world, world_query
 
@@ -147,11 +148,9 @@ def delete_world(world_id):
     try:
         deleted_campaign_ids: list[int] = []
         if force_delete:
-            from aidm_server.blueprints.campaigns import _force_delete_campaign
-
             for campaign in linked_campaign_rows:
-                _force_delete_campaign(campaign)
                 deleted_campaign_ids.append(campaign.campaign_id)
+                delete_campaign_record(campaign, hard_delete=True, force_delete=True)
             Map.query.filter_by(world_id=world_id).delete(synchronize_session=False)
             Npc.query.filter_by(world_id=world_id).delete(synchronize_session=False)
         db.session.delete(world)

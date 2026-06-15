@@ -45,6 +45,44 @@ def test_http_response_includes_request_correlation_id(client):
     assert response.headers.get('X-Request-ID') == 'test-correlation-id'
 
 
+def test_http_response_includes_security_headers(client):
+    response = client.get('/api/health')
+
+    assert response.status_code == 200
+    assert response.headers.get('X-Content-Type-Options') == 'nosniff'
+    assert response.headers.get('X-Frame-Options') == 'DENY'
+    assert response.headers.get('Referrer-Policy') == 'no-referrer'
+    assert response.headers.get('Permissions-Policy') == 'camera=(), microphone=(), geolocation=(), payment=()'
+    csp = response.headers.get('Content-Security-Policy', '')
+    assert "default-src 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+
+
+def test_security_headers_can_be_disabled(tmp_path, monkeypatch):
+    db_path = tmp_path / 'security_headers_disabled.db'
+    monkeypatch.setenv('AIDM_DATABASE_URI', f'sqlite:///{db_path}')
+    monkeypatch.setenv('AIDM_AUTO_CREATE_SCHEMA', 'true')
+    monkeypatch.setenv('AIDM_ENV', 'test')
+    monkeypatch.setenv('AIDM_DEBUG', 'false')
+    monkeypatch.setenv('AIDM_SECURITY_HEADERS_ENABLED', 'false')
+    monkeypatch.setenv('AIDM_CORS_ALLOWLIST', 'http://localhost')
+    monkeypatch.setenv('AIDM_SOCKET_CORS_ALLOWLIST', 'http://localhost')
+    monkeypatch.setenv('AIDM_TELEMETRY_ENABLED', 'false')
+
+    import aidm_server.main as main_module
+
+    main_module = importlib.reload(main_module)
+    app = main_module.create_app()
+    ensure_schema(app)
+    test_client = app.test_client()
+
+    response = test_client.get('/api/health')
+
+    assert response.status_code == 200
+    assert 'Content-Security-Policy' not in response.headers
+    assert 'X-Frame-Options' not in response.headers
+
+
 def test_root_reports_backend_metadata(client):
     response = client.get('/')
 

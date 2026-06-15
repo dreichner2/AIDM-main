@@ -127,6 +127,32 @@ API_TYPE_CONTRACTS: tuple[TypeContract, ...] = (
     TypeContract('SessionCombatResponse', alias='{ combat: JsonRecord | null; validation?: JsonRecord; appliedChanges?: JsonRecord[]; endReason?: string | null }'),
     TypeContract('CombatDebugEventsResponse', alias='{ events: JsonRecord[] }'),
     TypeContract(
+        'TurnFeedbackReport',
+        fields=(
+            field('feedback_id', 'number'),
+            field('session_id', 'number'),
+            field('turn_id', 'number | null'),
+            field('feedback_type', 'string'),
+            field('category', 'string | null'),
+            field('coherence_score', 'number'),
+            field('notes', 'string | null'),
+            field('provider', 'string | null'),
+            field('model', 'string | null'),
+            field('turn_status', 'string | null'),
+            field('turn_latency_ms', 'number | null'),
+            field('created_at', 'string | null'),
+        ),
+    ),
+    TypeContract('BadTurnFeedbackResponse', alias='{ feedback: TurnFeedbackReport }'),
+    TypeContract(
+        'BetaIncidentsResponse',
+        alias='{ incidents: JsonRecord[]; summary: { failed_turn_count: number; failed_canon_job_count: number; bad_turn_report_count: number; telemetry_incident_count: number }; limit: number }',
+    ),
+    TypeContract(
+        'BetaAuditsResponse',
+        alias='{ state_mutations: JsonRecord[]; operator_actions: JsonRecord[]; summary: { state_mutation_count: number; operator_action_count: number }; limit: number }',
+    ),
+    TypeContract(
         'World',
         fields=(
             field('world_id', 'number'),
@@ -242,6 +268,7 @@ API_TYPE_CONTRACTS: tuple[TypeContract, ...] = (
         fields=(
             field('account', 'Account'),
             field('account_token', 'string'),
+            field('account_token_transport', 'string | null', optional=True),
             field('workspace_id', 'string | null'),
             field('workspace_role', 'string | null'),
             field('is_workspace_admin', 'boolean'),

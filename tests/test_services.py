@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import text
 
 from aidm_server.database import db
@@ -9,6 +10,7 @@ from aidm_server.models import (
     DmCoherenceFeedback,
     DmTurn,
     Map,
+    Player,
     PlayerAction,
     Session,
     SessionLogEntry,
@@ -19,6 +21,13 @@ from aidm_server.models import (
     TurnCanonUpdate,
     TurnEvent,
 )
+from aidm_server.services.campaign_lifecycle import (
+    CampaignHasSessionsError,
+    archive_campaign_record,
+    delete_campaign_record,
+    restore_campaign_record,
+)
+from aidm_server.services.player_lifecycle import delete_player_record
 from aidm_server.services.session_lifecycle import delete_session_record
 from aidm_server.services.workspace import campaign_workspace_payload
 from tests.helpers import seed_world_campaign_player_session
@@ -56,6 +65,94 @@ def test_campaign_workspace_service_matches_workspace_endpoint(client, app):
     assert service_payload['summary']['player_count'] == 1
     assert service_payload['summary']['map_count'] == 1
     assert service_payload['summary']['segment_count'] == 1
+
+
+def test_campaign_lifecycle_service_archive_restore_preserves_manually_archived_sessions(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        manually_archived = Session(
+            campaign_id=ids['campaign_id'],
+            status='archived',
+        )
+        db.session.add(manually_archived)
+        db.session.commit()
+        manually_archived_id = manually_archived.session_id
+
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        archive_payload = archive_campaign_record(campaign)
+        db.session.commit()
+
+        assert archive_payload['status'] == 'archived'
+        assert archive_payload['is_archived'] is True
+        archived_session = db.session.get(Session, ids['session_id'])
+        assert archived_session.status == 'archived'
+        assert archived_session.archived_by_campaign_id == ids['campaign_id']
+
+        restore_payload = restore_campaign_record(campaign)
+        db.session.commit()
+
+        assert restore_payload['status'] == 'active'
+        restored_session = db.session.get(Session, ids['session_id'])
+        manually_archived = db.session.get(Session, manually_archived_id)
+        assert restored_session.status == 'active'
+        assert restored_session.archived_by_campaign_id is None
+        assert manually_archived.status == 'archived'
+        assert manually_archived.archived_by_campaign_id is None
+
+
+def test_campaign_lifecycle_service_rejects_hard_delete_when_sessions_exist(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+
+        with pytest.raises(CampaignHasSessionsError) as exc_info:
+            delete_campaign_record(campaign, hard_delete=True, force_delete=False)
+
+        assert exc_info.value.session_count == 1
+        assert db.session.get(Campaign, ids['campaign_id']) is not None
+        assert db.session.get(Session, ids['session_id']) is not None
+
+
+def test_player_lifecycle_service_deletes_player_and_clears_turn_references(app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        turn = DmTurn(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            player_input='I check my pack.',
+            dm_output='Your pack is lighter now.',
+            status='completed',
+            outcome_status='resolved',
+        )
+        event = TurnEvent(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            event_type='player_action',
+            payload_json='{}',
+        )
+        action = PlayerAction(
+            session_id=ids['session_id'],
+            player_id=ids['player_id'],
+            action_text='I check my pack.',
+        )
+        db.session.add_all([turn, event, action])
+        db.session.commit()
+        turn_id = turn.turn_id
+        event_id = event.event_id
+
+        player = db.session.get(Player, ids['player_id'])
+        payload = delete_player_record(player)
+        db.session.commit()
+
+        assert payload == {'deleted': True, 'player_id': ids['player_id'], 'campaign_id': ids['campaign_id']}
+        assert PlayerAction.query.filter_by(player_id=ids['player_id']).count() == 0
+        assert db.session.get(DmTurn, turn_id).player_id is None
+        assert db.session.get(TurnEvent, event_id).player_id is None
 
 
 def test_session_lifecycle_service_hard_delete_removes_session_origin_canon(app):

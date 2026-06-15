@@ -117,6 +117,52 @@ select:focus-visible {
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 10px 28px rgba(0, 0, 0, 0.36);
 }
 
+@media (min-width: 981px) {
+  .prototype-shell.safe-mode-active {
+    grid-template-rows: 72px 34px minmax(0, 1fr);
+  }
+
+  .prototype-shell.safe-mode-active .campaign-rail,
+  .prototype-shell.safe-mode-active .session-board,
+  .prototype-shell.safe-mode-active .right-inspector {
+    grid-row: 3;
+  }
+}
+
+.safe-mode-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 14px;
+  border-bottom: 1px solid rgba(227, 188, 98, 0.32);
+  color: #fae4a7;
+  background:
+    linear-gradient(90deg, rgba(227, 188, 98, 0.15), rgba(227, 188, 98, 0.06)),
+    #111513;
+  font-size: 0.78rem;
+}
+
+.safe-mode-banner strong,
+.safe-mode-banner span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.safe-mode-banner strong {
+  flex: 0 0 auto;
+  color: #ffe9a8;
+  font-weight: 660;
+}
+
+.safe-mode-banner span {
+  color: #d8c38a;
+}
+
 .ops-brand,
 .ops-segment,
 .ops-actions {

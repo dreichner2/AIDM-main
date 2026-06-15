@@ -51,6 +51,14 @@ DAMAGE_PATTERN = re.compile(
     rf'(?P<amount>{SMALL_NUMBER_PATTERN})\s*(?:points?\s+of\s+)?(?:[a-z]+\s+)?(?:damage|hp)\b',
     re.IGNORECASE,
 )
+HP_CURRENT_PATTERN = re.compile(
+    rf'\b(?:drop|drops|dropped|fall|falls|fell|go|goes|went)\s+(?:down\s+)?to\s+'
+    rf'(?P<amount>{SMALL_NUMBER_PATTERN})\s*(?:hp|hit points?)\b'
+    rf'|\b(?:is|are|now|remains?|stands?)\s+(?:at\s+)?'
+    rf'(?P<amount2>{SMALL_NUMBER_PATTERN})(?:\s*/\s*\d{{1,4}})?\s*(?:hp|hit points?)\b'
+    rf'|\b(?P<amount3>{SMALL_NUMBER_PATTERN})\s*/\s*\d{{1,4}}\s*(?:hp|hit points?)\b',
+    re.IGNORECASE,
+)
 MAX_HP_SET_PATTERNS = [
     re.compile(
         r'\b(?:max(?:imum)?\s*(?:hp|hit points?)|hit point maximum)\s*'
@@ -1789,17 +1797,124 @@ def _helper_combat_participant_id(change: dict[str, Any]) -> str:
     )
 
 
+def _confirmed_cross_player_damage_change(
+    state_before_dm: dict[str, Any],
+    change: dict[str, Any],
+    dm_response: str,
+) -> bool:
+    if str(change.get('type') or '').strip() != 'health.damage':
+        return False
+    target_actor_id = _helper_change_actor_id(change)
+    if not target_actor_id:
+        return False
+    if (
+        target_actor_id not in set(_player_actor_ids(state_before_dm))
+        and target_actor_id not in _combat_participant_ids(state_before_dm, team='player')
+    ):
+        return False
+    amount = int_or_default(change.get('amount'), default=0)
+    if amount <= 0:
+        return False
+    actor = _actor_by_id(state_before_dm, target_actor_id) or {}
+    participant = _combat_participant_by_id(state_before_dm, target_actor_id) or {}
+    labels = [
+        actor.get('name'),
+        actor.get('characterName'),
+        actor.get('character_name'),
+        participant.get('name'),
+        target_actor_id,
+    ]
+    for sentence in _item_extraction_sentences(dm_response):
+        if not any(
+            _amount_text(match.group('amount')) == amount
+            for match in DAMAGE_PATTERN.finditer(sentence)
+        ):
+            continue
+        if any(label and _sentence_mentions_label(sentence, label) for label in labels):
+            return True
+    return False
+
+
+def _state_actor_current_hp(state_before_dm: dict[str, Any], actor_id: str) -> int | None:
+    actor = _actor_by_id(state_before_dm, actor_id) or {}
+    health = actor.get('health') if isinstance(actor.get('health'), dict) else {}
+    if health.get('currentHp') is not None:
+        return max(0, int_or_default(health.get('currentHp'), default=0))
+    participant = _combat_participant_by_id(state_before_dm, actor_id) or {}
+    hp = participant.get('hp') if isinstance(participant.get('hp'), dict) else {}
+    if hp.get('current') is not None or hp.get('currentHp') is not None:
+        return max(0, int_or_default(hp.get('current', hp.get('currentHp')), default=0))
+    return None
+
+
+def _confirmed_cross_player_participant_hp_change(
+    state_before_dm: dict[str, Any],
+    change: dict[str, Any],
+    dm_response: str,
+) -> bool:
+    if str(change.get('type') or '').strip() != 'combat.participant.update':
+        return False
+    target_actor_id = _helper_combat_participant_id(change)
+    if not target_actor_id:
+        return False
+    if (
+        target_actor_id not in set(_player_actor_ids(state_before_dm))
+        and target_actor_id not in _combat_participant_ids(state_before_dm, team='player')
+    ):
+        return False
+    hp = change.get('hp') if isinstance(change.get('hp'), dict) else {}
+    if hp.get('current') is None and hp.get('currentHp') is None:
+        return False
+    proposed_current = max(0, int_or_default(hp.get('current', hp.get('currentHp')), default=0))
+    old_current = _state_actor_current_hp(state_before_dm, target_actor_id)
+    actor = _actor_by_id(state_before_dm, target_actor_id) or {}
+    participant = _combat_participant_by_id(state_before_dm, target_actor_id) or {}
+    labels = [
+        actor.get('name'),
+        actor.get('characterName'),
+        actor.get('character_name'),
+        participant.get('name'),
+        target_actor_id,
+    ]
+    for sentence in _item_extraction_sentences(dm_response):
+        if not any(label and _sentence_mentions_label(sentence, label) for label in labels):
+            continue
+        if old_current is not None:
+            for match in DAMAGE_PATTERN.finditer(sentence):
+                amount = _amount_text(match.group('amount'))
+                if max(0, old_current - amount) == proposed_current:
+                    return True
+        for match in HP_CURRENT_PATTERN.finditer(sentence):
+            amount = next(
+                (_amount_text(value) for value in match.groupdict().values() if value is not None),
+                None,
+            )
+            if amount == proposed_current:
+                return True
+    return False
+
+
 def _filter_unauthorized_player_owned_changes(
     state_before_dm: dict[str, Any],
     changes: list[dict[str, Any]],
     actor_id: str,
-) -> tuple[list[dict[str, Any]], int]:
+    dm_response: str = '',
+) -> tuple[list[dict[str, Any]], int, list[str]]:
     expected_actor_id = _actor_ref(actor_id)
     if not expected_actor_id:
-        return changes, 0
+        return changes, 0, []
     player_actor_ids = set(_player_actor_ids(state_before_dm))
     combat_player_ids = _combat_participant_ids(state_before_dm, team='player')
+    confirmed_damage_targets = {
+        _helper_change_actor_id(change)
+        for change in changes
+        if isinstance(change, dict)
+        and _helper_change_actor_id(change)
+        and _helper_change_actor_id(change) != expected_actor_id
+        and _confirmed_cross_player_damage_change(state_before_dm, change, dm_response)
+    }
     filtered: list[dict[str, Any]] = []
+    authorized_cross_actor_change_ids: list[str] = []
     removed = 0
     for change in changes:
         if not isinstance(change, dict):
@@ -1809,6 +1924,12 @@ def _filter_unauthorized_player_owned_changes(
         if change_type in PLAYER_OWNED_STATE_CHANGE_TYPES:
             target_actor_id = _helper_change_actor_id(change)
             if target_actor_id and target_actor_id != expected_actor_id:
+                if _confirmed_cross_player_damage_change(state_before_dm, change, dm_response):
+                    change_id = str(change.get('id') or '').strip()
+                    if change_id:
+                        authorized_cross_actor_change_ids.append(change_id)
+                    filtered.append(change)
+                    continue
                 removed += 1
                 continue
         elif change_type in TRANSFER_STATE_CHANGE_TYPES:
@@ -1823,10 +1944,19 @@ def _filter_unauthorized_player_owned_changes(
                 and participant_id != expected_actor_id
                 and (participant_id in player_actor_ids or participant_id in combat_player_ids)
             ):
+                if participant_id in confirmed_damage_targets:
+                    removed += 1
+                    continue
+                if _confirmed_cross_player_participant_hp_change(state_before_dm, change, dm_response):
+                    change_id = str(change.get('id') or '').strip()
+                    if change_id:
+                        authorized_cross_actor_change_ids.append(change_id)
+                    filtered.append(change)
+                    continue
                 removed += 1
                 continue
         filtered.append(change)
-    return filtered, removed
+    return filtered, removed, authorized_cross_actor_change_ids
 
 
 def _filter_misrouted_combat_health_changes(
@@ -2751,11 +2881,25 @@ def extract_post_dm_outcomes(
     if helper_schema_valid:
         normalized = normalize_post_extraction(helper_payload, fallback_actor_id=actor_id)
         _assign_turn_scoped_change_ids(normalized['proposedChanges'], turn_id=turn_id)
-        filtered_changes, filtered_ownership_count = _filter_unauthorized_player_owned_changes(
+        (
+            filtered_changes,
+            filtered_ownership_count,
+            cross_player_damage_authorized_ids,
+        ) = _filter_unauthorized_player_owned_changes(
             state_before_dm,
             normalized.get('proposedChanges') or [],
             actor_id,
+            dm_response,
         )
+        if cross_player_damage_authorized_ids:
+            normalized['authorizedCrossActorChangeIds'] = list(
+                dict.fromkeys(
+                    [
+                        *(normalized.get('authorizedCrossActorChangeIds') or []),
+                        *cross_player_damage_authorized_ids,
+                    ]
+                )
+            )
         filtered_changes, filtered_count = _filter_misrouted_combat_health_changes(
             state_before_dm,
             filtered_changes,

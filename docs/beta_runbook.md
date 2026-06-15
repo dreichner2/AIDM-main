@@ -2,14 +2,16 @@
 
 ## Startup
 1. Set environment variables (`AIDM_ENV`, `AIDM_DATABASE_URI`, `AIDM_AUTH_REQUIRED`, `AIDM_API_AUTH_TOKENS`, and the selected provider key such as `GOOGLE_GENAI_API_KEY`, `AIDM_DEEPSEEK_API_KEY`, or `AIDM_NVIDIA_API_KEY`).
-2. For production-like socket runtime, keep `AIDM_SOCKETIO_ASYNC_MODE=threading` unless you intentionally switch modes.
+2. For production-like socket runtime, keep `AIDM_SOCKETIO_ASYNC_MODE=threading` unless you intentionally switch modes, and explicitly choose `AIDM_SOCKETIO_WORKER_MODEL=single`, `sticky`, or `message_queue`.
 3. Install dependencies: `python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt` for local development, or use `requirements.runtime.txt` for a minimal runtime without pytest/admin/migration UI tooling. Both paths apply `requirements.constraints.txt` for repeatable direct dependency versions.
 4. Apply migrations: `flask db upgrade` (or run bootstrap command below).
 5. Bootstrap check/start command:
    - Check only: `.venv/bin/python scripts/deploy_bootstrap.py --check-only`
    - Start after checks: `.venv/bin/python scripts/deploy_bootstrap.py`
-6. Verify health: `GET /api/health`.
-7. For the canonical local UI, start `aidm_frontend` with `VITE_AIDM_API_BASE_URL` pointed at the backend.
+6. For local/private SQLite beta data, run `make backup-restore-drill` before real play sessions or pass `BACKUP_RESTORE_DRILL_ARGS="--database-uri sqlite:////absolute/path/to/dnd_ai_dm.db"` for a specific database. The drill creates a backup and verifies a restored copy without writing to the source DB.
+7. For a release-candidate rehearsal, run `make closed-beta-rc`. For local iteration without browser/dependency gates, run `make closed-beta-rc-fast`.
+8. Verify health: `GET /api/health`.
+9. For the canonical local UI, start `aidm_frontend` with `VITE_AIDM_API_BASE_URL` pointed at the backend.
 
 ## Optional TTS
 1. Set `AIDM_DEEPGRAM_API_KEY`.
@@ -32,10 +34,10 @@
 2. Narration streams through `dm_response_start`, one or more `dm_chunk` events, and `dm_response_end`.
 3. After visible narration finishes, post-turn work persists `dm_output`, records the `dm_response` event, extracts/validates canon, applies canon tables, refreshes `SessionState`, and emits `session_log_update`.
 4. Watch `turn_status` events for `received`, `narrating`, `response_complete`, `saving`, `saved`, `canon_pending`, `canon_applied`, and `failed`. A canon failure should not erase a saved visible DM response.
-5. Treat `turn_events` as the audit trail. `dm_turns`, `session_log_entries`, `PlayerAction`, and `SessionState` are projections or convenience tables that should agree with the event spine.
+5. Treat `turn_events` as the turn transcript audit trail. `dm_turns`, `session_log_entries`, `PlayerAction`, and `SessionState` are projections or convenience tables that should agree with the event spine. Use `/api/beta/audits` as a workspace admin when investigating manual/operator changes; it includes recent session-state mutation diffs and bestiary/operator authoring actions.
 6. If a future change rewrites projection logic, verify both the event rows and the projected session log/state before assuming the UI is wrong.
 
-The per-session turn coordinator defaults to an in-memory store for local single-process play. For multi-worker deployments, set `AIDM_TURN_COORDINATOR_STORE=database` so workers share `session_turn_locks`; tune `AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS` high enough for the longest expected provider turn, and keep `AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS` low enough that queued players are not left waiting after a lock releases.
+The per-session turn coordinator defaults to an in-memory store for local single-process play. For multi-worker deployments, set `AIDM_TURN_COORDINATOR_STORE=database` so workers share `session_turn_locks`; tune `AIDM_TURN_COORDINATOR_LOCK_TTL_SECONDS` high enough for the longest expected provider turn, and keep `AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS` low enough that queued players are not left waiting after a lock releases. Multi-worker Socket.IO delivery also needs either `AIDM_SOCKETIO_WORKER_MODEL=sticky` with load balancer affinity or `AIDM_SOCKETIO_WORKER_MODEL=message_queue` plus `AIDM_SOCKETIO_MESSAGE_QUEUE`.
 
 ## Provider Switching
 1. Changing provider/model mid-session can alter tone, continuity, latency, and rules behavior.
@@ -47,15 +49,16 @@ The per-session turn coordinator defaults to an in-memory store for local single
 7. Runtime provider mutation is owned by `aidm_server.blueprints.runtime_config`; the generic system blueprint should stay read-only health/metrics plus operational utilities.
 
 ## Incident Playbook
-1. `error_code=unauthorized`: verify bearer token or socket connect auth payload; tokens are not accepted in event payloads or query strings.
+1. `error_code=unauthorized`: verify bearer token, HTTP-only account cookie, or socket connect auth payload; tokens are not accepted in event payloads or query strings.
 2. `error_code=rate_limited`: increase limits or reduce client burst rate.
 3. `error_code=dm_generation_failed`: switch to fallback provider or verify provider key/model.
 4. Segment not triggering: inspect segment `trigger_condition` JSON and session/campaign state.
-5. Missing external telemetry: verify `AIDM_TELEMETRY_ENABLED`, endpoint URL, API key, timeout.
+5. Missing external telemetry: verify `AIDM_TELEMETRY_ENABLED`, endpoint URL, API key, timeout, plus `AIDM_OBSERVABILITY_PROVIDER` and `AIDM_ALERT_OWNER` in production.
 6. DM response visible but not saved: inspect `dm_turns.status`, the matching `turn_events` rows, backend logs after `dm_response_end`, and whether canon extraction/projection failed before `session_log_update`.
-7. TTS icon on but silent: verify `/api/tts/config`, browser autoplay policy, visible frontend TTS errors, and direct `/api/tts/stream` behavior with a short sentence.
-8. Frontend connected to wrong backend: restart Vite with `VITE_AIDM_API_BASE_URL=http://127.0.0.1:5050`, then verify the backend URL displayed in the top bar.
-9. Created campaign has no players/sessions: create or select a player for the campaign, then start a session; the campaign workspace endpoint should show `player_count` and `session_count`.
+7. Tester reports a bad turn: use the operator-only inspector Ops tab or `/api/beta/incidents` as a workspace admin to inspect the report, failed-turn row, provider/model snapshot, and related canon-job status.
+8. TTS icon on but silent: verify `/api/tts/config`, browser autoplay policy, visible frontend TTS errors, and direct `/api/tts/stream` behavior with a short sentence.
+9. Frontend connected to wrong backend: restart Vite with `VITE_AIDM_API_BASE_URL=http://127.0.0.1:5050`, then verify the backend URL displayed in the top bar.
+10. Created campaign has no players/sessions: create or select a player for the campaign, then start a session; the campaign workspace endpoint should show `player_count` and `session_count`.
 
 ## Safe Flags for Closed Beta
 - `AIDM_AUTH_REQUIRED=true`
@@ -66,13 +69,19 @@ The per-session turn coordinator defaults to an in-memory store for local single
 - `AIDM_RATE_LIMIT_MAX_API_REQUESTS=120`
 - `AIDM_RATE_LIMIT_MAX_SOCKET_MESSAGES=40`
 - `AIDM_RATE_LIMIT_STORE=memory` for local runs, or `database` when multiple workers must share one limit window.
+- `AIDM_TURN_COORDINATOR_STORE=memory` for local single-process runs, or `database` for production/multi-worker runs.
+- `AIDM_SOCKETIO_WORKER_MODEL=single` for one backend worker, `sticky` when the load balancer owns affinity, or `message_queue` when Socket.IO uses `AIDM_SOCKETIO_MESSAGE_QUEUE`.
+- `AIDM_ACCOUNT_COOKIE_AUTH_ENABLED=true` and `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false` for hosted same-origin cookie-only account auth. Unsafe REST requests then use the companion `aidm_csrf_token` cookie with `X-AIDM-CSRF-Token`.
+- `AIDM_OBSERVABILITY_PROVIDER=<provider-name>` and `AIDM_ALERT_OWNER=<team-or-person>` for production bootstrap.
 - `AIDM_TELEMETRY_ENABLED=true` (if external telemetry endpoint is available)
+- `AIDM_SECURITY_HEADERS_ENABLED=true` so Flask-served responses include CSP and standard browser hardening headers.
 
 ## Local-Only Boundaries
 - `.env.local` writes from `/api/llm/config` are for local runtime switching.
 - `AIDM_AUTH_REQUIRED=false`, wildcard CORS, SQLite, Flask admin, in-memory rate limiting, the in-memory turn coordinator, and module-global socket state are local/private deployment conveniences.
 - SQLite databases/backups are developer runtime data. Local defaults use `~/.aidm/`; keep real DBs and backups outside `aidm_server/instance/` before packaging or sharing.
+- `scripts/backup_restore_drill.py` supports file-backed SQLite. Hosted databases need a provider-specific backup/restore runbook and restore proof before wider beta.
 - Structured JSON-like fields intentionally remain JSON text while SQLite is supported; see `docs/json_storage_policy.md` before changing these columns to native JSON.
 - Browser QA screenshots and traces should be written under ignored paths such as `tmp/verification_artifacts/` and cleaned with `scripts/cleanup_artifacts.sh`.
-- Production bootstrap rejects wildcard CORS and requires auth.
+- Production bootstrap rejects wildcard CORS and requires auth, declared observability ownership, an explicit Socket.IO worker model, database-backed rate limiting and turn coordination, security headers, and secure cookie settings when cookie auth is enabled.
 - Bootstrap tightens `.env.local`, local SQLite data directories such as `~/.aidm` or `instance`, and SQLite DB/backups when present.

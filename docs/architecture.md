@@ -53,6 +53,9 @@ the archived review notes and should stay focused on where behavior lives.
 - `aidm_frontend/src/App.tsx` still orchestrates broad runtime state and some
   dialogs. Continue extracting dialog components until App is mostly shell,
   selected campaign/session/player state, socket lifecycle, and layout.
+- Extracted dialogs share `aidm_frontend/src/ModalShell.tsx` and
+  `aidm_frontend/src/useModalFocusTrap.ts` for backdrop, dialog semantics,
+  initial focus, Escape close, Tab looping, and focus return.
 - API DTO types are generated from `aidm_server/api_type_contract.py` into
   `aidm_frontend/src/apiContract.generated.ts`. CI verifies this file is fresh.
 - CSS is split by surface under `aidm_frontend/src/styles/`; responsive changes

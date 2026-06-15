@@ -20,6 +20,17 @@ export function normalizeBaseUrl(value: string) {
 const NGROK_BROWSER_WARNING_HEADER = 'ngrok-skip-browser-warning'
 export const WORKSPACE_TOKEN_HEADER = 'X-AIDM-Workspace-Token'
 export const WORKSPACE_ID_HEADER = 'X-AIDM-Workspace-Id'
+export const CSRF_HEADER = 'X-AIDM-CSRF-Token'
+const CSRF_COOKIE_NAME = 'aidm_csrf_token'
+
+function readCookie(name: string) {
+  const prefix = `${encodeURIComponent(name)}=`
+  return document.cookie
+    .split(';')
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith(prefix))
+    ?.slice(prefix.length) ?? ''
+}
 
 export function storedWorkspaceToken() {
   return sessionStorage.getItem('aidm:workspaceToken') ?? ''
@@ -72,6 +83,14 @@ export function addWorkspaceTokenHeader(headers: Headers, workspaceToken = store
   }
 }
 
+export function addCookieCsrfHeader(headers: Headers) {
+  if (headers.has(CSRF_HEADER)) return
+  const token = decodeURIComponent(readCookie(CSRF_COOKIE_NAME))
+  if (token) {
+    headers.set(CSRF_HEADER, token)
+  }
+}
+
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -110,6 +129,7 @@ export async function apiFetch<T>(
     headers.set('Authorization', `Bearer ${token.trim()}`)
   }
   addWorkspaceTokenHeader(headers)
+  addCookieCsrfHeader(headers)
   if (options.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }

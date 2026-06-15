@@ -16,6 +16,7 @@ from aidm_server.models import (
     DmTurn,
     InstalledCampaignPack,
     Map,
+    OperatorActionAudit,
     Player,
     PlayerAction,
     Session,
@@ -399,6 +400,11 @@ def test_import_campaign_pack_seeds_structured_campaign_content(client, app):
         assert bestiary.source == 'campaign_pack'
         assert bestiary.persistence == 'campaign'
         assert 'pack:bleakmoor_intro' in json.loads(bestiary.tags_json)
+        audit = OperatorActionAudit.query.filter_by(action='campaign_pack.import', campaign_id=campaign.campaign_id).one()
+        assert audit.resource_id == 'bleakmoor_intro'
+        details = json.loads(audit.details_json)
+        assert details['packId'] == 'bleakmoor_intro'
+        assert details['counts']['bestiary_entries'] == 1
 
 
 def test_import_campaign_pack_can_create_world_from_manifest(client, app):
@@ -887,6 +893,14 @@ def test_campaign_archive_delete_and_restore_hide_from_default_lists(client, app
         assert manually_archived is not None
         assert manually_archived.status == 'archived'
         assert manually_archived.archived_by_campaign_id is None
+        audits = (
+            OperatorActionAudit.query.filter_by(campaign_id=ids['campaign_id'])
+            .order_by(OperatorActionAudit.operator_audit_id.asc())
+            .all()
+        )
+        assert [audit.action for audit in audits] == ['campaign.archive', 'campaign.restore']
+        assert json.loads(audits[0].details_json)['archivedSessionCount'] == 1
+        assert json.loads(audits[1].details_json)['restoredSessionCount'] == 1
 
 
 def test_campaign_hard_delete_rejects_campaigns_with_sessions(client, app):
@@ -980,6 +994,19 @@ def test_campaign_force_hard_delete_removes_campaign_workspace(client, app):
         assert SessionState.query.filter_by(session_id=ids['session_id']).count() == 0
         assert PlayerAction.query.filter_by(session_id=ids['session_id']).count() == 0
         assert DmCoherenceFeedback.query.filter_by(session_id=ids['session_id']).count() == 0
+        campaign_audit = OperatorActionAudit.query.filter_by(
+            action='campaign.delete_hard',
+            resource_id=str(ids['campaign_id']),
+        ).one()
+        assert campaign_audit.workspace_id == 'owner'
+        campaign_audit_details = json.loads(campaign_audit.details_json)
+        assert campaign_audit_details['forceDelete'] is True
+        assert campaign_audit_details['deletedSessionIds'] == [ids['session_id']]
+        session_audit = OperatorActionAudit.query.filter_by(
+            action='session.delete_hard',
+            resource_id=str(ids['session_id']),
+        ).one()
+        assert session_audit.workspace_id == 'owner'
 
 
 def test_campaign_workspace_endpoint_returns_aggregate_payload(client, app):

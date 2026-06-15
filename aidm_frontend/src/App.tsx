@@ -27,22 +27,25 @@ import {
   VolumeX,
   X,
 } from 'lucide-react'
+import {
+  CampaignArchiveDialog,
+  SessionArchiveDialog,
+  type CampaignArchiveDialogState,
+  type SessionArchiveDialogState,
+} from './ArchiveDialogs'
 import { StatusDot, ThinIcon } from './AppChrome'
 import { CampaignRail, type CampaignCard, type SessionCard } from './CampaignRail'
+import { CampaignChooserDialog } from './CampaignChooserDialog'
 import { CampaignPackImportDialog } from './CampaignPackImportDialog'
 import type { CampaignPackControlAction } from './CampaignPackPanel'
 import {
   InspectorPanel,
   type InspectorTab,
 } from './InspectorPanel'
+import { PlayerDeleteDialog } from './PlayerDeleteDialog'
+import { useModalFocusTrap } from './useModalFocusTrap'
 import { ApiClientError, WORKSPACE_ID_HEADER, apiFetch, storedRuntimeAccessSnapshot } from './api'
-import {
-  POINT_BUY_ABILITIES,
-  POINT_BUY_BUDGET,
-  abilityModifier,
-  clampPointBuyScore,
-  pointBuySpent,
-} from './characterStats'
+import { actorCapabilitiesAllowOperatorTools } from './capabilities'
 import { SessionBoard, type MainTab } from './SessionBoard'
 import {
   abilityOptionsFromStatBlock,
@@ -77,9 +80,11 @@ import { turnControlFromSnapshot, turnControlWithActiveName } from './turnContro
 import './App.css'
 import type {
   AccountWorkspace,
+  ActorCapabilitiesResponse,
   ActivePlayer,
   ActivePlayerHealth,
   ActivePlayerHealthTone,
+  BadTurnFeedbackResponse,
   BetaSummary,
   Campaign,
   ClarificationRequest,
@@ -100,7 +105,6 @@ import type {
 import {
   useCampaignActions,
   type CampaignActionDialogState,
-  type CampaignPackExample,
 } from './useCampaignActions'
 import { useComposerActions } from './useComposerActions'
 import { usePlayerProfileActions } from './usePlayerProfileActions'
@@ -111,52 +115,30 @@ import { useTtsNarration } from './useTtsNarration'
 import { useWorldMapSegmentActions } from './useWorldMapSegmentActions'
 import { useWorkspaceQueries, type CampaignSessionMeta } from './useWorkspaceQueries'
 import { useWorkspaceStore } from './useWorkspaceStore'
+import {
+  WorldDeleteDialog,
+  WorldManagerDialog,
+} from './WorldDialogs'
+import {
+  emptyWorldForm,
+  type WorldDeleteDialogState,
+  type WorldFormState,
+} from './worldDialogState'
 
 const DEFAULT_BASE_URL = import.meta.env.VITE_AIDM_API_BASE_URL ?? ''
 const PHONE_LAYOUT_MEDIA_QUERY = '(max-width: 760px)'
 
 const loadDiceRollDialog = () => import('./DiceRollDialog')
 const DiceRollDialog = lazy(loadDiceRollDialog)
-const ClassSelector = lazy(() =>
-  import('./ClassSelector').then((module) => ({ default: module.ClassSelector })),
+const PlayerEditDialog = lazy(() =>
+  import('./PlayerEditDialog').then((module) => ({ default: module.PlayerEditDialog })),
 )
-const RaceSelector = lazy(() =>
-  import('./RaceSelector').then((module) => ({ default: module.RaceSelector })),
+const CreateCampaignDialog = lazy(() =>
+  import('./CreateCampaignDialog').then((module) => ({ default: module.CreateCampaignDialog })),
 )
-
 function preloadDiceRollDialog() {
   if (import.meta.env.MODE === 'test') return
   void loadDiceRollDialog()
-}
-
-function formatCampaignPackRange(min?: number, max?: number, unit?: string) {
-  if (!min && !max) return ''
-  const suffix = unit ? ` ${unit}` : ''
-  if (!max || max === min) return `${min ?? max}${suffix}`
-  if (!min) return `${max}${suffix}`
-  return `${min}-${max}${suffix}`
-}
-
-function campaignPackLengthSummary(pack: CampaignPackExample | null) {
-  const estimate = pack?.length_estimate
-  if (!estimate) return ''
-  const label = stringValue(estimate.label)
-  const sessions = formatCampaignPackRange(
-    estimate.sessions_min,
-    estimate.sessions_max,
-    'sessions',
-  )
-  return [label, sessions].filter(Boolean).join(' / ')
-}
-
-function campaignPackLengthDetail(pack: CampaignPackExample | null) {
-  const estimate = pack?.length_estimate
-  if (!estimate) return ''
-  const hours = formatCampaignPackRange(estimate.hours_min, estimate.hours_max, 'hours')
-  const checkpoints = estimate.checkpoint_count
-    ? `${estimate.checkpoint_count} checkpoints`
-    : ''
-  return [hours, checkpoints].filter(Boolean).join(' / ')
 }
 
 const ACTIVE_PLAYER_HEALTH_LABELS: Record<ActivePlayerHealthTone, string> = {
@@ -277,22 +259,6 @@ function isEditableShortcutTarget(target: EventTarget | null) {
   return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
 }
 
-function focusableDialogElements(container: HTMLElement) {
-  const selector = [
-    'button:not([disabled])',
-    'input:not([disabled])',
-    'textarea:not([disabled])',
-    'select:not([disabled])',
-    'a[href]',
-    '[tabindex]:not([tabindex="-1"])',
-  ].join(',')
-  return Array.from(container.querySelectorAll<HTMLElement>(selector)).filter((element) => {
-    if (element.getAttribute('aria-hidden') === 'true') return false
-    const style = window.getComputedStyle(element)
-    return style.display !== 'none' && style.visibility !== 'hidden'
-  })
-}
-
 type UiErrorCategory = 'connection' | 'tts' | 'validation' | 'persistence' | 'workspace' | 'system'
 
 type UiError = {
@@ -302,50 +268,11 @@ type UiError = {
   createdAt: number
 }
 
-type WorldFormState = {
-  mode: 'create' | 'edit'
-  worldId: number | null
-  name: string
-  description: string
-  error: string
-  pending: boolean
-}
-
-type WorldDeleteDialogState = {
-  world: World
-  error: string
-  pending: boolean
-  canForce: boolean
-} | null
-
 type SavedWorkspaceDeleteDialogState = {
   workspace: AccountWorkspace
   error: string
   pending: boolean
 } | null
-
-type CampaignArchiveDialogState = {
-  items: Campaign[]
-  loading: boolean
-  error: string
-  pendingId: number | null
-} | null
-
-type SessionArchiveDialogState = {
-  items: SessionSummary[]
-  loading: boolean
-  error: string
-  pendingId: number | null
-} | null
-
-const emptyWorldForm: WorldFormState = {
-  mode: 'create',
-  worldId: null,
-  name: '',
-  description: '',
-  error: '',
-  pending: false,
-}
 
 function isUnauthorizedError(error: unknown) {
   return error instanceof ApiClientError && error.status === 401
@@ -575,6 +502,7 @@ function avatarDataUri(seed: string, variant: 'campaign' | 'character' = 'campai
 
 function App() {
   const [health, setHealth] = useState<Health | null>(null)
+  const [actorCapabilities, setActorCapabilities] = useState<ActorCapabilitiesResponse | null>(null)
   const [llmConfig, setLlmConfig] = useState<LlmRuntimeConfig | null>(null)
   const [ttsConfig, setTtsConfig] = useState<TtsRuntimeConfig | null>(null)
   const [runtimePending, setRuntimePending] = useState(false)
@@ -590,6 +518,8 @@ function App() {
   const [optimisticEntries, setOptimisticEntries] = useState<TimelineEntry[]>([])
   const [streamingTurn, setStreamingTurn] = useState<StreamingTurn | null>(null)
   const [turnStatuses, setTurnStatuses] = useState<Record<number, string>>({})
+  const [reportedBadTurnIds, setReportedBadTurnIds] = useState<Set<number>>(() => new Set())
+  const [reportingBadTurnIds, setReportingBadTurnIds] = useState<Set<number>>(() => new Set())
   const [clarificationRequest, setClarificationRequest] = useState<ClarificationRequest | null>(null)
   const [mainTab, setMainTab] = useState<MainTab>('turns')
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('party')
@@ -628,6 +558,7 @@ function App() {
   const [nowMs, setNowMs] = useState(() => Date.now())
   const resetRuntimeState = useCallback(() => {
     setHealth(null)
+    setActorCapabilities(null)
     setLlmConfig(null)
     setTtsConfig(null)
     setMetrics(null)
@@ -679,7 +610,6 @@ function App() {
   const sessionImportInputRef = useRef<HTMLInputElement | null>(null)
   const modalDialogRef = useRef<HTMLElement | null>(null)
   const dialogReturnFocusRef = useRef<HTMLElement | null>(null)
-  const closeCurrentDialogRef = useRef<() => void>(() => undefined)
   const promptedCharacterCampaignIdsRef = useRef<Set<number>>(new Set())
   const selectedPlayerByCampaignRef = useRef<Record<number, number>>({})
   const lastSelectedCampaignIdRef = useRef<number | null>(null)
@@ -722,10 +652,36 @@ function App() {
       (workspace) => workspace.workspace_id === OWNER_WORKSPACE_ID && workspace.is_workspace_admin,
     ),
   )
+  const canQueryActorCapabilities =
+    health?.auth_required === true && Boolean(auth && runtimeAccount?.workspaceId && workspaceId)
+  const activeActorCapabilities =
+    actorCapabilities && actorCapabilities.workspace_id === workspaceId ? actorCapabilities : null
+  const canUseOperatorTools = activeActorCapabilities
+    ? actorCapabilitiesAllowOperatorTools(activeActorCapabilities.capabilities)
+    : health?.auth_required === false || runtimeAccount?.isWorkspaceAdmin === true
   const runtimeConfigHeaders = useMemo<HeadersInit | undefined>(
     () => (canUseOwnerRuntimeConfig ? { [WORKSPACE_ID_HEADER]: OWNER_WORKSPACE_ID } : undefined),
     [canUseOwnerRuntimeConfig],
   )
+  useEffect(() => {
+    if (!canQueryActorCapabilities) {
+      setActorCapabilities(null)
+      return undefined
+    }
+
+    let cancelled = false
+    setActorCapabilities(null)
+    apiFetch<ActorCapabilitiesResponse>(baseUrl, '/api/capabilities', auth)
+      .then((payload) => {
+        if (!cancelled) setActorCapabilities(payload)
+      })
+      .catch(() => {
+        if (!cancelled) setActorCapabilities(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [auth, baseUrl, canQueryActorCapabilities, runtimeAccount?.workspaceId, workspaceId, workspaceToken])
   const storedSelectionScope = selectionStorageScope(auth)
   const {
     campaigns,
@@ -946,6 +902,48 @@ function App() {
     latestDmEntry?.text ||
     sessionState?.rolling_summary ||
     welcomeText
+
+  useEffect(() => {
+    setReportedBadTurnIds(new Set())
+    setReportingBadTurnIds(new Set())
+  }, [activeSessionId])
+
+  const reportBadTurn = useCallback(
+    async (entry: TimelineEntry) => {
+      const turnId = numberValue(entry.metadata.turn_id)
+      if (!activeSessionId || turnId === null) {
+        pushError('validation', 'Choose a saved DM turn before reporting it.')
+        return
+      }
+      if (reportedBadTurnIds.has(turnId) || reportingBadTurnIds.has(turnId)) return
+      setReportingBadTurnIds((current) => new Set(current).add(turnId))
+      try {
+        await apiFetch<BadTurnFeedbackResponse>(
+          baseUrl,
+          '/api/feedback/bad-turn',
+          auth,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              session_id: activeSessionId,
+              turn_id: turnId,
+              category: 'other',
+            }),
+          },
+        )
+        setReportedBadTurnIds((current) => new Set(current).add(turnId))
+      } catch (error) {
+        pushError('persistence', `Could not report turn: ${error instanceof Error ? error.message : String(error)}`)
+      } finally {
+        setReportingBadTurnIds((current) => {
+          const next = new Set(current)
+          next.delete(turnId)
+          return next
+        })
+      }
+    },
+    [activeSessionId, auth, baseUrl, pushError, reportedBadTurnIds, reportingBadTurnIds],
+  )
 
   const {
     ttsEnabled,
@@ -1338,37 +1336,6 @@ function App() {
     setInspectorTab,
     pushError,
   })
-  const selectedCreateCampaignPack = useMemo(
-    () =>
-      createCampaignPackOptions.find((pack) => pack.pack_id === createCampaignForm.packId) ??
-      null,
-    [createCampaignForm.packId, createCampaignPackOptions],
-  )
-  const [createCampaignPackPickerOpen, setCreateCampaignPackPickerOpen] = useState(false)
-  const selectedCreateCampaignPackLength = campaignPackLengthSummary(selectedCreateCampaignPack)
-  const selectedCreateCampaignPackLengthDetail = campaignPackLengthDetail(selectedCreateCampaignPack)
-  const selectCreateCampaignPack = useCallback(
-    (packId: string) => {
-      const pack = createCampaignPackOptions.find((item) => item.pack_id === packId)
-      setCreateCampaignForm((current) => ({
-        ...current,
-        packId,
-        title: pack ? pack.title : current.title,
-        description: pack ? pack.description : current.description,
-        worldId: pack ? '' : current.worldId || (campaignWorldId ? String(campaignWorldId) : ''),
-        worldName: pack ? '' : current.worldName,
-      }))
-      setCreateCampaignPackPickerOpen(false)
-    },
-    [campaignWorldId, createCampaignPackOptions, setCreateCampaignForm],
-  )
-
-  useEffect(() => {
-    if (!createCampaignOpen) {
-      setCreateCampaignPackPickerOpen(false)
-    }
-  }, [createCampaignOpen])
-
   const openCampaignPackImportDialog = useCallback(() => {
     rememberDialogTrigger()
     setCampaignPackImportOpen(true)
@@ -2150,10 +2117,6 @@ function App() {
     worldManagerOpen,
   ])
 
-  useEffect(() => {
-    closeCurrentDialogRef.current = closeCurrentDialog
-  }, [closeCurrentDialog])
-
   const activeModalKey = campaignActionDialog
     ? 'campaign-action'
     : sessionActionDialog
@@ -2188,6 +2151,12 @@ function App() {
                                 ? 'create-campaign'
                                 : null
   const modalOpen = Boolean(activeModalKey)
+  useModalFocusTrap({
+    activeKey: activeModalKey,
+    dialogRef: modalDialogRef,
+    onClose: closeCurrentDialog,
+    returnFocusRef: dialogReturnFocusRef,
+  })
   const runtimeSettingsIsAuthPrompt = runtimeSettingsMode === 'auth'
   const runtimeSettingsIsAccountStep = runtimeSettingsIsAuthPrompt && runtimeAuthStep === 'account'
   const runtimeSettingsIsWorkspaceStep = runtimeSettingsIsAuthPrompt && runtimeAuthStep === 'workspace'
@@ -2245,58 +2214,6 @@ function App() {
     selectedCampaignId,
     workspaceLoading,
   ])
-
-  useEffect(() => {
-    if (!activeModalKey) return undefined
-    const previouslyFocused =
-      dialogReturnFocusRef.current ??
-      (document.activeElement instanceof HTMLElement ? document.activeElement : null)
-    const focusTimer = window.setTimeout(() => {
-      const dialog = modalDialogRef.current
-      const focusTarget = dialog
-        ?.querySelector<HTMLElement>('[data-autofocus]')
-        ?? dialog?.querySelector<HTMLElement>(
-          'input:not([disabled]), textarea:not([disabled]), button:not([disabled])',
-        )
-      focusTarget?.focus()
-    }, 0)
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      const dialog = modalDialogRef.current
-      if (!dialog) return
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        event.stopPropagation()
-        closeCurrentDialogRef.current()
-        return
-      }
-      if (event.key !== 'Tab') return
-      const focusable = focusableDialogElements(dialog)
-      if (!focusable.length) {
-        event.preventDefault()
-        return
-      }
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      window.clearTimeout(focusTimer)
-      document.removeEventListener('keydown', handleKeyDown)
-      if (previouslyFocused?.isConnected) {
-        previouslyFocused.focus()
-      }
-      dialogReturnFocusRef.current = null
-    }
-  }, [activeModalKey])
 
   useEffect(() => {
     if (
@@ -2784,6 +2701,7 @@ function App() {
   const latestRuntime = runtime?.latest_turn ?? null
   const configuredProvider = stringValue(runtime?.provider, 'Unknown')
   const configuredModel = stringValue(runtime?.model, 'Unknown')
+  const safeModeActive = configuredProvider.trim().toLowerCase() === 'fallback'
   const runtimeProviders = llmConfig?.providers ?? []
   const selectedProviderOption = runtimeProviders.find(
     (provider) => provider.id === configuredProvider,
@@ -2886,12 +2804,10 @@ function App() {
     `prototype-shell theme-${theme}`,
     railCollapsed ? 'rail-collapsed' : '',
     fullscreenActive ? 'fullscreen-active' : '',
+    safeModeActive ? 'safe-mode-active' : '',
     mobileRailOpen ? 'mobile-rail-open' : '',
     mobileInspectorOpen ? 'mobile-inspector-open' : '',
   ].filter(Boolean).join(' ')
-  const playerDialogPointBuySpent = playerEditDialog ? pointBuySpent(playerEditDialog.abilityScores) : 0
-  const playerDialogPointBuyRemaining = POINT_BUY_BUDGET - playerDialogPointBuySpent
-
   return (
     <div
       ref={rootRef}
@@ -3143,6 +3059,13 @@ function App() {
         </div>
       </header>
 
+      {safeModeActive ? (
+        <div className="safe-mode-banner" role="status" aria-live="polite">
+          <strong>Safe Mode</strong>
+          <span>Fallback provider active. No live LLM.</span>
+        </div>
+      ) : null}
+
       <button
         type="button"
         className="mobile-panel-scrim"
@@ -3237,6 +3160,9 @@ function App() {
         loadOlderSessionLog={loadOlderSessionLog}
         turnRows={turnRows}
         dismissTimelineEntry={dismissTimelineEntry}
+        reportedBadTurnIds={reportedBadTurnIds}
+        reportingBadTurnIds={reportingBadTurnIds}
+        reportBadTurn={reportBadTurn}
         expandedTurnIds={expandedTurnIds}
         setExpandedTurnIds={setExpandedTurnIds}
         selectedPlayer={selectedPlayer}
@@ -3332,6 +3258,7 @@ function App() {
         setMainTab={setMainTab}
         baseUrl={baseUrl}
         auth={auth}
+        canUseOperatorTools={canUseOperatorTools}
         displayCharacter={displayCharacter}
         characterAvatarSrc={characterAvatarSrc}
         xpProgress={xpProgress}
@@ -3912,6 +3839,7 @@ function App() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="share-session-title"
+            aria-describedby="share-session-description"
           >
             <header>
               <div>
@@ -3936,7 +3864,7 @@ function App() {
                 onFocus={(event) => event.currentTarget.select()}
               />
             </label>
-            <p>
+            <p id="share-session-description">
               Send this to someone who can open this frontend and reach this backend.
               They can choose or create their own character after it opens.
             </p>
@@ -4151,206 +4079,28 @@ function App() {
       ) : null}
 
       {campaignArchiveDialog ? (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              closeCampaignArchiveDialog()
-            }
-          }}
-        >
-          <section
-            ref={modalDialogRef}
-            className="campaign-dialog archive-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="campaign-archive-title"
-          >
-            <header>
-              <div>
-                <span>Archive</span>
-                <h2 id="campaign-archive-title">Campaign Archive</h2>
-              </div>
-              <button
-                type="button"
-                aria-label="Close campaign archive"
-                onClick={closeCampaignArchiveDialog}
-                disabled={campaignArchiveDialog.pendingId !== null}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <div className="dialog-body">
-              <div className="dialog-warning">
-                <strong>{campaign?.title ?? 'No campaign selected'}</strong>
-                <span>Archived campaigns stay saved here, hidden from the active campaign rail.</span>
-              </div>
-              <div className="world-manager-list" aria-label="Archived campaigns">
-                {campaignArchiveDialog.loading ? (
-                  <div className="rail-skeleton-list" aria-label="Loading campaign archive">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                ) : campaignArchiveDialog.items.length ? (
-                  campaignArchiveDialog.items.map((item) => {
-                    const worldLabel = worldNameById.get(item.world_id) ?? `World ${item.world_id}`
-                    const pending = campaignArchiveDialog.pendingId === item.campaign_id
-                    return (
-                      <div key={item.campaign_id} className="world-manager-row">
-                        <span>
-                          <strong>{item.title}</strong>
-                          <small>
-                            {worldLabel} / Updated {formatShortAge(item.updated_at ?? item.created_at)}
-                          </small>
-                        </span>
-                        <div>
-                          <button
-                            type="button"
-                            onClick={() => void restoreCampaignFromArchive(item.campaign_id)}
-                            disabled={campaignArchiveDialog.pendingId !== null}
-                          >
-                            {pending ? 'Restoring...' : 'Restore'}
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  })
-                ) : (
-                  <div className="dialog-warning">
-                    <strong>No archived campaigns.</strong>
-                    <span>Archive an active campaign and it will appear here.</span>
-                  </div>
-                )}
-              </div>
-              {campaignArchiveDialog.error ? (
-                <div className="dialog-error">{campaignArchiveDialog.error}</div>
-              ) : null}
-              <footer>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={closeCampaignArchiveDialog}
-                  disabled={campaignArchiveDialog.pendingId !== null}
-                >
-                  Close
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void archiveSelectedCampaignFromManager()}
-                  disabled={!campaign || campaignArchiveDialog.pendingId !== null}
-                >
-                  {campaignArchiveDialog.pendingId === campaign?.campaign_id
-                    ? 'Archiving...'
-                    : 'Archive Selected Campaign'}
-                </button>
-              </footer>
-            </div>
-          </section>
-        </div>
+        <CampaignArchiveDialog
+          campaign={campaign}
+          dialog={campaignArchiveDialog}
+          dialogRef={modalDialogRef}
+          onArchiveSelected={() => void archiveSelectedCampaignFromManager()}
+          onClose={closeCampaignArchiveDialog}
+          onRestore={(campaignId) => void restoreCampaignFromArchive(campaignId)}
+          worldNameById={worldNameById}
+        />
       ) : null}
 
       {sessionArchiveDialog ? (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              closeSessionArchiveDialog()
-            }
-          }}
-        >
-          <section
-            ref={modalDialogRef}
-            className="campaign-dialog archive-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="session-archive-title"
-          >
-            <header>
-              <div>
-                <span>Archive</span>
-                <h2 id="session-archive-title">Session Archive</h2>
-              </div>
-              <button
-                type="button"
-                aria-label="Close session archive"
-                onClick={closeSessionArchiveDialog}
-                disabled={sessionArchiveDialog.pendingId !== null}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <div className="dialog-body">
-              <div className="dialog-warning">
-                <strong>{campaign?.title ?? 'No campaign selected'}</strong>
-                <span>Archived sessions stay saved here, hidden from the active session rail.</span>
-              </div>
-              <div className="world-manager-list" aria-label="Archived sessions">
-                {sessionArchiveDialog.loading ? (
-                  <div className="rail-skeleton-list" aria-label="Loading session archive">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                ) : sessionArchiveDialog.items.length ? (
-                  sessionArchiveDialog.items.map((item) => {
-                    const title = sessionDisplayName(item, campaign?.world_id ?? selectedCampaignId)
-                    const pending = sessionArchiveDialog.pendingId === item.session_id
-                    return (
-                      <div key={item.session_id} className="world-manager-row">
-                        <span>
-                          <strong>{title}</strong>
-                          <small>
-                            {pluralize(item.turn_count ?? 0, 'turn')} / Updated{' '}
-                            {formatShortAge(item.updated_at ?? item.created_at)}
-                          </small>
-                        </span>
-                        <div>
-                          <button
-                            type="button"
-                            onClick={() => void restoreSessionFromArchive(item.session_id)}
-                            disabled={sessionArchiveDialog.pendingId !== null}
-                          >
-                            {pending ? 'Restoring...' : 'Restore'}
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  })
-                ) : (
-                  <div className="dialog-warning">
-                    <strong>No archived sessions.</strong>
-                    <span>Archive a session in this campaign and it will appear here.</span>
-                  </div>
-                )}
-              </div>
-              {sessionArchiveDialog.error ? (
-                <div className="dialog-error">{sessionArchiveDialog.error}</div>
-              ) : null}
-              <footer>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={closeSessionArchiveDialog}
-                  disabled={sessionArchiveDialog.pendingId !== null}
-                >
-                  Close
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void archiveSelectedSessionFromManager()}
-                  disabled={!activeSession || sessionArchiveDialog.pendingId !== null}
-                >
-                  {sessionArchiveDialog.pendingId === activeSession?.session_id
-                    ? 'Archiving...'
-                    : 'Archive Selected Session'}
-                </button>
-              </footer>
-            </div>
-          </section>
-        </div>
+        <SessionArchiveDialog
+          activeSession={activeSession}
+          campaign={campaign}
+          dialog={sessionArchiveDialog}
+          dialogRef={modalDialogRef}
+          onArchiveSelected={() => void archiveSelectedSessionFromManager()}
+          onClose={closeSessionArchiveDialog}
+          onRestore={(sessionId) => void restoreSessionFromArchive(sessionId)}
+          selectedCampaignId={selectedCampaignId}
+        />
       ) : null}
 
       {campaignPackImportOpen ? (
@@ -4395,311 +4145,37 @@ function App() {
       ) : null}
 
       {campaignChooserOpen ? (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              closeCampaignChooserDialog()
-            }
-          }}
-        >
-          <section
-            ref={modalDialogRef}
-            className="campaign-dialog campaign-chooser-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="campaign-chooser-title"
-          >
-            <header>
-              <div>
-                <span>Campaign</span>
-                <h2 id="campaign-chooser-title">Choose Campaign</h2>
-              </div>
-              <button
-                type="button"
-                aria-label="Close campaign chooser"
-                onClick={closeCampaignChooserDialog}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <div className="character-join-body">
-              <p>Choose the campaign before selecting or creating a character.</p>
-              {campaigns.length ? (
-                <div className="character-choice-list" aria-label="Available campaigns">
-                  {campaigns.map((item) => {
-                    const worldLabel = worldNameById.get(item.world_id) ?? `World ${item.world_id}`
-                    return (
-                      <button
-                        key={item.campaign_id}
-                        type="button"
-                        className="character-choice-card"
-                        aria-label={`Choose ${item.title}`}
-                        onClick={() => chooseCampaign(item.campaign_id)}
-                      >
-                        <span>
-                          <strong>{item.title}</strong>
-                          <small>
-                            {item.is_archived ? 'Archived' : 'Active'} / {worldLabel}
-                          </small>
-                        </span>
-                        <em>Select</em>
-                      </button>
-                    )
-                  })}
-                </div>
-              ) : (
-                <div className="dialog-warning">
-                  <strong>No campaigns yet.</strong>
-                  <span>Create a campaign before choosing a character.</span>
-                </div>
-              )}
-              <footer>
-                <button type="button" className="secondary" onClick={closeCampaignChooserDialog}>
-                  Cancel
-                </button>
-                <button type="button" data-autofocus onClick={createCampaignFromChooser}>
-                  Create Campaign
-                </button>
-              </footer>
-            </div>
-          </section>
-        </div>
+        <CampaignChooserDialog
+          campaigns={campaigns}
+          dialogRef={modalDialogRef}
+          onChoose={chooseCampaign}
+          onClose={closeCampaignChooserDialog}
+          onCreate={createCampaignFromChooser}
+          worldNameById={worldNameById}
+        />
       ) : null}
 
       {playerEditDialog ? (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !playerEditDialog.pending) {
-              closePlayerEditDialog()
-            }
-          }}
-        >
-          <section
-            ref={modalDialogRef}
-            className="campaign-dialog player-edit-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="player-edit-title"
-          >
-	            <header>
-	              <div>
-	                <span>Character</span>
-	                <h2 id="player-edit-title">
-	                  {playerEditDialog.mode === 'create' ? 'Create Character' : 'Edit Character'}
-	                </h2>
-	              </div>
-	              <button
-	                type="button"
-	                aria-label={playerEditDialog.mode === 'create' ? 'Close character creator' : 'Close character editor'}
-	                onClick={closePlayerEditDialog}
-	                disabled={playerEditDialog.pending}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <form onSubmit={(event) => void submitPlayerEditDialog(event)}>
-              <label>
-                Character Name
-                <input
-                  autoFocus
-                  data-autofocus
-                  value={playerEditDialog.characterName}
-                  onChange={(event) =>
-                    setPlayerEditDialog((current) =>
-                      current ? { ...current, characterName: event.target.value } : current,
-                    )
-                  }
-                />
-              </label>
-              <Suspense fallback={null}>
-                <RaceSelector
-                  auth={auth}
-                  baseUrl={baseUrl}
-                  selectedRace={playerEditDialog.race}
-                  selectedRaceSelection={playerEditDialog.raceSelection}
-                  selectedSex={playerEditDialog.sex}
-                  pending={playerEditDialog.pending}
-                  onRaceChange={(race) =>
-                    setPlayerEditDialog((current) =>
-                      current ? { ...current, race } : current,
-                    )
-                  }
-                  onRaceSelectionChange={(raceSelection) =>
-                    setPlayerEditDialog((current) =>
-                      current ? { ...current, raceSelection } : current,
-                    )
-                  }
-                  onSexChange={(sex) =>
-                    setPlayerEditDialog((current) =>
-                      current ? { ...current, sex } : current,
-                    )
-                  }
-                />
-                <ClassSelector
-                  selectedClass={playerEditDialog.charClass}
-                  pending={playerEditDialog.pending}
-                  onClassChange={(charClass) =>
-                    setPlayerEditDialog((current) =>
-                      current ? { ...current, charClass } : current,
-                    )
-                  }
-                />
-              </Suspense>
-              <div className="dialog-grid two character-level-grid">
-                <label>
-                  Level
-                  <input
-                    type="number"
-                    min={1}
-                    max={20}
-                    value={playerEditDialog.level}
-                    onChange={(event) =>
-                      setPlayerEditDialog((current) =>
-                        current ? { ...current, level: event.target.value } : current,
-                      )
-                    }
-                  />
-                </label>
-              </div>
-              {playerEditDialog.mode === 'create' ? (
-                <section className="point-buy-panel" aria-label="Ability score point buy">
-                  <div className="point-buy-summary">
-                    <strong>Ability Scores</strong>
-                    <span className={playerDialogPointBuyRemaining < 0 ? 'over-budget' : ''}>
-                      {playerDialogPointBuyRemaining} / {POINT_BUY_BUDGET} left
-                    </span>
-                  </div>
-                  <div className="point-buy-grid">
-                    {POINT_BUY_ABILITIES.map((ability) => {
-                      const score = playerEditDialog.abilityScores[ability.key]
-                      return (
-                        <label key={ability.key}>
-                          <span>
-                            {ability.label}
-                            <small>{abilityModifier(score)}</small>
-                          </span>
-                          <input
-                            type="number"
-                            min={8}
-                            max={15}
-                            value={score}
-                            aria-label={ability.name}
-                            onChange={(event) =>
-                              setPlayerEditDialog((current) =>
-                                current
-                                  ? {
-                                      ...current,
-                                      abilityScores: {
-                                        ...current.abilityScores,
-                                        [ability.key]: clampPointBuyScore(Number(event.target.value)),
-                                      },
-                                    }
-                                  : current,
-                              )
-                            }
-                          />
-                        </label>
-                      )
-                    })}
-                  </div>
-                </section>
-              ) : null}
-              {playerEditDialog.error ? (
-                <div className="dialog-error">{playerEditDialog.error}</div>
-              ) : null}
-              <footer>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={closePlayerEditDialog}
-                  disabled={playerEditDialog.pending}
-                >
-                  Cancel
-	                </button>
-	                <button type="submit" disabled={playerEditDialog.pending}>
-	                  {playerEditDialog.pending
-	                    ? playerEditDialog.mode === 'create'
-	                      ? 'Creating...'
-	                      : 'Saving...'
-	                    : playerEditDialog.mode === 'create'
-	                      ? 'Create Character'
-	                      : 'Save Character'}
-	                </button>
-	              </footer>
-            </form>
-          </section>
-        </div>
+        <Suspense fallback={null}>
+          <PlayerEditDialog
+            auth={auth}
+            baseUrl={baseUrl}
+            dialog={playerEditDialog}
+            dialogRef={modalDialogRef}
+            onClose={closePlayerEditDialog}
+            onSubmit={(event) => void submitPlayerEditDialog(event)}
+            setDialog={setPlayerEditDialog}
+          />
+        </Suspense>
       ) : null}
 
       {playerDeleteDialog ? (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !playerDeleteDialog.pending) {
-              closePlayerDeleteDialog()
-            }
-          }}
-        >
-          <section
-            ref={modalDialogRef}
-            className="campaign-dialog player-delete-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="player-delete-title"
-          >
-            <header>
-              <div>
-                <span>Character</span>
-                <h2 id="player-delete-title">Delete Character</h2>
-              </div>
-              <button
-                type="button"
-                aria-label="Close character delete"
-                onClick={closePlayerDeleteDialog}
-                disabled={playerDeleteDialog.pending}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <div className="dialog-body">
-              <div className="dialog-warning">
-                <strong>{playerDeleteDialog.player.character_name || playerDeleteDialog.player.name}</strong>
-                <span>
-                  This permanently removes the character from this workspace. Past
-                  turn history stays readable, but it will no longer point at this
-                  character record.
-                </span>
-              </div>
-              {playerDeleteDialog.error ? (
-                <div className="dialog-error">{playerDeleteDialog.error}</div>
-              ) : null}
-              <footer>
-                <button
-                  type="button"
-                  className="secondary"
-                  data-autofocus
-                  onClick={closePlayerDeleteDialog}
-                  disabled={playerDeleteDialog.pending}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => void submitPlayerDeleteDialog()}
-                  disabled={playerDeleteDialog.pending}
-                >
-                  {playerDeleteDialog.pending ? 'Deleting...' : 'Delete Character'}
-                </button>
-              </footer>
-            </div>
-          </section>
-        </div>
+        <PlayerDeleteDialog
+          dialog={playerDeleteDialog}
+          dialogRef={modalDialogRef}
+          onClose={closePlayerDeleteDialog}
+          onConfirm={() => void submitPlayerDeleteDialog()}
+        />
       ) : null}
 
       {campaignActionDialog ? (
@@ -4922,452 +4398,46 @@ function App() {
       ) : null}
 
       {worldManagerOpen ? (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              closeWorldManagerDialog()
-            }
-          }}
-        >
-          <section
-            ref={modalDialogRef}
-            className="campaign-dialog world-manager-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="world-manager-title"
-          >
-            <header>
-              <div>
-                <span>Worlds</span>
-                <h2 id="world-manager-title">Manage Worlds</h2>
-              </div>
-              <button
-                type="button"
-                aria-label="Close world manager"
-                onClick={closeWorldManagerDialog}
-                disabled={worldForm.pending || worldDeleteDialog !== null}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <div className="world-manager-list" aria-label="World list">
-              {worldSelectOptions.length ? (
-                worldSelectOptions.map((world) => {
-                  const isEditing = worldForm.mode === 'edit' && worldForm.worldId === world.world_id
-                  return (
-                    <div
-                      key={world.world_id}
-                      className={`world-manager-row ${isEditing ? 'active' : ''}`}
-                    >
-                      <span>
-                        <strong>{world.name}</strong>
-                        <small>{world.description || 'No description yet'}</small>
-                      </span>
-                      <div>
-                        <button
-                          type="button"
-                          onClick={() => editWorld(world)}
-                          disabled={worldForm.pending || worldDeleteDialog !== null}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="danger"
-                          onClick={() => openWorldDeleteDialog(world)}
-                          disabled={worldForm.pending || worldDeleteDialog !== null}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  )
-                })
-              ) : (
-                <div className="dialog-warning">
-                  <strong>No worlds yet.</strong>
-                  <span>Create a world below, then attach campaigns to it.</span>
-                </div>
-              )}
-            </div>
-            <form className="world-manager-form" onSubmit={(event) => void submitWorldForm(event)}>
-              <div className="world-manager-form-heading">
-                <strong>{worldForm.mode === 'edit' ? 'Edit World' : 'Create World'}</strong>
-                {worldForm.mode === 'edit' ? (
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={resetWorldForm}
-                    disabled={worldForm.pending}
-                  >
-                    New World
-                  </button>
-                ) : null}
-              </div>
-              <label>
-                World Name
-                <input
-                  data-autofocus
-                  value={worldForm.name}
-                  onChange={(event) =>
-                    setWorldForm((current) => ({
-                      ...current,
-                      name: event.target.value,
-                      error: '',
-                    }))
-                  }
-                  placeholder="Crystal Reach"
-                  disabled={worldForm.pending}
-                />
-              </label>
-              <label>
-                Description
-                <textarea
-                  value={worldForm.description}
-                  onChange={(event) =>
-                    setWorldForm((current) => ({
-                      ...current,
-                      description: event.target.value,
-                      error: '',
-                    }))
-                  }
-                  rows={3}
-                  placeholder="Realm premise, tone, or key conflicts..."
-                  disabled={worldForm.pending}
-                />
-              </label>
-              {worldForm.error ? <div className="dialog-error">{worldForm.error}</div> : null}
-              <footer>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={closeWorldManagerDialog}
-                  disabled={worldForm.pending || worldDeleteDialog !== null}
-                >
-                  Close
-                </button>
-                <button type="submit" disabled={worldForm.pending}>
-                  {worldForm.pending
-                    ? worldForm.mode === 'edit'
-                      ? 'Saving...'
-                      : 'Creating...'
-                    : worldForm.mode === 'edit'
-                      ? 'Save World'
-                      : 'Create World'}
-                </button>
-              </footer>
-            </form>
-          </section>
-        </div>
+        <WorldManagerDialog
+          deleteDialogOpen={worldDeleteDialog !== null}
+          dialogRef={modalDialogRef}
+          form={worldForm}
+          onClose={closeWorldManagerDialog}
+          onEditWorld={editWorld}
+          onOpenDelete={openWorldDeleteDialog}
+          onResetForm={resetWorldForm}
+          onSubmit={(event) => void submitWorldForm(event)}
+          setForm={setWorldForm}
+          worlds={worldSelectOptions}
+        />
       ) : null}
 
       {worldDeleteDialog ? (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              closeWorldDeleteDialog()
-            }
-          }}
-        >
-          <section
-            ref={modalDialogRef}
-            className="campaign-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="world-delete-title"
-          >
-            <header>
-              <div>
-                <span>World</span>
-                <h2 id="world-delete-title">Delete World</h2>
-              </div>
-              <button
-                type="button"
-                aria-label="Close delete world"
-                onClick={closeWorldDeleteDialog}
-                disabled={worldDeleteDialog.pending}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <div className="dialog-body">
-              <div className="dialog-warning">
-                <strong>{worldDeleteDialog.world.name}</strong>
-                <span>
-                  This world can be deleted directly when nothing is using it.
-                  If campaigns are linked, force delete removes those linked campaigns first.
-                </span>
-              </div>
-              {worldDeleteDialog.error ? (
-                <div className="dialog-error">{worldDeleteDialog.error}</div>
-              ) : null}
-              <footer>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={closeWorldDeleteDialog}
-                  disabled={worldDeleteDialog.pending}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  data-autofocus
-                  onClick={() => void submitWorldDeleteDialog()}
-                  disabled={worldDeleteDialog.pending}
-                >
-                  {worldDeleteDialog.pending ? 'Deleting...' : 'Delete World'}
-                </button>
-                {worldDeleteDialog.canForce ? (
-                  <button
-                    type="button"
-                    className="danger"
-                    onClick={() => void submitWorldDeleteDialog(true)}
-                    disabled={worldDeleteDialog.pending}
-                  >
-                    {worldDeleteDialog.pending ? 'Deleting...' : 'Delete World and Campaigns'}
-                  </button>
-                ) : null}
-              </footer>
-            </div>
-          </section>
-        </div>
+        <WorldDeleteDialog
+          dialog={worldDeleteDialog}
+          dialogRef={modalDialogRef}
+          onClose={closeWorldDeleteDialog}
+          onDelete={() => void submitWorldDeleteDialog()}
+          onForceDelete={() => void submitWorldDeleteDialog(true)}
+        />
       ) : null}
 
       {createCampaignOpen ? (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              closeCreateCampaignDialog()
-            }
-          }}
-        >
-          <section
-            ref={modalDialogRef}
-            className="campaign-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="create-campaign-title"
-          >
-            <header>
-              <div>
-                <span>Campaign</span>
-                <h2 id="create-campaign-title">Create New Campaign</h2>
-              </div>
-              <button
-                type="button"
-                aria-label="Close create campaign"
-                onClick={closeCreateCampaignDialog}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <form onSubmit={(event) => void submitCreateCampaign(event)}>
-              <div className="campaign-pack-picker-field">
-                <span>Campaign Pack</span>
-                <div className="campaign-pack-picker">
-                  <button
-                    type="button"
-                    className="campaign-pack-picker-button"
-                    aria-label="Campaign Pack"
-                    aria-haspopup="listbox"
-                    aria-expanded={createCampaignPackPickerOpen}
-                    aria-controls="create-campaign-pack-options"
-                    onClick={() => setCreateCampaignPackPickerOpen((current) => !current)}
-                    disabled={createCampaignPending || createCampaignPackOptionsPending}
-                  >
-                    <span className="campaign-pack-picker-button-copy">
-                      <strong>
-                        {selectedCreateCampaignPack
-                          ? selectedCreateCampaignPack.title
-                          : createCampaignPackOptionsPending
-                            ? 'Loading packs...'
-                            : 'Start from scratch'}
-                      </strong>
-                      <small>
-                        {selectedCreateCampaignPack
-                          ? selectedCreateCampaignPackLength || 'Authored campaign pack'
-                          : 'Create a custom campaign without a bundled story spine'}
-                      </small>
-                    </span>
-                    <span className="campaign-pack-picker-button-meta">
-                      {selectedCreateCampaignPackLengthDetail || 'Custom'}
-                    </span>
-                    <ChevronDown size={16} aria-hidden="true" />
-                  </button>
-                  {createCampaignPackPickerOpen ? (
-                    <div
-                      id="create-campaign-pack-options"
-                      className="campaign-pack-picker-menu"
-                      role="listbox"
-                      aria-label="Campaign packs"
-                    >
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={!createCampaignForm.packId}
-                        className="campaign-pack-picker-option"
-                        onClick={() => selectCreateCampaignPack('')}
-                      >
-                        <span>
-                          <strong>Start from scratch</strong>
-                          <small>Create your own campaign name, description, and world.</small>
-                        </span>
-                        <em>Custom</em>
-                      </button>
-                      {createCampaignPackOptions.map((pack) => {
-                        const lengthSummary = campaignPackLengthSummary(pack)
-                        const lengthDetail = campaignPackLengthDetail(pack)
-                        return (
-                          <button
-                            key={pack.pack_id}
-                            type="button"
-                            role="option"
-                            aria-selected={createCampaignForm.packId === pack.pack_id}
-                            className="campaign-pack-picker-option"
-                            onClick={() => selectCreateCampaignPack(pack.pack_id)}
-                          >
-                            <span>
-                              <strong>{pack.title}</strong>
-                              <small>
-                                {pack.world_name ? `${pack.world_name} / ` : ''}
-                                {lengthSummary || 'Authored campaign pack'}
-                              </small>
-                            </span>
-                            <em>{lengthDetail || 'Story pack'}</em>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-              {selectedCreateCampaignPack ? (
-                <div className="campaign-pack-starter-summary">
-                  <strong>{selectedCreateCampaignPack.title}</strong>
-                  <span>
-                    {selectedCreateCampaignPack.short_description ||
-                      selectedCreateCampaignPack.description}
-                  </span>
-                  {selectedCreateCampaignPackLength ? (
-                    <small>{selectedCreateCampaignPackLength}</small>
-                  ) : null}
-                  {selectedCreateCampaignPackLengthDetail ? (
-                    <small>{selectedCreateCampaignPackLengthDetail}</small>
-                  ) : null}
-                  {selectedCreateCampaignPack.world_name ? (
-                    <small>{selectedCreateCampaignPack.world_name}</small>
-                  ) : null}
-                </div>
-              ) : null}
-              <label>
-                Campaign Name
-                <input
-                  autoFocus
-                  data-autofocus
-                  value={createCampaignForm.title}
-                  onChange={(event) =>
-                    setCreateCampaignForm((current) => ({
-                      ...current,
-                      title: event.target.value,
-                    }))
-                  }
-                  placeholder="Ashes Beyond the Gate"
-                  disabled={createCampaignPending || Boolean(selectedCreateCampaignPack)}
-                />
-              </label>
-              <label>
-                Description
-                <textarea
-                  value={createCampaignForm.description}
-                  onChange={(event) =>
-                    setCreateCampaignForm((current) => ({
-                      ...current,
-                      description: event.target.value,
-                    }))
-                  }
-                  rows={3}
-                  placeholder="Opening premise, party goal, or tone..."
-                  disabled={createCampaignPending || Boolean(selectedCreateCampaignPack)}
-                />
-              </label>
-              <label>
-                World
-                <select
-                  value={
-                    selectedCreateCampaignPack
-                      ? createCampaignForm.worldId
-                      : createCampaignForm.worldName.trim()
-                        ? ''
-                        : createCampaignForm.worldId
-                  }
-                  onChange={(event) =>
-                    setCreateCampaignForm((current) => ({
-                      ...current,
-                      worldId: event.target.value,
-                      worldName: '',
-                    }))
-                  }
-                  disabled={createCampaignPending}
-                >
-                  <option value="">
-                    {selectedCreateCampaignPack ? 'Use pack world' : 'Create a new world'}
-                  </option>
-                  {worldSelectOptions.map((world) => (
-                    <option key={world.world_id} value={world.world_id}>
-                      {world.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {selectedCreateCampaignPack ? null : (
-                <label>
-                  New World Name
-                  <input
-                    value={createCampaignForm.worldName}
-                    onChange={(event) =>
-                      setCreateCampaignForm((current) => ({
-                        ...current,
-                        worldId: '',
-                        worldName: event.target.value,
-                      }))
-                    }
-                    placeholder="Crystal Reach"
-                    disabled={createCampaignPending}
-                  />
-                </label>
-              )}
-              <p>
-                {selectedCreateCampaignPack
-                  ? 'Use the pack world, or attach this campaign to an existing world.'
-                  : 'Select an existing world, or enter a new world name to create one for this campaign.'}
-              </p>
-              {createCampaignError ? (
-                <div className="dialog-error">{createCampaignError}</div>
-              ) : null}
-              <footer>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={closeCreateCampaignDialog}
-                  disabled={createCampaignPending}
-                >
-                  Cancel
-                </button>
-                <button type="submit" disabled={createCampaignPending}>
-                  {createCampaignPending ? 'Creating...' : 'Create Campaign'}
-                </button>
-              </footer>
-            </form>
-          </section>
-        </div>
+        <Suspense fallback={null}>
+          <CreateCampaignDialog
+            defaultWorldId={campaignWorldId}
+            dialogRef={modalDialogRef}
+            error={createCampaignError}
+            form={createCampaignForm}
+            onClose={closeCreateCampaignDialog}
+            onSubmit={(event) => void submitCreateCampaign(event)}
+            packOptions={createCampaignPackOptions}
+            packOptionsPending={createCampaignPackOptionsPending}
+            pending={createCampaignPending}
+            setForm={setCreateCampaignForm}
+            worldSelectOptions={worldSelectOptions}
+          />
+        </Suspense>
       ) : null}
     </div>
   )

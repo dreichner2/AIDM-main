@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { actorCapabilitiesAllowOperatorTools } from './capabilities'
 import { LEGACY_PASSWORD_SETUP_MESSAGE } from './useRuntimeSettings'
 import type {
   BetaSummary,
@@ -450,6 +451,19 @@ function installFetchMock() {
       fetchCalls.push({ method, path, origin: url.origin, body, authorization, workspaceToken, workspaceIdHeader })
 
       if (method === 'GET' && path === '/api/health') return jsonResponse(health)
+      if (method === 'GET' && path === '/api/capabilities') {
+        const workspaceId = workspaceIdHeader ?? 'owner'
+        const isAdmin = authorization !== 'Bearer player-token'
+        return jsonResponse({
+          workspace_id: workspaceId,
+          account_id: authorization ? 1 : null,
+          is_workspace_admin: isAdmin,
+          capabilities: isAdmin
+            ? ['player_read', 'player_action', 'dm_authoring', 'dm_runtime_control', 'debug_read', 'admin_workspace']
+            : ['player_read', 'player_action'],
+          descriptions: {},
+        })
+      }
       if (method === 'GET' && path === '/api/accounts/me') {
         const accountToken = authorization?.replace(/^Bearer\s+/i, '') ?? ''
         if (!accountToken) {
@@ -704,6 +718,65 @@ function installFetchMock() {
       }
       if (method === 'GET' && path === '/api/worlds') return jsonResponse(worlds)
       if (method === 'GET' && path === '/api/beta/summary') return jsonResponse(metrics)
+      if (method === 'GET' && path === '/api/beta/incidents') {
+        return jsonResponse({
+          incidents: [
+            {
+              type: 'failed_turn',
+              severity: 'high',
+              campaign_id: 10,
+              session_id: 20,
+              turn_id: 2,
+              provider: 'deepseek',
+              model: 'deepseek-v4-pro',
+              status: 'failed',
+              latency_ms: 1800,
+              message: 'DM turn failed before completion.',
+              created_at: fixedNow.toISOString(),
+            },
+            {
+              type: 'bad_turn_report',
+              severity: 'medium',
+              campaign_id: 10,
+              session_id: 20,
+              turn_id: 2,
+              feedback_id: 901,
+              category: 'continuity',
+              provider: 'deepseek',
+              model: 'deepseek-v4-pro',
+              coherence_score: 1,
+              message: 'Tester reported broken continuity.',
+              created_at: fixedNow.toISOString(),
+            },
+            {
+              type: 'failed_canon_job',
+              severity: 'medium',
+              campaign_id: 10,
+              session_id: 20,
+              turn_id: 2,
+              job_id: 44,
+              status: 'failed',
+              attempts: 2,
+              message: 'Canon extraction job failed.',
+              created_at: fixedNow.toISOString(),
+            },
+            {
+              type: 'telemetry_event',
+              event_name: 'socket.dm_persist_failed',
+              count: 1,
+              severity: 'high',
+              message: 'socket.dm_persist_failed recorded 1 time.',
+            },
+          ],
+          summary: {
+            failed_turn_count: 1,
+            failed_canon_job_count: 1,
+            bad_turn_report_count: 1,
+            telemetry_incident_count: 1,
+          },
+          limit: 20,
+        })
+      }
       if (method === 'GET' && path === '/api/llm/config') return jsonResponse(runtime)
       if ((method === 'PATCH' || method === 'POST') && path === '/api/llm/config') {
         const runtimeBody = body as { provider?: string; model?: string; persist?: boolean }
@@ -725,6 +798,27 @@ function installFetchMock() {
           status: 200,
           headers: { 'Content-Type': 'audio/mpeg' },
         })
+      }
+      if (method === 'POST' && path === '/api/feedback/bad-turn') {
+        return jsonResponse(
+          {
+            feedback: {
+              feedback_id: 901,
+              session_id: body.session_id,
+              turn_id: body.turn_id,
+              feedback_type: 'bad_turn',
+              category: body.category ?? 'other',
+              coherence_score: 1,
+              notes: null,
+              provider: 'deepseek',
+              model: 'deepseek-v4-pro',
+              turn_status: 'completed',
+              turn_latency_ms: 1800,
+              created_at: fixedNow.toISOString(),
+            },
+          },
+          { status: 201 },
+        )
       }
 
       const workspaceMatch = path.match(/^\/api\/campaigns\/(\d+)\/workspace$/)
@@ -1242,6 +1336,16 @@ function socketHandler<TPayload>(eventName: string) {
   return call[1] as (payload: TPayload) => void
 }
 
+describe('actorCapabilitiesAllowOperatorTools', () => {
+  it('allows operator surfaces only for backend-declared operator capabilities', () => {
+    expect(actorCapabilitiesAllowOperatorTools(['player_read', 'player_action'])).toBe(false)
+    expect(actorCapabilitiesAllowOperatorTools(['player_read', 'dm_authoring'])).toBe(true)
+    expect(actorCapabilitiesAllowOperatorTools(['debug_read'])).toBe(true)
+    expect(actorCapabilitiesAllowOperatorTools([])).toBe(false)
+    expect(actorCapabilitiesAllowOperatorTools(null)).toBe(false)
+  })
+})
+
 describe('App user workflow regressions', () => {
   beforeEach(() => {
     socketMock.socket.emit.mockClear()
@@ -1310,6 +1414,28 @@ describe('App user workflow regressions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Action mode' }))
     expect(restoredActionInput).toHaveValue('test the sigil')
+  })
+
+  it('reports a saved DM turn for beta review with the session and turn id', async () => {
+    await renderLoadedApp()
+
+    const reportButtons = screen.getAllByRole('button', { name: 'Report bad turn' })
+    fireEvent.click(reportButtons[reportButtons.length - 1])
+
+    await waitFor(() =>
+      expect(fetchCalls).toContainEqual(
+        expect.objectContaining({
+          method: 'POST',
+          path: '/api/feedback/bad-turn',
+          body: {
+            session_id: 20,
+            turn_id: 2,
+            category: 'other',
+          },
+        }),
+      ),
+    )
+    expect(screen.getByRole('button', { name: 'Bad turn reported' })).toBeDisabled()
   })
 
   it('sends structured item composer metadata for buying arbitrary items', async () => {
@@ -2096,7 +2222,7 @@ describe('App user workflow regressions', () => {
     }
     await renderLoadedApp()
 
-    expect(screen.getByRole('button', { name: 'Equip Greataxe' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Equip Greataxe' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Equip Handaxe' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Equip Greataxe' }))
 
@@ -2718,6 +2844,9 @@ describe('App user workflow regressions', () => {
     fireEvent.change(providerSelect, { target: { value: 'fallback' } })
 
     await waitFor(() => expect(providerSelect).toHaveValue('fallback'))
+    expect(
+      await screen.findByText('Fallback provider active. No live LLM.'),
+    ).toBeInTheDocument()
     expect(fetchCalls).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -2956,18 +3085,61 @@ describe('App user workflow regressions', () => {
     expect(await screen.findByRole('dialog', { name: 'Create Character' })).toBeInTheDocument()
   })
 
+  it('closes the character delete confirmation with Escape without deleting', async () => {
+    await renderLoadedApp()
+
+    const characterActions = screen.getByLabelText('Character actions')
+    const deleteButton = within(characterActions).getByRole('button', { name: 'Delete' })
+    deleteButton.focus()
+    fireEvent.click(deleteButton)
+
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Character' })
+    expect(dialog).toHaveAccessibleDescription(/This permanently removes the character/)
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus())
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Delete Character' })).not.toBeInTheDocument(),
+    )
+    expect(fetchCalls.some((call) => call.method === 'DELETE' && call.path === '/api/players/30')).toBe(false)
+    expect(deleteButton).toHaveFocus()
+  })
+
   it('shows a manual share link when clipboard access is unavailable', async () => {
     localStorage.setItem('aidm:baseUrl', 'https://backend-tunnel.ngrok-free.app')
 
     await renderLoadedApp()
-    fireEvent.click(screen.getByRole('button', { name: 'Share' }))
+    const shareButton = screen.getByRole('button', { name: 'Share' })
+    shareButton.focus()
+    fireEvent.click(shareButton)
 
     const dialog = await screen.findByRole('dialog', { name: 'Share Session' })
     const shareInput = within(dialog).getByLabelText('Session share link')
+    expect(dialog).toHaveAccessibleDescription(
+      'Send this to someone who can open this frontend and reach this backend. They can choose or create their own character after it opens.',
+    )
+    await waitFor(() => expect(shareInput).toHaveFocus())
+
     const shareValue = (shareInput as HTMLInputElement).value
     expect(shareValue).toContain('backend=https%3A%2F%2Fbackend-tunnel.ngrok-free.app')
     expect(shareValue).toContain('campaign=10')
     expect(shareValue).toContain('session=20')
+
+    const closeIconButton = within(dialog).getByLabelText('Close share session')
+    const copyButton = within(dialog).getByRole('button', { name: 'Copy Link' })
+    copyButton.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(closeIconButton).toHaveFocus()
+
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(copyButton).toHaveFocus()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Share Session' })).not.toBeInTheDocument(),
+    )
+    expect(shareButton).toHaveFocus()
   })
 
   it('uses a backend URL from a share link without leaving it in the address bar', async () => {
@@ -3709,6 +3881,28 @@ describe('App user workflow regressions', () => {
     expect(fetchCalls).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ method: 'DELETE', path: '/api/segments/50' }),
+      ]),
+    )
+  })
+
+  it('shows beta incidents in an operator-only inspector tab', async () => {
+    await renderLoadedApp()
+
+    const inspectorPanels = screen.getByRole('tablist', { name: 'Inspector panels' })
+    fireEvent.click(within(inspectorPanels).getByRole('tab', { name: 'Ops' }))
+
+    expect(await screen.findByRole('heading', { name: 'Beta Incidents' })).toBeInTheDocument()
+    expect(await screen.findByText('DM turn failed before completion.')).toBeInTheDocument()
+    expect(screen.getByText('Tester reported broken continuity.')).toBeInTheDocument()
+    expect(screen.getByText('Canon extraction job failed.')).toBeInTheDocument()
+    expect(screen.getByText('socket.dm_persist_failed recorded 1 time.')).toBeInTheDocument()
+    expect(screen.getAllByText('deepseek / deepseek-v4-pro').length).toBeGreaterThan(0)
+    expect(fetchCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: 'GET',
+          path: '/api/beta/incidents',
+        }),
       ]),
     )
   })

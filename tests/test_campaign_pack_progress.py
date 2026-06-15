@@ -15,6 +15,7 @@ from aidm_server.models import (
     CampaignSegment,
     DmTurn,
     Session,
+    SessionStateMutationAudit,
     TurnEvent,
     World,
     safe_json_dumps,
@@ -145,6 +146,10 @@ def test_pack_progress_completes_active_checkpoint_when_location_reached(app):
         durable_event = CampaignPackProgressEvent.query.filter_by(
             campaign_pack_session_id=pack_session.campaign_pack_session_id
         ).one()
+        audit = SessionStateMutationAudit.query.filter_by(
+            session_id=ids['session_id'],
+            source='system.campaign_pack.auto_progress',
+        ).one()
         durable_progress = {
             row.checkpoint_id: row.status
             for row in CampaignPackCheckpointProgress.query.filter_by(
@@ -170,6 +175,16 @@ def test_pack_progress_completes_active_checkpoint_when_location_reached(app):
     assert durable_event.action == 'auto_progress'
     assert durable_event.to_checkpoint_id == 'cp_watchtower'
     assert durable_progress == {'cp_old_road': 'completed', 'cp_watchtower': 'active'}
+    assert audit.actor == 'system'
+    assert audit.applied_change_count == 1
+    assert audit.previous_revision == 0
+    assert audit.state_revision == 1
+    audit_metadata = safe_json_loads(audit.metadata_json, {})
+    assert audit_metadata['packId'] == 'bleakmoor_intro'
+    assert audit_metadata['eventId'] == event.event_id
+    diff_paths = {entry['path'] for entry in safe_json_loads(audit.diff_json, [])}
+    assert 'campaignPack.activeCheckpointId' in diff_paths
+    assert 'flags.campaignPackActiveCheckpointId' in diff_paths
 
 
 def test_pack_progress_migrates_legacy_campaign_pack_snapshot_without_advancing(app):

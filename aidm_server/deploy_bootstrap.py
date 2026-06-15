@@ -21,7 +21,11 @@ from typing import Iterable
 from sqlalchemy import inspect
 
 from aidm_server.config import (
+    SOCKETIO_WORKER_MODEL_MESSAGE_QUEUE,
+    SOCKETIO_WORKER_MODEL_SINGLE,
+    SOCKETIO_WORKER_MODEL_STICKY,
     SUPPORTED_TURN_COORDINATOR_STORES,
+    SUPPORTED_SOCKETIO_WORKER_MODELS,
     TURN_COORDINATOR_STORE_DATABASE,
     TURN_COORDINATOR_STORE_MEMORY,
 )
@@ -164,10 +168,77 @@ def _validate_rate_limits(app):
         raise BootstrapError('Invalid AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS; expected integer >= 10.')
 
 
+def _validate_socketio_deployment_config(app, report: BootstrapReport):
+    env = app.config.get('AIDM_ENV', 'development')
+    worker_model = str(
+        app.config.get('AIDM_SOCKETIO_WORKER_MODEL', SOCKETIO_WORKER_MODEL_SINGLE) or ''
+    ).strip().lower().replace('-', '_')
+    message_queue = str(app.config.get('AIDM_SOCKETIO_MESSAGE_QUEUE') or '').strip()
+
+    if worker_model not in SUPPORTED_SOCKETIO_WORKER_MODELS:
+        expected = ', '.join(sorted(SUPPORTED_SOCKETIO_WORKER_MODELS))
+        raise BootstrapError(f'Invalid AIDM_SOCKETIO_WORKER_MODEL; expected one of: {expected}.')
+    if env == 'production' and not bool(app.config.get('AIDM_SOCKETIO_WORKER_MODEL_EXPLICIT', False)):
+        raise BootstrapError(
+            'AIDM_ENV=production requires AIDM_SOCKETIO_WORKER_MODEL=single, sticky, or message_queue.'
+        )
+    if worker_model == SOCKETIO_WORKER_MODEL_MESSAGE_QUEUE and not message_queue:
+        raise BootstrapError(
+            'AIDM_SOCKETIO_WORKER_MODEL=message_queue requires AIDM_SOCKETIO_MESSAGE_QUEUE.'
+        )
+    if message_queue and worker_model != SOCKETIO_WORKER_MODEL_MESSAGE_QUEUE:
+        report.warnings.append(
+            'AIDM_SOCKETIO_MESSAGE_QUEUE is configured but AIDM_SOCKETIO_WORKER_MODEL is not message_queue.'
+        )
+    if env == 'production' and worker_model == SOCKETIO_WORKER_MODEL_SINGLE:
+        report.warnings.append(
+            'Production Socket.IO worker model is single; run exactly one backend worker for this deployment.'
+        )
+    if env == 'production' and worker_model == SOCKETIO_WORKER_MODEL_STICKY:
+        report.warnings.append(
+            'Production Socket.IO worker model is sticky; verify load balancer affinity in staging.'
+        )
+
+
+def _validate_observability_config(app, report: BootstrapReport):
+    env = app.config.get('AIDM_ENV', 'development')
+    provider = str(app.config.get('AIDM_OBSERVABILITY_PROVIDER') or '').strip()
+    alert_owner = str(app.config.get('AIDM_ALERT_OWNER') or '').strip()
+    telemetry_enabled = bool(app.config.get('AIDM_TELEMETRY_ENABLED', False))
+    telemetry_endpoint = str(app.config.get('AIDM_TELEMETRY_ENDPOINT') or '').strip()
+
+    if env == 'production':
+        if not provider:
+            raise BootstrapError('AIDM_ENV=production requires AIDM_OBSERVABILITY_PROVIDER.')
+        if not alert_owner:
+            raise BootstrapError('AIDM_ENV=production requires AIDM_ALERT_OWNER.')
+
+    if telemetry_enabled and not telemetry_endpoint:
+        raise BootstrapError('AIDM_TELEMETRY_ENABLED=true requires AIDM_TELEMETRY_ENDPOINT.')
+    if env == 'production' and not telemetry_enabled:
+        report.warnings.append(
+            'External telemetry delivery is disabled; confirm metrics scraping covers beta SLOs.'
+        )
+
+
+def _validate_security_headers_config(app):
+    env = app.config.get('AIDM_ENV', 'development')
+    enabled = bool(app.config.get('AIDM_SECURITY_HEADERS_ENABLED', True))
+    csp = str(app.config.get('AIDM_CONTENT_SECURITY_POLICY') or '').strip()
+
+    if env == 'production' and not enabled:
+        raise BootstrapError('AIDM_ENV=production requires AIDM_SECURITY_HEADERS_ENABLED=true.')
+    if env == 'production' and not csp:
+        raise BootstrapError('AIDM_ENV=production requires AIDM_CONTENT_SECURITY_POLICY.')
+
+
 def _validate_auth_config(app, report: BootstrapReport):
     env = app.config.get('AIDM_ENV', 'development')
     auth_required = bool(app.config.get('AIDM_AUTH_REQUIRED', False))
     tokens = _configured_auth_tokens(app)
+    cookie_auth_enabled = bool(app.config.get('AIDM_ACCOUNT_COOKIE_AUTH_ENABLED', False))
+    cookie_secure = bool(app.config.get('AIDM_ACCOUNT_COOKIE_SECURE', False))
+    cookie_samesite = str(app.config.get('AIDM_ACCOUNT_COOKIE_SAMESITE') or 'Lax').strip().lower()
 
     if auth_required and not tokens:
         raise BootstrapError(
@@ -177,6 +248,19 @@ def _validate_auth_config(app, report: BootstrapReport):
 
     if env == 'production' and not auth_required:
         raise BootstrapError('AIDM_ENV=production requires AIDM_AUTH_REQUIRED=true for deployment bootstrap.')
+
+    if cookie_auth_enabled and cookie_samesite == 'none' and not cookie_secure:
+        raise BootstrapError('AIDM_ACCOUNT_COOKIE_SAMESITE=None requires AIDM_ACCOUNT_COOKIE_SECURE=true.')
+    if env == 'production' and cookie_auth_enabled and not cookie_secure:
+        raise BootstrapError('AIDM_ENV=production requires AIDM_ACCOUNT_COOKIE_SECURE=true when cookie auth is enabled.')
+    if env == 'production' and not cookie_auth_enabled:
+        report.warnings.append(
+            'HTTP-only account cookie auth is disabled; confirm bearer-token storage matches the hosted threat model.'
+        )
+    if env == 'production' and cookie_auth_enabled and app.config.get('AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED', True):
+        report.warnings.append(
+            'Account tokens are still returned in JSON; set AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false for cookie-only hosted auth.'
+        )
 
     if not auth_required:
         report.warnings.append('Auth is disabled; suitable only for trusted/private deployment contexts.')
@@ -318,6 +402,9 @@ def bootstrap(check_only: bool, host: str, port: int):
     print('[bootstrap] Building runtime and validating config...')
     check_app, check_socketio = _build_runtime()
     _validate_rate_limits(check_app)
+    _validate_socketio_deployment_config(check_app, report)
+    _validate_observability_config(check_app, report)
+    _validate_security_headers_config(check_app)
     _validate_auth_config(check_app, report)
     _harden_env_local_permissions(repo_root, report)
     _harden_local_data_permissions(check_app, report)

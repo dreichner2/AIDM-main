@@ -111,6 +111,27 @@ export type SessionCombatResponse = { combat: JsonRecord | null; validation?: Js
 
 export type CombatDebugEventsResponse = { events: JsonRecord[] }
 
+export type TurnFeedbackReport = {
+  feedback_id: number
+  session_id: number
+  turn_id: number | null
+  feedback_type: string
+  category: string | null
+  coherence_score: number
+  notes: string | null
+  provider: string | null
+  model: string | null
+  turn_status: string | null
+  turn_latency_ms: number | null
+  created_at: string | null
+}
+
+export type BadTurnFeedbackResponse = { feedback: TurnFeedbackReport }
+
+export type BetaIncidentsResponse = { incidents: JsonRecord[]; summary: { failed_turn_count: number; failed_canon_job_count: number; bad_turn_report_count: number; telemetry_incident_count: number }; limit: number }
+
+export type BetaAuditsResponse = { state_mutations: JsonRecord[]; operator_actions: JsonRecord[]; summary: { state_mutation_count: number; operator_action_count: number }; limit: number }
+
 export type World = {
   world_id: number
   name: string
@@ -196,6 +217,7 @@ export type Account = {
 export type AccountSession = {
   account: Account
   account_token: string
+  account_token_transport?: string | null
   workspace_id: string | null
   workspace_role: string | null
   is_workspace_admin: boolean

@@ -13,9 +13,13 @@ from aidm_server.deploy_bootstrap import (
     BootstrapError,
     BootstrapReport,
     _harden_env_local_permissions,
+    _validate_auth_config,
+    _validate_observability_config,
     _validate_rate_limits,
     _validate_network_exposure,
+    _validate_security_headers_config,
     _validate_server_start_allowed,
+    _validate_socketio_deployment_config,
     build_parser,
 )
 from aidm_server.database import harden_sqlite_permissions
@@ -245,6 +249,125 @@ def test_validate_rate_limits_rejects_invalid_turn_lock_settings(app):
 
     with pytest.raises(BootstrapError, match='AIDM_TURN_COORDINATOR_POLL_INTERVAL_MS'):
         _validate_rate_limits(app)
+
+
+def test_validate_socketio_deployment_config_requires_explicit_worker_model_in_production(app):
+    app.config['AIDM_ENV'] = 'production'
+    app.config['AIDM_SOCKETIO_WORKER_MODEL'] = 'single'
+    app.config['AIDM_SOCKETIO_WORKER_MODEL_EXPLICIT'] = False
+    report = BootstrapReport(warnings=[])
+
+    with pytest.raises(BootstrapError, match='AIDM_SOCKETIO_WORKER_MODEL'):
+        _validate_socketio_deployment_config(app, report)
+
+
+def test_validate_socketio_deployment_config_accepts_production_single_worker(app):
+    app.config['AIDM_ENV'] = 'production'
+    app.config['AIDM_SOCKETIO_WORKER_MODEL'] = 'single'
+    app.config['AIDM_SOCKETIO_WORKER_MODEL_EXPLICIT'] = True
+    report = BootstrapReport(warnings=[])
+
+    _validate_socketio_deployment_config(app, report)
+
+    assert 'run exactly one backend worker' in report.warnings[0]
+
+
+def test_validate_socketio_deployment_config_requires_message_queue_url(app):
+    app.config['AIDM_ENV'] = 'production'
+    app.config['AIDM_SOCKETIO_WORKER_MODEL'] = 'message_queue'
+    app.config['AIDM_SOCKETIO_WORKER_MODEL_EXPLICIT'] = True
+    app.config['AIDM_SOCKETIO_MESSAGE_QUEUE'] = ''
+    report = BootstrapReport(warnings=[])
+
+    with pytest.raises(BootstrapError, match='AIDM_SOCKETIO_MESSAGE_QUEUE'):
+        _validate_socketio_deployment_config(app, report)
+
+    app.config['AIDM_SOCKETIO_MESSAGE_QUEUE'] = 'redis://redis.example:6379/0'
+    _validate_socketio_deployment_config(app, report)
+
+
+def test_validate_observability_config_requires_provider_and_owner_in_production(app):
+    app.config['AIDM_ENV'] = 'production'
+    app.config['AIDM_OBSERVABILITY_PROVIDER'] = ''
+    app.config['AIDM_ALERT_OWNER'] = ''
+    app.config['AIDM_TELEMETRY_ENABLED'] = False
+    report = BootstrapReport(warnings=[])
+
+    with pytest.raises(BootstrapError, match='AIDM_OBSERVABILITY_PROVIDER'):
+        _validate_observability_config(app, report)
+
+    app.config['AIDM_OBSERVABILITY_PROVIDER'] = 'grafana-cloud'
+    with pytest.raises(BootstrapError, match='AIDM_ALERT_OWNER'):
+        _validate_observability_config(app, report)
+
+
+def test_validate_observability_config_checks_enabled_telemetry_endpoint(app):
+    app.config['AIDM_ENV'] = 'test'
+    app.config['AIDM_OBSERVABILITY_PROVIDER'] = ''
+    app.config['AIDM_ALERT_OWNER'] = ''
+    app.config['AIDM_TELEMETRY_ENABLED'] = True
+    app.config['AIDM_TELEMETRY_ENDPOINT'] = ''
+    report = BootstrapReport(warnings=[])
+
+    with pytest.raises(BootstrapError, match='AIDM_TELEMETRY_ENDPOINT'):
+        _validate_observability_config(app, report)
+
+    app.config['AIDM_TELEMETRY_ENDPOINT'] = 'https://example.test/telemetry'
+    _validate_observability_config(app, report)
+
+
+def test_validate_security_headers_config_requires_headers_in_production(app):
+    app.config['AIDM_ENV'] = 'production'
+    app.config['AIDM_SECURITY_HEADERS_ENABLED'] = False
+
+    with pytest.raises(BootstrapError, match='AIDM_SECURITY_HEADERS_ENABLED=true'):
+        _validate_security_headers_config(app)
+
+    app.config['AIDM_SECURITY_HEADERS_ENABLED'] = True
+    app.config['AIDM_CONTENT_SECURITY_POLICY'] = ''
+
+    with pytest.raises(BootstrapError, match='AIDM_CONTENT_SECURITY_POLICY'):
+        _validate_security_headers_config(app)
+
+    app.config['AIDM_CONTENT_SECURITY_POLICY'] = "default-src 'self'"
+    _validate_security_headers_config(app)
+
+
+def test_validate_auth_config_rejects_insecure_production_cookie_auth(app):
+    app.config['AIDM_ENV'] = 'production'
+    app.config['AIDM_AUTH_REQUIRED'] = True
+    app.config['AIDM_API_AUTH_TOKENS'] = ['token-123']
+    app.config['AIDM_API_AUTH_TOKEN_WORKSPACES'] = {}
+    app.config['AIDM_ACCOUNT_COOKIE_AUTH_ENABLED'] = True
+    app.config['AIDM_ACCOUNT_COOKIE_SECURE'] = False
+    app.config['AIDM_ACCOUNT_COOKIE_SAMESITE'] = 'Lax'
+    report = BootstrapReport(warnings=[])
+
+    with pytest.raises(BootstrapError, match='AIDM_ACCOUNT_COOKIE_SECURE=true'):
+        _validate_auth_config(app, report)
+
+
+def test_validate_auth_config_warns_for_production_bearer_and_cookie_token_echo(app):
+    app.config['AIDM_ENV'] = 'production'
+    app.config['AIDM_AUTH_REQUIRED'] = True
+    app.config['AIDM_API_AUTH_TOKENS'] = ['token-123']
+    app.config['AIDM_API_AUTH_TOKEN_WORKSPACES'] = {}
+    app.config['AIDM_ACCOUNT_COOKIE_AUTH_ENABLED'] = False
+    report = BootstrapReport(warnings=[])
+
+    _validate_auth_config(app, report)
+
+    assert any('HTTP-only account cookie auth is disabled' in warning for warning in report.warnings)
+
+    app.config['AIDM_ACCOUNT_COOKIE_AUTH_ENABLED'] = True
+    app.config['AIDM_ACCOUNT_COOKIE_SECURE'] = True
+    app.config['AIDM_ACCOUNT_COOKIE_SAMESITE'] = 'Lax'
+    app.config['AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED'] = True
+    report = BootstrapReport(warnings=[])
+
+    _validate_auth_config(app, report)
+
+    assert any('Account tokens are still returned in JSON' in warning for warning in report.warnings)
 
 
 def test_validate_server_start_allowed_rejects_production_werkzeug(app):

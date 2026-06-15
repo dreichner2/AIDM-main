@@ -10,6 +10,8 @@ export type {
   CharacterRaceSelection,
   BestiaryEntryPayload,
   BestiaryListResponse,
+  BadTurnFeedbackResponse,
+  BetaIncidentsResponse,
   BestiaryScope,
   CampaignPackGenerateResponse,
   CombatDebugEventsResponse,
@@ -42,6 +44,7 @@ export type {
   SessionState,
   SessionSummary,
   TurnEventPayload,
+  TurnFeedbackReport,
   World,
 } from './apiContract.generated'
 
@@ -66,6 +69,14 @@ export type Health = {
       completed_at: string | null
     } | null
   }
+}
+
+export type ActorCapabilitiesResponse = {
+  workspace_id: string
+  account_id: number | null
+  is_workspace_admin: boolean
+  capabilities: string[]
+  descriptions?: Record<string, string>
 }
 
 export type LlmModelOption = {

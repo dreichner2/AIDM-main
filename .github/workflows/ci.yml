@@ -40,9 +40,7 @@ jobs:
           AIDM_TELEMETRY_ENABLED: 'false'
         run: python -m pytest
       - name: Check generated API types
-        run: |
-          python scripts/generate_api_types.py
-          git diff --exit-code aidm_frontend/src/apiContract.generated.ts
+        run: python scripts/generate_api_types.py --check
 
   frontend:
     runs-on: ubuntu-latest

@@ -15,6 +15,29 @@ TURN_COORDINATOR_STORE_MEMORY = 'memory'
 TURN_COORDINATOR_STORE_DATABASE = 'database'
 SUPPORTED_TURN_COORDINATOR_STORES = {TURN_COORDINATOR_STORE_MEMORY, TURN_COORDINATOR_STORE_DATABASE}
 
+SOCKETIO_WORKER_MODEL_SINGLE = 'single'
+SOCKETIO_WORKER_MODEL_STICKY = 'sticky'
+SOCKETIO_WORKER_MODEL_MESSAGE_QUEUE = 'message_queue'
+SUPPORTED_SOCKETIO_WORKER_MODELS = {
+    SOCKETIO_WORKER_MODEL_SINGLE,
+    SOCKETIO_WORKER_MODEL_STICKY,
+    SOCKETIO_WORKER_MODEL_MESSAGE_QUEUE,
+}
+
+DEFAULT_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self' ws: wss:; "
+    "media-src 'self' data: blob:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'none'; "
+    "form-action 'self'"
+)
+
 
 def _to_bool(value: str | bool | None, default: bool = False) -> bool:
     if isinstance(value, bool):
@@ -66,17 +89,27 @@ class AppConfig:
     cors_allow_private_network: bool
     socketio_cors_allowlist: List[str]
     socketio_async_mode: str
+    socketio_worker_model: str
+    socketio_worker_model_explicit: bool
+    socketio_message_queue: str | None
     database_uri: str
     auto_create_schema: bool
     serve_frontend: bool
     frontend_dist_dir: str
     max_request_bytes: int
+    security_headers_enabled: bool
+    content_security_policy: str
     admin_enabled: bool
     admin_passcode: str | None
 
     auth_required: bool
     api_auth_tokens: List[str]
     api_auth_token_workspaces: Dict[str, str]
+    account_cookie_auth_enabled: bool
+    account_cookie_name: str
+    account_cookie_secure: bool
+    account_cookie_samesite: str
+    account_token_response_enabled: bool
 
     llm_provider: str
     llm_model: str
@@ -91,6 +124,8 @@ class AppConfig:
     telemetry_enabled: bool
     telemetry_endpoint: str
     telemetry_api_key: str | None
+    observability_provider: str
+    alert_owner: str
     telemetry_timeout_seconds: int
     telemetry_max_queue_size: int
 
@@ -139,6 +174,15 @@ def load_config() -> AppConfig:
         default=(env != 'production'),
     )
     socketio_cors_allowlist = _to_list(os.getenv('AIDM_SOCKET_CORS_ALLOWLIST'), cors_allowlist)
+    socketio_worker_model_explicit = 'AIDM_SOCKETIO_WORKER_MODEL' in os.environ
+    socketio_worker_model = (
+        os.getenv('AIDM_SOCKETIO_WORKER_MODEL', SOCKETIO_WORKER_MODEL_SINGLE).strip().lower().replace('-', '_')
+    )
+    if socketio_worker_model not in SUPPORTED_SOCKETIO_WORKER_MODELS:
+        raise ValueError(
+            'Unsupported AIDM_SOCKETIO_WORKER_MODEL '
+            f'"{socketio_worker_model}". Expected one of: {", ".join(sorted(SUPPORTED_SOCKETIO_WORKER_MODELS))}.'
+        )
     llm_fallback_models = _to_list(os.getenv('AIDM_LLM_FALLBACK_MODELS'), [])
     rate_limit_store = os.getenv('AIDM_RATE_LIMIT_STORE', RATE_LIMIT_STORE_MEMORY).strip().lower()
     if rate_limit_store not in SUPPORTED_RATE_LIMIT_STORES:
@@ -155,6 +199,9 @@ def load_config() -> AppConfig:
             'Unsupported AIDM_TURN_COORDINATOR_STORE '
             f'"{turn_coordinator_store}". Expected one of: {", ".join(sorted(SUPPORTED_TURN_COORDINATOR_STORES))}.'
         )
+    account_cookie_samesite = (os.getenv('AIDM_ACCOUNT_COOKIE_SAMESITE') or 'Lax').strip().capitalize()
+    if account_cookie_samesite not in {'Lax', 'Strict', 'None'}:
+        raise ValueError('Unsupported AIDM_ACCOUNT_COOKIE_SAMESITE. Expected one of: Lax, Strict, None.')
 
     return AppConfig(
         env=env,
@@ -164,11 +211,16 @@ def load_config() -> AppConfig:
         cors_allow_private_network=cors_allow_private_network,
         socketio_cors_allowlist=socketio_cors_allowlist,
         socketio_async_mode=os.getenv('AIDM_SOCKETIO_ASYNC_MODE', 'threading').strip().lower(),
+        socketio_worker_model=socketio_worker_model,
+        socketio_worker_model_explicit=socketio_worker_model_explicit,
+        socketio_message_queue=(os.getenv('AIDM_SOCKETIO_MESSAGE_QUEUE') or '').strip() or None,
         database_uri=os.getenv('AIDM_DATABASE_URI') or default_sqlite_uri(),
         auto_create_schema=_to_bool(os.getenv('AIDM_AUTO_CREATE_SCHEMA'), default=(env != 'production')),
         serve_frontend=_to_bool(os.getenv('AIDM_SERVE_FRONTEND'), default=False),
         frontend_dist_dir=(os.getenv('AIDM_FRONTEND_DIST_DIR') or '').strip(),
         max_request_bytes=_to_int(os.getenv('AIDM_MAX_REQUEST_BYTES'), default=1_048_576),
+        security_headers_enabled=_to_bool(os.getenv('AIDM_SECURITY_HEADERS_ENABLED'), default=True),
+        content_security_policy=(os.getenv('AIDM_CONTENT_SECURITY_POLICY') or DEFAULT_CONTENT_SECURITY_POLICY).strip(),
         admin_enabled=_to_bool(
             os.getenv('AIDM_ADMIN_ENABLED'),
             default=env in {'development', 'local'},
@@ -177,6 +229,15 @@ def load_config() -> AppConfig:
         auth_required=_to_bool(os.getenv('AIDM_AUTH_REQUIRED'), default=False),
         api_auth_tokens=_to_list(os.getenv('AIDM_API_AUTH_TOKENS'), []),
         api_auth_token_workspaces=_to_token_workspace_map(os.getenv('AIDM_API_AUTH_TOKEN_WORKSPACES')),
+        account_cookie_auth_enabled=_to_bool(os.getenv('AIDM_ACCOUNT_COOKIE_AUTH_ENABLED'), default=False),
+        account_cookie_name=(os.getenv('AIDM_ACCOUNT_COOKIE_NAME') or 'aidm_account_session').strip()
+        or 'aidm_account_session',
+        account_cookie_secure=_to_bool(os.getenv('AIDM_ACCOUNT_COOKIE_SECURE'), default=(env == 'production')),
+        account_cookie_samesite=account_cookie_samesite,
+        account_token_response_enabled=_to_bool(
+            os.getenv('AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED'),
+            default=True,
+        ),
         llm_provider=llm_provider,
         llm_model=normalize_provider_model_id(llm_provider, os.getenv('AIDM_LLM_MODEL', default_llm_model)),
         llm_fallback_models=llm_fallback_models,
@@ -188,6 +249,8 @@ def load_config() -> AppConfig:
         telemetry_enabled=_to_bool(os.getenv('AIDM_TELEMETRY_ENABLED'), default=False),
         telemetry_endpoint=os.getenv('AIDM_TELEMETRY_ENDPOINT', ''),
         telemetry_api_key=os.getenv('AIDM_TELEMETRY_API_KEY'),
+        observability_provider=(os.getenv('AIDM_OBSERVABILITY_PROVIDER') or '').strip(),
+        alert_owner=(os.getenv('AIDM_ALERT_OWNER') or '').strip(),
         telemetry_timeout_seconds=_to_int(os.getenv('AIDM_TELEMETRY_TIMEOUT_SECONDS'), default=2),
         telemetry_max_queue_size=_to_int(os.getenv('AIDM_TELEMETRY_MAX_QUEUE_SIZE'), default=1000),
         rate_limit_window_seconds=_to_int(os.getenv('AIDM_RATE_LIMIT_WINDOW_SECONDS'), default=30),

@@ -143,6 +143,9 @@ AIDM_DEEPGRAM_TTS_MODEL=aura-2-draco-en
 
 Important runtime settings:
 
+For hosted closed-beta deployments, start from `.env.production.example` and
+replace every placeholder in the deployment provider's secret/env manager.
+
 | Setting | Purpose |
 | --- | --- |
 | `AIDM_DATABASE_URI` | Database URI. Defaults to SQLite at `~/.aidm/dnd_ai_dm.db`. |
@@ -152,10 +155,19 @@ Important runtime settings:
 | `AIDM_AUTH_REQUIRED` | Require bearer-token auth for REST and socket traffic. |
 | `AIDM_API_AUTH_TOKENS` | Comma-separated bearer tokens. |
 | `AIDM_API_AUTH_TOKEN_WORKSPACES` | Optional `workspace_id=token` bindings. |
+| `AIDM_ACCOUNT_COOKIE_AUTH_ENABLED` | Enables server-issued `HttpOnly` account-session cookies. |
+| `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED` | Return raw account tokens in account JSON responses. Set `false` for cookie-only hosted auth. |
+| `AIDM_ACCOUNT_COOKIE_SAMESITE` | Account/CSRF cookie SameSite mode: `Lax`, `Strict`, or `None`. |
+| `AIDM_SECURITY_HEADERS_ENABLED` | Emits CSP, frame, content-type, referrer, and permissions-policy headers. Required in production. |
+| `AIDM_CONTENT_SECURITY_POLICY` | Optional CSP override for hosted frontend serving. |
 | `AIDM_CORS_ALLOWLIST` | Comma-separated REST origins. |
 | `AIDM_SOCKET_CORS_ALLOWLIST` | Comma-separated Socket.IO origins. |
+| `AIDM_SOCKETIO_WORKER_MODEL` | Production worker model: `single`, `sticky`, or `message_queue`. |
+| `AIDM_SOCKETIO_MESSAGE_QUEUE` | Socket.IO message queue URL when `AIDM_SOCKETIO_WORKER_MODEL=message_queue`. |
 | `AIDM_RATE_LIMIT_STORE` | `memory` or `database`. Use `database` for multi-process deployments. |
 | `AIDM_TURN_COORDINATOR_STORE` | `memory` or `database`. Use `database` for multi-process deployments. |
+| `AIDM_OBSERVABILITY_PROVIDER` | Required by production bootstrap to name the beta metrics/logging destination. |
+| `AIDM_ALERT_OWNER` | Required by production bootstrap to name the beta alert owner. |
 | `AIDM_RULES_ENGINE_ENABLED` | Enables roll/check fairness helpers. |
 | `AIDM_SEGMENT_EVALUATOR_ENABLED` | Enables authored segment trigger evaluation. |
 | `AIDM_ADMIN_ENABLED` | Enables Flask-Admin in local/dev contexts. |
@@ -176,10 +188,16 @@ Important runtime settings:
 | `make build` | Run TypeScript checks and Vite production build. |
 | `make bundle-budget` | Check frontend bundle budget. |
 | `make smoke` | Run the backend beta smoke flow. |
+| `make scenario-regression` | Run deterministic scenario quality checks for narration, rules, state, and memory. |
+| `make backup-restore-drill` | Create a non-destructive SQLite backup and verify a restored copy; pass `BACKUP_RESTORE_DRILL_ARGS="--database-uri sqlite:////path/to/dnd_ai_dm.db"` for a specific DB. |
+| `make observability-check` | Validate the Prometheus/Grafana observability bundle; pass `OBSERVABILITY_CHECK_ARGS="--check-docker-compose --require-docker"` for a Docker-backed compose check. |
 | `make browser-smoke` | Run the frontend browser smoke script. |
 | `make visual-smoke` | Run the frontend visual smoke script. |
 | `make secrets` | Run the repo secret scanner. |
 | `make api-types` | Regenerate frontend API contract types from backend routes. |
+| `make closed-beta-rc` | Run the full local closed-beta release-candidate gate. |
+| `make closed-beta-rc-fast` | Run the RC gate without browser smoke or dependency audits for local iteration. |
+| `make deployment-readiness DEPLOYMENT_READINESS_ARGS="..."` | Validate hosted closed-beta env choices and optional live `/api/health`/metrics/security-header checks. |
 | `make db-upgrade` | Run Flask database migrations. |
 | `make reproject-session SESSION_ID=...` | Rebuild projections for one session. |
 | `make reproject-all` | Rebuild projections for all sessions. |
@@ -265,7 +283,7 @@ The backend exposes REST endpoints under `/api` for:
 - maps and world-map segments
 - runtime configuration
 - creature generation, bestiary, and balance helpers
-- health, metrics, TTS config, feedback, and beta summaries
+- health, metrics, TTS config, coherence/bad-turn feedback, beta summaries, beta incident feeds, and operator audit feeds
 
 Socket.IO supports live play events including:
 
@@ -386,8 +404,16 @@ not necessarily what the running backend is serving.
   provide the public TLS edge.
 - Keep `AIDM_CORS_ALLOWLIST` and `AIDM_SOCKET_CORS_ALLOWLIST` narrow outside
   local development.
+- Production bootstrap requires `AIDM_OBSERVABILITY_PROVIDER`, `AIDM_ALERT_OWNER`,
+  and an explicit `AIDM_SOCKETIO_WORKER_MODEL`.
+- For hosted same-origin auth, enable `AIDM_ACCOUNT_COOKIE_AUTH_ENABLED=true`,
+  keep `AIDM_ACCOUNT_COOKIE_SECURE=true`, and set
+  `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false` when browser JavaScript should not
+  receive raw account tokens. Cookie-authenticated unsafe REST requests use the
+  companion `aidm_csrf_token` cookie and `X-AIDM-CSRF-Token` header.
 - For multiple backend workers, use database-backed rate limits and turn
-  coordination, plus deployment-level Socket.IO affinity or a shared queue.
+  coordination, plus deployment-level Socket.IO affinity or
+  `AIDM_SOCKETIO_WORKER_MODEL=message_queue` with `AIDM_SOCKETIO_MESSAGE_QUEUE`.
 
 ## Troubleshooting
 
@@ -448,5 +474,6 @@ Makefile                     Main local command surface
 
 ## License
 
-No license file is currently declared in this repository. Treat the code as
-private unless the repository owner adds an explicit license.
+This repository is public for visibility and closed-beta collaboration only.
+See [LICENSE](LICENSE). No open-source license is granted unless the repository
+owner replaces that notice with an explicit open-source license.

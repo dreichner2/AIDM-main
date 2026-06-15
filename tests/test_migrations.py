@@ -79,10 +79,14 @@ def test_migration_chain_upgrade_and_downgrade(tmp_path):
     assert 'turn_events' in tables
     assert 'rate_limit_events' in tables
     assert 'canon_jobs' in tables
+    assert 'session_state_mutation_audits' in tables
+    assert 'operator_action_audits' in tables
     entry_cols_head = {col['name'] for col in inspector.get_columns('session_log_entries')}
     assert 'metadata_json' in entry_cols_head
     dm_turn_cols_head = {col['name'] for col in inspector.get_columns('dm_turns')}
     assert {'confidence', 'roll_value', 'outcome_status'}.issubset(dm_turn_cols_head)
+    feedback_cols_head = {col['name'] for col in inspector.get_columns('dm_coherence_feedback')}
+    assert {'feedback_type', 'category', 'provider', 'model', 'metadata_json'}.issubset(feedback_cols_head)
     campaign_cols_head = {col['name'] for col in inspector.get_columns('campaigns')}
     assert {'updated_at', 'status'}.issubset(campaign_cols_head)
     session_cols_head = {col['name'] for col in inspector.get_columns('sessions')}
@@ -108,6 +112,38 @@ def test_migration_chain_upgrade_and_downgrade(tmp_path):
     assert 'ix_session_log_entries_session_id_timestamp_id' in log_indexes_head
     fact_indexes_head = {index['name'] for index in inspector.get_indexes('story_facts')}
     assert 'ix_story_facts_campaign_subject_predicate' in fact_indexes_head
+    mutation_audit_cols_head = {col['name'] for col in inspector.get_columns('session_state_mutation_audits')}
+    assert {
+        'source',
+        'actor',
+        'actor_account_id',
+        'actor_role',
+        'previous_revision',
+        'state_revision',
+        'applied_change_ids_json',
+        'diff_json',
+        'metadata_json',
+    }.issubset(mutation_audit_cols_head)
+    mutation_audit_indexes_head = {index['name'] for index in inspector.get_indexes('session_state_mutation_audits')}
+    assert 'ix_state_mutation_audits_session_created' in mutation_audit_indexes_head
+    assert 'ix_state_mutation_audits_campaign_created' in mutation_audit_indexes_head
+    operator_audit_cols_head = {col['name'] for col in inspector.get_columns('operator_action_audits')}
+    assert {
+        'workspace_id',
+        'campaign_id',
+        'session_id',
+        'action',
+        'resource_type',
+        'resource_id',
+        'actor',
+        'actor_account_id',
+        'actor_role',
+        'status',
+        'details_json',
+    }.issubset(operator_audit_cols_head)
+    operator_audit_indexes_head = {index['name'] for index in inspector.get_indexes('operator_action_audits')}
+    assert 'ix_operator_action_audits_workspace_created' in operator_audit_indexes_head
+    assert 'ix_operator_action_audits_action_created' in operator_audit_indexes_head
 
     _run_flask_db(['downgrade', '0001_initial_core'], env)
 
@@ -123,6 +159,8 @@ def test_migration_chain_upgrade_and_downgrade(tmp_path):
     assert 'turn_events' not in tables
     assert 'rate_limit_events' not in tables
     assert 'canon_jobs' not in tables
+    assert 'session_state_mutation_audits' not in tables
+    assert 'operator_action_audits' not in tables
     entry_cols_after_down = {col['name'] for col in inspector.get_columns('session_log_entries')}
     assert 'metadata_json' not in entry_cols_after_down
     campaign_cols_after_down = {col['name'] for col in inspector.get_columns('campaigns')}
@@ -144,6 +182,12 @@ def test_migration_chain_upgrade_and_downgrade(tmp_path):
     assert 'turn_events' in tables
     assert 'rate_limit_events' in tables
     assert 'canon_jobs' in tables
+    assert 'session_state_mutation_audits' in tables
+    assert 'operator_action_audits' in tables
+    feedback_cols_after_reupgrade = {col['name'] for col in inspector.get_columns('dm_coherence_feedback')}
+    assert {'feedback_type', 'category', 'provider', 'model', 'metadata_json'}.issubset(
+        feedback_cols_after_reupgrade
+    )
     session_cols_after_reupgrade = {col['name'] for col in inspector.get_columns('sessions')}
     assert {'name', 'status', 'updated_at', 'deleted_at', 'client_session_id', 'archived_by_campaign_id'}.issubset(
         session_cols_after_reupgrade
@@ -184,6 +228,8 @@ def test_migration_chain_downgrade_to_base_and_reupgrade(tmp_path):
     assert 'turn_events' in tables
     assert 'rate_limit_events' in tables
     assert 'canon_jobs' in tables
+    feedback_cols = {col['name'] for col in inspector.get_columns('dm_coherence_feedback')}
+    assert {'feedback_type', 'category', 'provider', 'model', 'metadata_json'}.issubset(feedback_cols)
     campaign_cols = {col['name'] for col in inspector.get_columns('campaigns')}
     session_cols = {col['name'] for col in inspector.get_columns('sessions')}
     assert {'updated_at', 'status'}.issubset(campaign_cols)

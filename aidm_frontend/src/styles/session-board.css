@@ -892,8 +892,19 @@
   width: 84px;
 }
 
+.turn-actions.has-report {
+  grid-template-columns: 42px 42px;
+  width: 84px;
+}
+
+.turn-actions.has-dismiss.has-report {
+  grid-template-columns: 42px 42px 42px;
+  width: 126px;
+}
+
 .turn-expand,
-.turn-dismiss {
+.turn-dismiss,
+.turn-report {
   display: grid;
   width: 100%;
   min-height: 50px;
@@ -911,9 +922,23 @@
   color: var(--muted);
 }
 
+.turn-report {
+  color: var(--muted);
+}
+
 .turn-dismiss:hover {
   color: #ff9b7a;
   background: rgba(255, 107, 37, 0.08);
+}
+
+.turn-report:hover:not(:disabled) {
+  color: #f0d38a;
+  background: rgba(240, 211, 138, 0.08);
+}
+
+.turn-report:disabled {
+  color: #86d6a5;
+  opacity: 0.78;
 }
 
 .turn-expand svg {
@@ -947,6 +972,22 @@
   grid-column: 1;
   grid-row: 1;
   padding-top: 20px;
+}
+
+.dm-response-actions {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+}
+
+.dm-response-actions .turn-report {
+  width: 34px;
+  min-height: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.035);
 }
 
 .dm-response-card .response-copy {

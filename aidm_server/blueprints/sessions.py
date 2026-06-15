@@ -35,6 +35,7 @@ from aidm_server.services.session_import import SessionImportError, import_sessi
 from aidm_server.services.workspace import list_campaign_session_payloads
 from aidm_server.telemetry import telemetry_event, telemetry_metric
 from aidm_server.time_utils import utc_now
+from aidm_server.turn_coordinator import session_turn_coordinator
 from aidm_server.turn_events import SESSION_ENDED_EVENT, SESSION_RECAP_EVENT, SESSION_STARTED_EVENT, record_turn_event
 from aidm_server.validation import coerce_int, missing_fields, optional_text, parse_json_body, positive_int, required_text
 from aidm_server.workspace_access import (
@@ -590,16 +591,18 @@ def update_session_campaign_pack_progress(session_id):
     raw_expected_revision = payload.get('expectedRevision') if 'expectedRevision' in payload else payload.get('expected_revision')
     expected_revision = coerce_int(raw_expected_revision)
     try:
-        result = control_campaign_pack_progress(
-            session_id=session_id,
-            action=action,
-            checkpoint_id=checkpoint_id,
-            reason=reason,
-            actor=_campaign_pack_progress_actor(),
-            expected_revision=expected_revision,
-        )
-        session_state = SessionState.query.filter_by(session_id=session_id).first()
-        db.session.commit()
+        with session_turn_coordinator.serialized(session_id):
+            db.session.expire(session_obj)
+            result = control_campaign_pack_progress(
+                session_id=session_id,
+                action=action,
+                checkpoint_id=checkpoint_id,
+                reason=reason,
+                actor=_campaign_pack_progress_actor(),
+                expected_revision=expected_revision,
+            )
+            session_state = SessionState.query.filter_by(session_id=session_id).first()
+            db.session.commit()
         return jsonify(
             {
                 'changed': result.changed,

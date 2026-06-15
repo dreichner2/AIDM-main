@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import timedelta
 from threading import Lock, RLock
@@ -17,6 +18,7 @@ from aidm_server.time_utils import utc_now
 
 TURN_COORDINATOR_STORE_MEMORY = 'memory'
 TURN_COORDINATOR_STORE_DATABASE = 'database'
+_HELD_SESSION_IDS: ContextVar[tuple[int, ...]] = ContextVar('aidm_held_turn_coordinator_session_ids', default=())
 
 
 @dataclass
@@ -182,8 +184,16 @@ class ConfiguredSessionTurnCoordinator:
 
     @contextmanager
     def serialized(self, session_id: int):
+        held_session_ids = _HELD_SESSION_IDS.get()
+        if session_id in held_session_ids:
+            yield 0.0
+            return
         with self._active_coordinator().serialized(session_id) as wait_ms:
-            yield wait_ms
+            token = _HELD_SESSION_IDS.set((*held_session_ids, session_id))
+            try:
+                yield wait_ms
+            finally:
+                _HELD_SESSION_IDS.reset(token)
 
     def discard_session(self, session_id: int) -> bool:
         return self._active_coordinator().discard_session(session_id)

@@ -507,6 +507,12 @@ class Session(db.Model):
     log_entries = db.relationship('SessionLogEntry', backref='session', cascade='all, delete-orphan', passive_deletes=True)
     dm_turns = db.relationship('DmTurn', backref='session', cascade='all, delete-orphan', passive_deletes=True)
     turn_events = db.relationship('TurnEvent', backref='session', cascade='all, delete-orphan', passive_deletes=True)
+    state_mutation_audits = db.relationship(
+        'SessionStateMutationAudit',
+        backref='session',
+        cascade='all, delete-orphan',
+        passive_deletes=True,
+    )
 
 
 class Npc(db.Model):
@@ -636,6 +642,62 @@ class TurnEvent(db.Model):
     player = db.relationship('Player', backref='turn_events')
 
 
+class SessionStateMutationAudit(db.Model):
+    __tablename__ = 'session_state_mutation_audits'
+    __table_args__ = (
+        db.Index('ix_state_mutation_audits_session_created', 'session_id', 'created_at'),
+        db.Index('ix_state_mutation_audits_campaign_created', 'campaign_id', 'created_at'),
+        db.Index('ix_state_mutation_audits_source_created', 'source', 'created_at'),
+    )
+
+    mutation_audit_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('sessions.session_id', ondelete='CASCADE'), nullable=False, index=True)
+    campaign_id = db.Column(db.Integer, db.ForeignKey('campaigns.campaign_id', ondelete='CASCADE'), nullable=False, index=True)
+    source = db.Column(db.String(120), nullable=False, index=True)
+    actor = db.Column(db.String(160), nullable=False)
+    actor_account_id = db.Column(db.Integer, db.ForeignKey('accounts.account_id', ondelete='SET NULL'), nullable=True, index=True)
+    actor_role = db.Column(db.String(32), nullable=False)
+    previous_revision = db.Column(db.Integer, nullable=False, default=0)
+    state_revision = db.Column(db.Integer, nullable=False, default=0)
+    applied_change_count = db.Column(db.Integer, nullable=False, default=0)
+    rejected_change_count = db.Column(db.Integer, nullable=False, default=0)
+    applied_change_ids_json = db.Column(db.Text, nullable=False)
+    diff_json = db.Column(db.Text, nullable=False)
+    metadata_json = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=utc_now, nullable=False, index=True)
+
+    campaign = db.relationship('Campaign', backref='state_mutation_audits')
+    actor_account = db.relationship('Account', backref='state_mutation_audits')
+
+
+class OperatorActionAudit(db.Model):
+    __tablename__ = 'operator_action_audits'
+    __table_args__ = (
+        db.Index('ix_operator_action_audits_workspace_created', 'workspace_id', 'created_at'),
+        db.Index('ix_operator_action_audits_action_created', 'action', 'created_at'),
+        db.Index('ix_operator_action_audits_campaign_created', 'campaign_id', 'created_at'),
+        db.Index('ix_operator_action_audits_session_created', 'session_id', 'created_at'),
+    )
+
+    operator_audit_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    workspace_id = db.Column(db.String(80), nullable=False, index=True)
+    campaign_id = db.Column(db.Integer, db.ForeignKey('campaigns.campaign_id', ondelete='SET NULL'), nullable=True, index=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('sessions.session_id', ondelete='SET NULL'), nullable=True, index=True)
+    action = db.Column(db.String(120), nullable=False, index=True)
+    resource_type = db.Column(db.String(80), nullable=False)
+    resource_id = db.Column(db.String(160))
+    actor = db.Column(db.String(160), nullable=False)
+    actor_account_id = db.Column(db.Integer, db.ForeignKey('accounts.account_id', ondelete='SET NULL'), nullable=True, index=True)
+    actor_role = db.Column(db.String(32), nullable=False)
+    status = db.Column(db.String(32), nullable=False, default='success')
+    details_json = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=utc_now, nullable=False, index=True)
+
+    campaign = db.relationship('Campaign', backref='operator_action_audits')
+    session = db.relationship('Session', backref='operator_action_audits')
+    actor_account = db.relationship('Account', backref='operator_action_audits')
+
+
 class RateLimitEvent(db.Model):
     __tablename__ = 'rate_limit_events'
     __table_args__ = (
@@ -649,12 +711,20 @@ class RateLimitEvent(db.Model):
 
 class DmCoherenceFeedback(db.Model):
     __tablename__ = 'dm_coherence_feedback'
+    __table_args__ = (
+        db.Index('ix_dm_coherence_feedback_type_created_at', 'feedback_type', 'created_at'),
+    )
 
     feedback_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     session_id = db.Column(db.Integer, db.ForeignKey('sessions.session_id', ondelete='CASCADE'), nullable=False, index=True)
     turn_id = db.Column(db.Integer, db.ForeignKey('dm_turns.turn_id', ondelete='SET NULL'), nullable=True, index=True)
+    feedback_type = db.Column(db.String(32), nullable=False, default='coherence')
+    category = db.Column(db.String(64))
     coherence_score = db.Column(db.Integer, nullable=False)
+    provider = db.Column(db.String)
+    model = db.Column(db.String)
     notes = db.Column(db.Text)
+    metadata_json = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=utc_now)
 
     session = db.relationship(

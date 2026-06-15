@@ -15,6 +15,7 @@ type BestiaryDebugPanelProps = {
   auth: string
   selectedCampaignId: number | null
   selectedSessionId: number | null
+  canUseOperatorTools: boolean
 }
 
 type CreatureRow = {
@@ -127,6 +128,7 @@ export function BestiaryDebugPanel({
   auth,
   selectedCampaignId,
   selectedSessionId,
+  canUseOperatorTools,
 }: BestiaryDebugPanelProps) {
   const [query, setQuery] = useState('')
   const [sourceFilter, setSourceFilter] = useState('all')
@@ -144,7 +146,7 @@ export function BestiaryDebugPanel({
     setLoading(true)
     setError('')
     try {
-      const debugRequest = selectedSessionId
+      const debugRequest = selectedSessionId && canUseOperatorTools
         ? apiFetch<CombatDebugEventsResponse>(baseUrl, `/api/sessions/${selectedSessionId}/combat/debug?limit=12`, auth)
           .catch((): CombatDebugEventsResponse => ({ events: [] }))
         : Promise.resolve({ events: [] })
@@ -168,7 +170,7 @@ export function BestiaryDebugPanel({
     } finally {
       setLoading(false)
     }
-  }, [auth, baseUrl, selectedCampaignId, selectedSessionId])
+  }, [auth, baseUrl, canUseOperatorTools, selectedCampaignId, selectedSessionId])
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -233,110 +235,116 @@ export function BestiaryDebugPanel({
         <span>{loading ? 'Loading' : `${filteredRows.length}/${rows.length}`}</span>
       </div>
 
-      <div className="bestiary-toolbar">
-        <label className="bestiary-search">
-          <Search size={13} aria-hidden="true" />
-          <input
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search creatures"
-            aria-label="Search bestiary"
-          />
-        </label>
-        <select
-          value={sourceFilter}
-          onChange={(event) => setSourceFilter(event.target.value)}
-          aria-label="Filter bestiary source"
-        >
-          {sourceOptions.map((source) => (
-            <option key={source} value={source}>
-              {source.replace(/_/g, ' ')}
-            </option>
-          ))}
-        </select>
-        <button type="button" className="icon-action" onClick={loadBestiary} disabled={loading} aria-label="Refresh bestiary">
-          <RefreshCcw size={14} aria-hidden="true" />
-        </button>
-      </div>
-
-      <div className="bestiary-seed-row">
-        <input
-          value={packTheme}
-          onChange={(event) => setPackTheme(event.target.value)}
-          placeholder="pack themes"
-          aria-label="Campaign pack themes"
-          disabled={!selectedCampaignId || seeding}
-        />
-        <button type="button" onClick={seedCampaignPack} disabled={!selectedCampaignId || seeding}>
-          <Sparkles size={13} aria-hidden="true" />
-          Seed
-        </button>
-      </div>
-
-      {error ? <div className="bestiary-message error">{error}</div> : null}
-      {status && !error ? <div className="bestiary-message">{status}</div> : null}
-
-      <div className="bestiary-layout">
-        <ul className="bestiary-list" aria-label="Bestiary creatures">
-          {filteredRows.slice(0, 14).map((row) => (
-            <li key={row.key}>
-              <button
-                type="button"
-                className={row.key === selected?.key ? 'selected' : ''}
-                onClick={() => setSelectedKey(row.key)}
-                aria-pressed={row.key === selected?.key}
-              >
-                <span>{row.name}</span>
-                <small>{row.source.replace(/_/g, ' ')} / {row.tier}</small>
-              </button>
-            </li>
-          ))}
-          {!filteredRows.length ? <li className="empty-row">No creatures match.</li> : null}
-        </ul>
-
-        {selected ? (
-          <article className="creature-debug-card">
-            <header>
-              <div>
-                <strong>{selected.name}</strong>
-                <small>{selected.type} / {selected.role} / {selected.tier}</small>
-              </div>
-              <span>{selected.source.replace(/_/g, ' ')}</span>
-            </header>
-            <p>{selected.creature.descriptionShort}</p>
-            <div className="creature-stat-grid">
-              <span>HP <strong>{String(selected.creature.stats?.maxHp ?? '—')}</strong></span>
-              <span>AC <strong>{String(selected.creature.stats?.armorClass ?? '—')}</strong></span>
-              <span>DPR <strong>{String(selectedBalance.estimatedDamagePerRound ?? '—')}</strong></span>
-              <span>Morale <strong>{String(selectedBehavior.morale ?? '—')}</strong></span>
-            </div>
-            <div className="creature-tags">
-              {selected.tags.slice(0, 8).map((tag) => <span key={tag}>{tag}</span>)}
-            </div>
-            <div className="creature-ability-list">
-              {selectedAbilities.map((ability) => (
-                <span key={String(ability.id || ability.name)}>
-                  {String(ability.name || ability.id)}
-                  <small>{String(ability.type || 'ability')}</small>
-                </span>
-              ))}
-            </div>
-          </article>
-        ) : null}
-      </div>
-
-      {debugEvents.length ? (
-        <details className="combat-debug-events">
-          <summary><Bug size={13} aria-hidden="true" /> Combat debug ({debugEvents.length})</summary>
-          <div>
-            {debugEvents.slice(0, 6).map((event) => (
-              <span key={String(event.debug_event_id ?? event.created_at ?? debugSummary(event))}>
-                {debugSummary(event)}
-              </span>
+      <div className="bestiary-player-surface" aria-label="Player bestiary">
+        <div className="bestiary-toolbar">
+          <label className="bestiary-search">
+            <Search size={13} aria-hidden="true" />
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search creatures"
+              aria-label="Search bestiary"
+            />
+          </label>
+          <select
+            value={sourceFilter}
+            onChange={(event) => setSourceFilter(event.target.value)}
+            aria-label="Filter bestiary source"
+          >
+            {sourceOptions.map((source) => (
+              <option key={source} value={source}>
+                {source.replace(/_/g, ' ')}
+              </option>
             ))}
+          </select>
+          <button type="button" className="icon-action" onClick={loadBestiary} disabled={loading} aria-label="Refresh bestiary">
+            <RefreshCcw size={14} aria-hidden="true" />
+          </button>
+        </div>
+
+        {error ? <div className="bestiary-message error">{error}</div> : null}
+        {status && !error ? <div className="bestiary-message">{status}</div> : null}
+
+        <div className="bestiary-layout">
+          <ul className="bestiary-list" aria-label="Bestiary creatures">
+            {filteredRows.slice(0, 14).map((row) => (
+              <li key={row.key}>
+                <button
+                  type="button"
+                  className={row.key === selected?.key ? 'selected' : ''}
+                  onClick={() => setSelectedKey(row.key)}
+                  aria-pressed={row.key === selected?.key}
+                >
+                  <span>{row.name}</span>
+                  <small>{row.source.replace(/_/g, ' ')} / {row.tier}</small>
+                </button>
+              </li>
+            ))}
+            {!filteredRows.length ? <li className="empty-row">No creatures match.</li> : null}
+          </ul>
+
+          {selected ? (
+            <article className="creature-debug-card">
+              <header>
+                <div>
+                  <strong>{selected.name}</strong>
+                  <small>{selected.type} / {selected.role} / {selected.tier}</small>
+                </div>
+                <span>{selected.source.replace(/_/g, ' ')}</span>
+              </header>
+              <p>{selected.creature.descriptionShort}</p>
+              <div className="creature-stat-grid">
+                <span>HP <strong>{String(selected.creature.stats?.maxHp ?? '—')}</strong></span>
+                <span>AC <strong>{String(selected.creature.stats?.armorClass ?? '—')}</strong></span>
+                <span>DPR <strong>{String(selectedBalance.estimatedDamagePerRound ?? '—')}</strong></span>
+                <span>Morale <strong>{String(selectedBehavior.morale ?? '—')}</strong></span>
+              </div>
+              <div className="creature-tags">
+                {selected.tags.slice(0, 8).map((tag) => <span key={tag}>{tag}</span>)}
+              </div>
+              <div className="creature-ability-list">
+                {selectedAbilities.map((ability) => (
+                  <span key={String(ability.id || ability.name)}>
+                    {String(ability.name || ability.id)}
+                    <small>{String(ability.type || 'ability')}</small>
+                  </span>
+                ))}
+              </div>
+            </article>
+          ) : null}
+        </div>
+      </div>
+
+      {canUseOperatorTools ? (
+        <div className="bestiary-operator-surface" aria-label="Bestiary operator tools">
+          <div className="bestiary-seed-row">
+            <input
+              value={packTheme}
+              onChange={(event) => setPackTheme(event.target.value)}
+              placeholder="pack themes"
+              aria-label="Campaign pack themes"
+              disabled={!selectedCampaignId || seeding}
+            />
+            <button type="button" onClick={seedCampaignPack} disabled={!selectedCampaignId || seeding}>
+              <Sparkles size={13} aria-hidden="true" />
+              Seed
+            </button>
           </div>
-        </details>
+
+          {debugEvents.length ? (
+            <details className="combat-debug-events">
+              <summary><Bug size={13} aria-hidden="true" /> Combat debug ({debugEvents.length})</summary>
+              <div>
+                {debugEvents.slice(0, 6).map((event) => (
+                  <span key={String(event.debug_event_id ?? event.created_at ?? debugSummary(event))}>
+                    {debugSummary(event)}
+                  </span>
+                ))}
+              </div>
+            </details>
+          ) : null}
+        </div>
       ) : null}
     </section>
   )

@@ -5,7 +5,16 @@ from pathlib import Path
 
 from aidm_server.database import db
 from aidm_server.game_state.models import player_character_from_model
-from aidm_server.models import DmTurn, Player, PlayerAction, Session, TurnEvent, safe_json_dumps, safe_json_loads
+from aidm_server.models import (
+    DmTurn,
+    Player,
+    PlayerAction,
+    Session,
+    SessionStateMutationAudit,
+    TurnEvent,
+    safe_json_dumps,
+    safe_json_loads,
+)
 from aidm_server.starting_inventory import starting_inventory_for_class
 from tests.helpers import seed_world_campaign_player_session
 
@@ -556,6 +565,17 @@ def test_manual_equipment_endpoint_enforces_slots_and_preserves_inventory_payloa
         assert snapshot_inventory['great']['slot'] == 'two_hands'
         assert snapshot_inventory['long'].get('equipped', False) is False
         assert snapshot_inventory['dagger'].get('equipped', False) is False
+        audit = SessionStateMutationAudit.query.filter_by(session_id=ids['session_id']).one()
+        assert audit.source == 'api.player.equipment'
+        assert audit.actor == 'local_operator'
+        assert audit.applied_change_count == 1
+        assert audit.previous_revision == 0
+        assert audit.state_revision == 1
+        applied_change_ids = safe_json_loads(audit.applied_change_ids_json, [])
+        assert len(applied_change_ids) == 1
+        assert applied_change_ids[0].startswith('chg_')
+        diff_paths = {entry['path'] for entry in safe_json_loads(audit.diff_json, [])}
+        assert any('inventory.items' in path for path in diff_paths)
 
     unequip_response = client.patch(
         f"/api/players/{ids['player_id']}/inventory/equipment",
@@ -570,6 +590,58 @@ def test_manual_equipment_endpoint_enforces_slots_and_preserves_inventory_payloa
         actor = next(actor for actor in snapshot['playerCharacters'] if actor['playerId'] == ids['player_id'])
         snapshot_inventory = {item['id']: item for item in actor['inventory']['items']}
         assert snapshot_inventory['great'].get('equipped', False) is False
+
+
+def test_manual_equipment_endpoint_rejects_stale_session_state_revision(client, app):
+    ids = seed_world_campaign_player_session(app)
+    with app.app_context():
+        player = db.session.get(Player, ids['player_id'])
+        player.inventory = safe_json_dumps(
+            [{'id': 'great', 'name': 'Greatsword', 'quantity': 1, 'type': 'weapon', 'subtype': 'greatsword'}],
+            [],
+        )
+        session = db.session.get(Session, ids['session_id'])
+        assert session is not None
+        session.state_snapshot = safe_json_dumps(
+            {
+                'stateRevision': 2,
+                'playerCharacters': [
+                    {
+                        'id': f"player_{ids['player_id']}",
+                        'playerId': ids['player_id'],
+                        'name': player.character_name,
+                        'inventory': {'items': [], 'currency': {}},
+                        'metadata': {},
+                    }
+                ],
+                'stateChangeLedger': [],
+            },
+            {},
+        )
+        db.session.commit()
+
+    response = client.patch(
+        f"/api/players/{ids['player_id']}/inventory/equipment",
+        json={
+            'action': 'equip',
+            'item_id': 'great',
+            'session_id': ids['session_id'],
+            'expectedStateRevision': 1,
+        },
+    )
+
+    assert response.status_code == 409
+    payload = response.get_json()
+    assert payload['error_code'] == 'state_conflict'
+    assert payload['details']['expected_state_revision'] == 1
+    assert payload['details']['actual_state_revision'] == 2
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        snapshot = safe_json_loads(session.state_snapshot, {})
+        actor = next(actor for actor in snapshot['playerCharacters'] if actor['playerId'] == ids['player_id'])
+        assert actor['inventory']['items'] == []
+        assert snapshot['stateRevision'] == 2
+        assert 'stateMutationAudit' not in snapshot
 
 
 def test_manual_equipment_endpoint_infers_sparse_axe_items(client, app):

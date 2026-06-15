@@ -114,6 +114,9 @@ type SessionBoardProps = {
   loadOlderSessionLog: () => Promise<void>
   turnRows: TimelineEntry[]
   dismissTimelineEntry: (turnId: string) => void
+  reportedBadTurnIds: Set<number>
+  reportingBadTurnIds: Set<number>
+  reportBadTurn: (entry: TimelineEntry) => void
   expandedTurnIds: Set<string>
   setExpandedTurnIds: Dispatch<SetStateAction<Set<string>>>
   selectedPlayer: Player | null
@@ -166,6 +169,16 @@ function canDismissLocalTimelineEntry(entry: TimelineEntry) {
   const hasClientMessageId = Boolean(timelineMetadataString(entry, 'client_message_id'))
   const localEntry = entry.id.startsWith('local-') || hasClientMessageId
   return localEntry && (persistenceStatus === 'pending' || persistenceStatus === 'failed')
+}
+
+function timelineTurnId(entry: TimelineEntry) {
+  const rawValue = entry.metadata.turn_id
+  const parsed = typeof rawValue === 'number' ? rawValue : Number(rawValue)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+function canReportBadTurn(entry: TimelineEntry | null) {
+  return Boolean(entry && entry.role === 'dm' && !entry.streaming && timelineTurnId(entry) !== null)
 }
 
 function RollWaitBanner({ notice }: { notice: PendingRollNotice }) {
@@ -309,6 +322,9 @@ export function SessionBoard({
   loadOlderSessionLog,
   turnRows,
   dismissTimelineEntry,
+  reportedBadTurnIds,
+  reportingBadTurnIds,
+  reportBadTurn,
   expandedTurnIds,
   setExpandedTurnIds,
   selectedPlayer,
@@ -359,6 +375,25 @@ export function SessionBoard({
       }
       return next
     })
+  }
+
+  const renderReportButton = (entry: TimelineEntry | null) => {
+    if (!entry) return null
+    if (!canReportBadTurn(entry)) return null
+    const turnId = timelineTurnId(entry) as number
+    const reported = reportedBadTurnIds.has(turnId)
+    const reporting = reportingBadTurnIds.has(turnId)
+    return (
+      <button
+        type="button"
+        className="turn-report"
+        aria-label={reported ? 'Bad turn reported' : 'Report bad turn'}
+        disabled={reported || reporting}
+        onClick={() => reportBadTurn(entry)}
+      >
+        <ClipboardList size={15} />
+      </button>
+    )
   }
 
   return (
@@ -568,6 +603,7 @@ export function SessionBoard({
               turnRows.map((turn, index) => {
                 const expanded = expandedTurnIds.has(turn.id)
                 const dismissible = canDismissLocalTimelineEntry(turn)
+                const reportable = canReportBadTurn(turn)
                 return (
                   <article className="turn-row" key={turn.id}>
                     <div className="turn-number">{turnNumber(turn, index)}</div>
@@ -581,7 +617,8 @@ export function SessionBoard({
                       ) : null}
                       <p>{expanded ? turn.text : truncateText(turn.text, 180)}</p>
                       <time>{formatClock(turn.timestamp)}</time>
-                      <div className={`turn-actions ${dismissible ? 'has-dismiss' : ''}`}>
+                      <div className={`turn-actions ${dismissible ? 'has-dismiss' : ''} ${reportable ? 'has-report' : ''}`}>
+                        {renderReportButton(turn)}
                         {dismissible ? (
                           <button
                             type="button"
@@ -634,6 +671,7 @@ export function SessionBoard({
                     <strong>{currentResponseEntry.speaker}</strong>
                     <span>{currentResponseEntry.streaming ? 'Streaming' : 'Latest Response'}</span>
                   </div>
+                  <div className="dm-response-actions">{renderReportButton(currentResponseEntry)}</div>
                   <div className="response-copy">
                     <p>{latestDmText}</p>
                   </div>
@@ -680,6 +718,7 @@ export function SessionBoard({
                 <strong>{currentResponseEntry?.speaker ?? 'DM'}</strong>
                 <span>Full Response</span>
               </div>
+              <div className="dm-response-actions">{renderReportButton(currentResponseEntry)}</div>
               <div className="response-copy">
                 <p>{latestDmText}</p>
               </div>

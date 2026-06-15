@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import secrets
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, make_response, request
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
 from aidm_server.auth import (
+    DEFAULT_ACCOUNT_COOKIE_NAME,
+    DEFAULT_ACCOUNT_CSRF_COOKIE_NAME,
     DEFAULT_WORKSPACE_ID,
     WORKSPACE_ID_HEADER,
     account_display_name,
@@ -72,6 +75,7 @@ LEGACY_PASSWORD_SETUP_MESSAGE = (
     'and a new password.'
 )
 WORKSPACE_NAME_TAKEN_MESSAGE = 'table/ workspace name already in use'
+ACCOUNT_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
 
 
 def _legacy_password_setup_required_response():
@@ -338,9 +342,12 @@ def account_session_payload(
     claimed_player_ids: list[int] | None = None,
     workspace_token: str | None = None,
 ) -> dict:
+    cookie_auth_enabled = bool(current_app.config.get('AIDM_ACCOUNT_COOKIE_AUTH_ENABLED', False))
+    token_response_enabled = bool(current_app.config.get('AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED', True))
     payload = {
         'account': account_payload(account, workspace_id=workspace_id, role=role),
-        'account_token': account_token,
+        'account_token': account_token if token_response_enabled else '',
+        'account_token_transport': 'http_only_cookie' if cookie_auth_enabled else 'bearer',
         'workspace_id': workspace_id,
         'workspace_role': role,
         'is_workspace_admin': workspace_role_is_admin(role),
@@ -350,6 +357,58 @@ def account_session_payload(
     if workspace_token:
         payload['workspace_token'] = workspace_token
     return payload
+
+
+def _account_cookie_name() -> str:
+    return str(current_app.config.get('AIDM_ACCOUNT_COOKIE_NAME') or DEFAULT_ACCOUNT_COOKIE_NAME)
+
+
+def _account_csrf_cookie_name() -> str:
+    return str(current_app.config.get('AIDM_ACCOUNT_CSRF_COOKIE_NAME') or DEFAULT_ACCOUNT_CSRF_COOKIE_NAME)
+
+
+def _account_cookie_kwargs() -> dict:
+    return {
+        'max_age': ACCOUNT_COOKIE_MAX_AGE_SECONDS,
+        'httponly': True,
+        'secure': bool(current_app.config.get('AIDM_ACCOUNT_COOKIE_SECURE', False)),
+        'samesite': str(current_app.config.get('AIDM_ACCOUNT_COOKIE_SAMESITE') or 'Lax'),
+        'path': '/',
+    }
+
+
+def _account_session_response(payload: dict, *, account_token: str, status: int = 200):
+    response = make_response(jsonify(payload), status)
+    if current_app.config.get('AIDM_ACCOUNT_COOKIE_AUTH_ENABLED') and account_token:
+        response.set_cookie(_account_cookie_name(), account_token, **_account_cookie_kwargs())
+        csrf_token = str(request.cookies.get(_account_csrf_cookie_name()) or '').strip() or secrets.token_urlsafe(32)
+        response.set_cookie(
+            _account_csrf_cookie_name(),
+            csrf_token,
+            max_age=ACCOUNT_COOKIE_MAX_AGE_SECONDS,
+            httponly=False,
+            secure=bool(current_app.config.get('AIDM_ACCOUNT_COOKIE_SECURE', False)),
+            samesite=str(current_app.config.get('AIDM_ACCOUNT_COOKIE_SAMESITE') or 'Lax'),
+            path='/',
+        )
+    return response
+
+
+def _clear_account_session_response(status: int = 200):
+    response = make_response(jsonify({'ok': True}), status)
+    response.delete_cookie(
+        _account_cookie_name(),
+        path='/',
+        secure=bool(current_app.config.get('AIDM_ACCOUNT_COOKIE_SECURE', False)),
+        samesite=str(current_app.config.get('AIDM_ACCOUNT_COOKIE_SAMESITE') or 'Lax'),
+    )
+    response.delete_cookie(
+        _account_csrf_cookie_name(),
+        path='/',
+        secure=bool(current_app.config.get('AIDM_ACCOUNT_COOKIE_SECURE', False)),
+        samesite=str(current_app.config.get('AIDM_ACCOUNT_COOKIE_SAMESITE') or 'Lax'),
+    )
+    return response
 
 
 @accounts_bp.route('/login', methods=['POST'])
@@ -442,13 +501,14 @@ def login_or_create_account():
         claimed_player_ids = claim_legacy_players_for_account(account, workspace_id) if workspace_id else []
         db.session.commit()
         status = 201 if created else 200
-        return jsonify(account_session_payload(
+        response_payload = account_session_payload(
             account,
             account_token=token,
             workspace_id=workspace_id,
             role=membership.role if membership else None,
             claimed_player_ids=claimed_player_ids,
-        )), status
+        )
+        return _account_session_response(response_payload, account_token=token, status=status)
     except Exception as exc:
         db.session.rollback()
         logger.exception('Failed to login or create account: %s', str(exc))
@@ -495,13 +555,14 @@ def join_account_workspace():
         membership = ensure_account_workspace_membership(account, workspace_id)
         claimed_player_ids = claim_legacy_players_for_account(account, workspace_id)
         db.session.commit()
-        return jsonify(account_session_payload(
+        response_payload = account_session_payload(
             account,
             account_token=account_token,
             workspace_id=workspace_id,
             role=membership.role if membership else None,
             claimed_player_ids=claimed_player_ids,
-        ))
+        )
+        return _account_session_response(response_payload, account_token=account_token)
     except Exception as exc:
         db.session.rollback()
         logger.exception('Failed to join account workspace: %s', str(exc))
@@ -565,13 +626,14 @@ def create_account_workspace():
         db.session.add(membership)
         db.session.flush()
         db.session.commit()
-        return jsonify(account_session_payload(
+        response_payload = account_session_payload(
             account,
             account_token=account_token,
             workspace_id=workspace_id,
             role=membership.role,
             workspace_token=workspace_token,
-        )), 201
+        )
+        return _account_session_response(response_payload, account_token=account_token, status=201)
     except IntegrityError:
         db.session.rollback()
         return error_response('workspace_name_taken', WORKSPACE_NAME_TAKEN_MESSAGE, 409)
@@ -605,13 +667,14 @@ def select_account_workspace():
             return error_response('workspace_not_saved', 'Workspace is not saved to this account.', 403)
         claimed_player_ids = claim_legacy_players_for_account(account, workspace_id)
         db.session.commit()
-        return jsonify(account_session_payload(
+        response_payload = account_session_payload(
             account,
             account_token=account_token,
             workspace_id=workspace_id,
             role=membership.role if membership else None,
             claimed_player_ids=claimed_player_ids,
-        ))
+        )
+        return _account_session_response(response_payload, account_token=account_token)
     except Exception as exc:
         db.session.rollback()
         logger.exception('Failed to select account workspace: %s', str(exc))
@@ -658,7 +721,7 @@ def delete_or_remove_account_workspace(workspace_id: str):
         payload = account_session_payload(account, account_token=account_token)
         payload['workspace_action'] = action
         payload['workspace_id_removed'] = clean_workspace_id
-        return jsonify(payload)
+        return _account_session_response(payload, account_token=account_token)
     except Exception as exc:
         db.session.rollback()
         logger.exception('Failed to delete or remove account workspace: %s', str(exc))
@@ -678,3 +741,8 @@ def account_me():
         membership = ensure_account_workspace_membership(account, workspace_id)
         db.session.commit()
     return jsonify(account_payload(account, workspace_id=workspace_id, role=membership.role if membership else None))
+
+
+@accounts_bp.route('/session', methods=['DELETE'])
+def logout_account_session():
+    return _clear_account_session_response()

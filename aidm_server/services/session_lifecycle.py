@@ -23,6 +23,7 @@ from aidm_server.models import (
     safe_json_loads,
 )
 from aidm_server.response_dtos import session_payload
+from aidm_server.operator_audit import record_operator_action
 from aidm_server.time_utils import utc_now
 from aidm_server.turn_coordinator import session_turn_coordinator
 
@@ -56,6 +57,14 @@ def archive_session_record(session_obj: Session, *, include_hidden_state: bool =
     session_obj.archived_by_campaign_id = None
     session_obj.state_snapshot = safe_json_dumps(metadata_cleaned_snapshot(session_obj.state_snapshot), {})
     session_turn_coordinator.discard_session(session_obj.session_id)
+    record_operator_action(
+        action='session.archive',
+        resource_type='session',
+        workspace_id=(session_obj.campaign.workspace_id if session_obj.campaign else 'owner'),
+        campaign_id=session_obj.campaign_id,
+        session_id=session_obj.session_id,
+        resource_id=session_obj.session_id,
+    )
     return session_payload(session_obj, include_hidden_state=include_hidden_state)
 
 
@@ -66,6 +75,14 @@ def restore_session_record(session_obj: Session, *, include_hidden_state: bool =
     session_obj.updated_at = now
     session_obj.archived_by_campaign_id = None
     session_obj.state_snapshot = safe_json_dumps(metadata_cleaned_snapshot(session_obj.state_snapshot), {})
+    record_operator_action(
+        action='session.restore',
+        resource_type='session',
+        workspace_id=(session_obj.campaign.workspace_id if session_obj.campaign else 'owner'),
+        campaign_id=session_obj.campaign_id,
+        session_id=session_obj.session_id,
+        resource_id=session_obj.session_id,
+    )
     return session_payload(session_obj, include_hidden_state=include_hidden_state)
 
 
@@ -190,6 +207,13 @@ def hard_delete_session_record(session_obj: Session) -> dict:
 def delete_session_record(session_obj: Session, *, hard_delete: bool, include_hidden_state: bool = True) -> SessionDeletionResult:
     session_id = session_obj.session_id
     if hard_delete:
+        record_operator_action(
+            action='session.delete_hard',
+            resource_type='session',
+            workspace_id=(session_obj.campaign.workspace_id if session_obj.campaign else 'owner'),
+            campaign_id=session_obj.campaign_id,
+            resource_id=session_id,
+        )
         payload = hard_delete_session_record(session_obj)
         session_turn_coordinator.discard_session(session_id)
         return SessionDeletionResult(hard_deleted=True, payload=payload)

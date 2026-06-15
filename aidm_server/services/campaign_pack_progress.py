@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,8 +12,10 @@ from aidm_server.services.campaign_pack_storage import (
     propagate_shared_campaign_pack_progress,
     record_campaign_pack_progress_event,
 )
+from aidm_server.services.session_state_mutation import record_session_state_mutation_audit
 from aidm_server.segment_triggers import parse_trigger_spec
 from aidm_server.time_utils import utc_now
+from aidm_server.turn_coordinator import session_turn_coordinator
 
 
 PROGRESS_CHANGED_EVENT = 'campaign_pack.progress.changed'
@@ -66,6 +69,22 @@ def update_campaign_pack_progress(
     triggered_segments: list[dict] | None = None,
     turn_id: int | None = None,
 ) -> CampaignPackProgressResult:
+    with session_turn_coordinator.serialized(session_id):
+        return _update_campaign_pack_progress_locked(
+            session_id=session_id,
+            campaign_id=campaign_id,
+            triggered_segments=triggered_segments,
+            turn_id=turn_id,
+        )
+
+
+def _update_campaign_pack_progress_locked(
+    *,
+    session_id: int,
+    campaign_id: int,
+    triggered_segments: list[dict] | None = None,
+    turn_id: int | None = None,
+) -> CampaignPackProgressResult:
     session = _session_for_update(session_id)
     if not session:
         return CampaignPackProgressResult(False, None, [], None)
@@ -83,6 +102,7 @@ def update_campaign_pack_progress(
 
     flags = snapshot.get('flags') if isinstance(snapshot.get('flags'), dict) else {}
     snapshot['flags'] = flags
+    before_snapshot = deepcopy(snapshot)
 
     completed_ids = _unique_ids(
         _ids_from(pack, 'completedCheckpointIds', 'completed_checkpoint_ids')
@@ -179,6 +199,18 @@ def update_campaign_pack_progress(
     if not changed:
         if migrations_applied:
             session.state_snapshot = safe_json_dumps(snapshot, {})
+            record_session_state_mutation_audit(
+                session_obj=session,
+                before_state=before_snapshot,
+                after_state=snapshot,
+                source='system.campaign_pack.snapshot_migration',
+                actor='system',
+                previous_revision=previous_revision,
+                state_revision=previous_revision,
+                applied_changes=[],
+                rejected_count=0,
+                metadata={'packId': pack_id, 'migrationsApplied': migrations_applied},
+            )
         return CampaignPackProgressResult(
             False,
             active_checkpoint_id,
@@ -222,6 +254,23 @@ def update_campaign_pack_progress(
         failed_ids=failed_ids,
         progress_revision=next_revision,
         turn_id=turn_id,
+    )
+    record_session_state_mutation_audit(
+        session_obj=session,
+        before_state=before_snapshot,
+        after_state=snapshot,
+        source='system.campaign_pack.auto_progress',
+        actor='system',
+        previous_revision=previous_revision,
+        state_revision=next_revision,
+        applied_changes=[
+            {
+                'id': f'campaign_pack.auto_progress.{pack_id}.{next_revision}',
+                'type': 'campaign_pack.progress.auto',
+            }
+        ],
+        rejected_count=0,
+        metadata={'packId': pack_id, 'reason': reason, 'eventId': event_id, 'turnId': turn_id},
     )
     return CampaignPackProgressResult(True, active_checkpoint_id, completed_ids, reason, skipped_ids, failed_ids, next_revision, event_id)
 
@@ -296,6 +345,26 @@ def control_campaign_pack_progress(
     actor: str | None = None,
     expected_revision: int | None = None,
 ) -> CampaignPackControlResult:
+    with session_turn_coordinator.serialized(session_id):
+        return _control_campaign_pack_progress_locked(
+            session_id=session_id,
+            action=action,
+            checkpoint_id=checkpoint_id,
+            reason=reason,
+            actor=actor,
+            expected_revision=expected_revision,
+        )
+
+
+def _control_campaign_pack_progress_locked(
+    *,
+    session_id: int,
+    action: str,
+    checkpoint_id: str | None = None,
+    reason: str | None = None,
+    actor: str | None = None,
+    expected_revision: int | None = None,
+) -> CampaignPackControlResult:
     session, snapshot, pack, checkpoints, flags = _mutable_session_pack_state(session_id)
     normalized_action = _status_key(action)
     if normalized_action not in {'advance', 'skip', 'fail', 'rewind', 'override', 'set'}:
@@ -304,6 +373,7 @@ def control_campaign_pack_progress(
     active_checkpoint, completed_ids, skipped_ids, failed_ids = _current_pack_progress(pack, flags, checkpoints)
     previous_active_id = _checkpoint_id(active_checkpoint)
     previous_revision = _progress_revision(pack, flags)
+    before_snapshot = deepcopy(snapshot)
     if expected_revision is not None and expected_revision != previous_revision:
         raise CampaignPackProgressError(
             'Campaign pack progress changed before this control request. Refresh before retrying.',
@@ -423,6 +493,30 @@ def control_campaign_pack_progress(
             failed_ids=failed_ids,
             progress_revision=next_revision,
         )
+    record_session_state_mutation_audit(
+        session_obj=session,
+        before_state=before_snapshot,
+        after_state=snapshot,
+        source='api.campaign_pack.progress_control',
+        actor=actor or 'operator',
+        previous_revision=previous_revision,
+        state_revision=next_revision,
+        applied_changes=[
+            {
+                'id': f'campaign_pack.progress_control.{normalized_action}.{next_revision}',
+                'type': 'campaign_pack.progress.control',
+            }
+        ]
+        if changed
+        else [],
+        rejected_count=0,
+        metadata={
+            'packId': _text(_first(pack, 'packId', 'pack_id')),
+            'action': normalized_action,
+            'reason': control_reason,
+            'eventId': event_id,
+        },
+    )
     return CampaignPackControlResult(changed, active_checkpoint_id, completed_ids, skipped_ids, control_reason, failed_ids, next_revision, event_id)
 
 
