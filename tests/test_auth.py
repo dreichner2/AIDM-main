@@ -554,6 +554,7 @@ def test_combat_operator_endpoints_require_workspace_admin_account(tmp_path, mon
         headers=headers,
         json={'changes': []},
     )
+    player_plan = client.post(f'/api/sessions/{session_id}/combat/plan-enemy-intents', headers=headers)
     player_debug = client.get(f'/api/sessions/{session_id}/combat/debug', headers=headers)
 
     with app.app_context():
@@ -584,6 +585,8 @@ def test_combat_operator_endpoints_require_workspace_admin_account(tmp_path, mon
     assert player_morale.get_json()['error_code'] == 'forbidden'
     assert player_apply.status_code == 403
     assert player_apply.get_json()['error_code'] == 'forbidden'
+    assert player_plan.status_code == 403
+    assert player_plan.get_json()['error_code'] == 'forbidden'
     assert player_debug.status_code == 403
     assert player_debug.get_json()['error_code'] == 'forbidden'
     assert player_check_end.status_code == 403
@@ -606,6 +609,7 @@ def test_combat_operator_endpoints_require_workspace_admin_account(tmp_path, mon
         for participant in admin_start.get_json()['combat']['participants']
         if participant['team'] == 'enemy'
     )
+    admin_plan = client.post(f'/api/sessions/{session_id}/combat/plan-enemy-intents', headers=headers)
     admin_morale = client.post(
         f'/api/sessions/{session_id}/combat/apply-morale-event',
         headers=headers,
@@ -635,6 +639,8 @@ def test_combat_operator_endpoints_require_workspace_admin_account(tmp_path, mon
 
     assert admin_start.status_code == 200
     assert admin_start.get_json()['combat']['status'] == 'active'
+    assert admin_plan.status_code == 200
+    assert admin_plan.get_json()['intentPlan']
     assert admin_morale.status_code == 200
     assert admin_morale.get_json()['validation']['rejected'] == []
     assert admin_apply.status_code == 200
@@ -686,6 +692,29 @@ def test_bestiary_authoring_endpoints_require_workspace_admin_account(tmp_path, 
         headers=headers,
         json={'themes': ['ash'], 'count': 1},
     )
+    player_resolve_save = client.post(
+        '/api/creatures/resolve',
+        headers=headers,
+        json={
+            'campaignId': campaign_id,
+            'descriptionHint': 'wolf',
+            'themeTags': ['wolf'],
+            'allowGeneration': False,
+            'allowVariants': False,
+        },
+    )
+    player_resolve_preview = client.post(
+        '/api/creatures/resolve',
+        headers=headers,
+        json={
+            'campaignId': campaign_id,
+            'saveGenerated': 'off',
+            'descriptionHint': 'wolf',
+            'themeTags': ['wolf'],
+            'allowGeneration': False,
+            'allowVariants': False,
+        },
+    )
     player_evolve_save = client.post(
         '/api/creatures/evolve',
         headers=headers,
@@ -701,7 +730,7 @@ def test_bestiary_authoring_endpoints_require_workspace_admin_account(tmp_path, 
         headers=headers,
         json={
             'campaignId': campaign_id,
-            'saveGenerated': False,
+            'saveGenerated': 'off',
             'baseCreature': core_creature('goblin_skirmisher'),
             'eventContext': {'eventTags': ['fire']},
         },
@@ -711,6 +740,12 @@ def test_bestiary_authoring_endpoints_require_workspace_admin_account(tmp_path, 
     assert player_create.get_json()['error_code'] == 'forbidden'
     assert player_generate_pack.status_code == 403
     assert player_generate_pack.get_json()['error_code'] == 'forbidden'
+    assert player_resolve_save.status_code == 403
+    assert player_resolve_save.get_json()['error_code'] == 'forbidden'
+    assert player_resolve_preview.status_code == 200
+    player_resolve_preview_payload = player_resolve_preview.get_json()
+    assert player_resolve_preview_payload['savedToBestiary'] is False
+    assert 'debug' not in player_resolve_preview_payload
     assert player_evolve_save.status_code == 403
     assert player_evolve_save.get_json()['error_code'] == 'forbidden'
     assert player_evolve_preview.status_code == 200
@@ -738,6 +773,17 @@ def test_bestiary_authoring_endpoints_require_workspace_admin_account(tmp_path, 
         headers=headers,
         json={'themes': ['ash'], 'count': 1},
     )
+    admin_resolve_save = client.post(
+        '/api/creatures/resolve',
+        headers=headers,
+        json={
+            'campaignId': campaign_id,
+            'descriptionHint': 'wolf',
+            'themeTags': ['wolf'],
+            'allowGeneration': False,
+            'allowVariants': False,
+        },
+    )
     admin_evolve_save = client.post(
         '/api/creatures/evolve',
         headers=headers,
@@ -753,6 +799,10 @@ def test_bestiary_authoring_endpoints_require_workspace_admin_account(tmp_path, 
     assert admin_create.get_json()['entry']['creature']['id'] == 'wolf'
     assert admin_generate_pack.status_code == 200
     assert len(admin_generate_pack.get_json()['entries']) == 3
+    assert admin_resolve_save.status_code == 200
+    admin_resolve_save_payload = admin_resolve_save.get_json()
+    assert admin_resolve_save_payload['savedToBestiary'] is False
+    assert admin_resolve_save_payload['debug']['rankings']
     assert admin_evolve_save.status_code == 200
     assert admin_evolve_save.get_json()['entry']['source'] == 'evolved'
     with app.app_context():
@@ -781,6 +831,97 @@ def test_bestiary_authoring_endpoints_require_workspace_admin_account(tmp_path, 
         'bestiary.generate_pack',
         'bestiary.evolve_save',
     ]
+
+
+def test_generate_pack_string_save_off_generates_without_persisting(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+    with app.app_context():
+        account = Account(
+            username='bestiary-preview-admin',
+            first_name='Bestiary',
+            last_name='Preview',
+            password_hash='configured',
+            account_token_hash=hash_secret('bestiary-preview-token'),
+        )
+        db.session.add(account)
+        db.session.flush()
+        db.session.add(AccountWorkspaceMembership(account_id=account.account_id, workspace_id='owner', role='admin'))
+        world = World(name='Bestiary Preview World', description='bestiary preview')
+        db.session.add(world)
+        db.session.flush()
+        campaign = Campaign(title='Bestiary Preview Campaign', world_id=world.world_id, workspace_id='owner')
+        db.session.add(campaign)
+        db.session.commit()
+        campaign_id = campaign.campaign_id
+
+    response = client.post(
+        f'/api/campaigns/{campaign_id}/bestiary/generate-pack',
+        headers={'Authorization': 'Bearer bestiary-preview-token', 'X-AIDM-Workspace-Id': 'owner'},
+        json={'themes': ['ash'], 'count': 3, 'save': 'off'},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert len(payload['creatures']) == 3
+    assert payload['entries'] == []
+    with app.app_context():
+        assert BestiaryEntry.query.filter_by(campaign_id=campaign_id).count() == 0
+        audits = OperatorActionAudit.query.filter_by(campaign_id=campaign_id).all()
+        assert len(audits) == 1
+        details = safe_json_loads(audits[0].details_json, {})
+        assert details['generatedCount'] == 3
+        assert details['savedCount'] == 0
+
+
+def test_evolve_save_forbidden_preflights_before_evolution_work(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
+    client = app.test_client()
+    with app.app_context():
+        account = Account(
+            username='evolve-preflight-player',
+            first_name='Evolve',
+            last_name='Player',
+            password_hash='configured',
+            account_token_hash=hash_secret('evolve-preflight-token'),
+        )
+        db.session.add(account)
+        db.session.flush()
+        db.session.add(AccountWorkspaceMembership(account_id=account.account_id, workspace_id='owner', role='player'))
+        world = World(name='Evolve Preflight World', description='evolve auth preflight')
+        db.session.add(world)
+        db.session.flush()
+        campaign = Campaign(title='Evolve Preflight Campaign', world_id=world.world_id, workspace_id='owner')
+        db.session.add(campaign)
+        db.session.flush()
+        session = Session(campaign_id=campaign.campaign_id)
+        db.session.add(session)
+        db.session.commit()
+        campaign_id = campaign.campaign_id
+        session_id = session.session_id
+
+    import aidm_server.blueprints.creatures as creatures_module
+
+    def fail_evolution(*_args, **_kwargs):
+        raise AssertionError('evolve_creature should not run for unauthorized save requests')
+
+    monkeypatch.setattr(creatures_module, 'evolve_creature', fail_evolution)
+    response = client.post(
+        '/api/creatures/evolve',
+        headers={'Authorization': 'Bearer evolve-preflight-token', 'X-AIDM-Workspace-Id': 'owner'},
+        json={
+            'campaignId': campaign_id,
+            'sessionId': session_id,
+            'baseCreature': core_creature('goblin_skirmisher'),
+            'eventContext': {'eventTags': ['fire'], 'grudgeTargetId': 'player_1'},
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()['error_code'] == 'forbidden'
+    with app.app_context():
+        assert BestiaryEntry.query.filter_by(campaign_id=campaign_id).count() == 0
+        assert OperatorActionAudit.query.filter_by(campaign_id=campaign_id).count() == 0
 
 
 def test_example_campaign_pack_import_requires_workspace_admin_account(tmp_path, monkeypatch):

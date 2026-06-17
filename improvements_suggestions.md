@@ -1,3 +1,897 @@
+# Daily AIDM Codebase Improvement Audit - 2026-06-17 16:02 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the current dirty checkout, automation memory, recent report history, shared request validation, endpoint input handling, frontend auth/session storage surfaces, direct session snapshot writers, deployment-readiness workflow, generated artifacts, local ignored artifacts, and lightweight developer workflow checks. The worktree was already dirty at the start of this run with pre-existing changes in creature contract/route files, state-pipeline files, LLM provider tests, auth/game-state tests, and this report. Those existing changes were preserved; this run only changed shared JSON body validation, added a focused worlds endpoint regression, and prepended this report.
+
+## What Was Inspected
+
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`, which showed the same-day LLM stream fallback telemetry fix and carried-forward focus on direct `state_snapshot` writer ownership, hosted auth proof, deployment-readiness evidence, and player resolver DTO hardening.
+- Current git status and diff shape to avoid overwriting unrelated or prior-run work:
+  - `aidm_frontend/src/apiContract.generated.ts`
+  - `aidm_server/api_type_contract.py`
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/game_state/extraction/post_dm_outcome_extractor.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+  - `aidm_server/game_state/validation/validator.py`
+  - `aidm_server/llm.py`
+  - `tests/test_auth.py`
+  - `tests/test_game_state_pipeline.py`
+  - `tests/test_llm_provider.py`
+  - `improvements_suggestions.md`
+- Top-of-file report history in `improvements_suggestions.md` to avoid repeating the 2026-06-17 06:02 MDT LLM telemetry fix and the 2026-06-16 resolver debug hardening.
+- Shared request validation in `aidm_server/validation.py`, especially `parse_json_body`, `coerce_bool`, text validation helpers, and positive integer validation.
+- Every current `parse_json_body(request)` caller across backend blueprints. The callers consistently expect JSON object bodies and then call `.get(...)`, which made the helper contract important.
+- Route-level validation coverage in `tests/test_worlds_endpoints.py`, `tests/test_maps_endpoints.py`, `tests/test_rules_and_segments.py`, and `tests/test_tts_endpoints.py`.
+- Frontend auth/session storage and account refresh behavior in `aidm_frontend/src/useRuntimeSettings.ts`, including local/session storage, HTTP-only cookie transport handling, logout cleanup, workspace role refresh, and stale admin capability clearing.
+- Frontend button/form accessibility scan targets in `aidm_frontend/src/**/*.tsx`, with special attention to forms and untyped buttons. No small isolated button-type patch was selected because the shared backend validation crash risk was clearer and easier to verify.
+- Direct session snapshot persistence via `rg "\.state_snapshot\s*=" aidm_server tests`, confirming the same ownership-classification work remains open in runtime/service paths.
+- Local ignored artifacts such as `.DS_Store` and `__pycache__`. They are ignored and not tracked, so this run did not delete local runtime/test artifacts.
+- Developer workflow targets in `Makefile`, `scripts/scan_secrets.py`, `scripts/deployment_readiness_check.py`, and frontend `package.json`.
+
+## Small Safe Fix Made
+
+### Reject non-object JSON bodies in the shared request parser
+
+Affected files:
+- `aidm_server/validation.py`
+- `tests/test_worlds_endpoints.py`
+- `improvements_suggestions.md`
+
+Problem:
+`parse_json_body` was typed and used as `dict | None`, but it returned any valid JSON value from Flask. Several route handlers immediately call `.get(...)` after checking only `payload is None`. A request such as `POST /api/worlds` with a JSON array could therefore reach route code as a list and raise an attribute error instead of returning a normal 400 validation response.
+
+Change:
+- Updated `parse_json_body` to return the parsed payload only when it is a JSON object.
+- Non-JSON, malformed JSON, arrays, scalars, and `null` now all return `None` through this helper.
+- Added a route-level regression in `tests/test_worlds_endpoints.py` proving a JSON array body receives a 400 `validation_error` instead of crashing.
+
+Rationale:
+This is a narrow contract-alignment fix. Existing object-body API requests keep the same behavior, and existing endpoint code already treats `None` as invalid/missing body. Optional-body endpoints that use `parse_json_body(request) or {}` now also avoid non-object crashes by falling back to their existing empty-payload behavior.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_worlds_endpoints.py::test_create_world_validates_request_body_and_fields`
+  - Passed: 1 test.
+- `./.venv/bin/python -m pytest tests/test_worlds_endpoints.py tests/test_maps_endpoints.py tests/test_rules_and_segments.py::test_create_segment_validates_request_body_and_fields tests/test_tts_endpoints.py::test_llm_config_rejects_ambiguous_persist_boolean`
+  - Passed: 13 tests.
+- `./.venv/bin/python -m py_compile aidm_server/validation.py tests/test_worlds_endpoints.py`
+  - Passed.
+- `git diff --check -- aidm_server/validation.py tests/test_worlds_endpoints.py improvements_suggestions.md`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py aidm_server/validation.py tests/test_worlds_endpoints.py improvements_suggestions.md`
+  - Passed: no likely committed secrets found.
+
+## High-Priority Findings
+
+### High: Direct session snapshot writers still need explicit ownership categories
+
+Current evidence:
+- `aidm_server/services/session_state_mutation.py` provides the central locked, revision-aware mutation path.
+- Direct runtime/service assignments still appear in paths including:
+  - `aidm_server/services/campaign_pack_progress.py`
+  - `aidm_server/services/campaign_pack_storage.py`
+  - `aidm_server/services/campaign_pack.py`
+  - `aidm_server/services/session_import.py`
+  - `aidm_server/services/session_lifecycle.py`
+  - `aidm_server/blueprints/sessions.py`
+  - `aidm_server/turn_control.py`
+  - `aidm_server/canon_projection.py`
+  - `aidm_server/game_state/application/applier.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+
+Risk:
+Some direct writes are legitimate initialization, import, cleanup, projection, or server-owned application paths. The remaining risk is that live gameplay mutation, repair, campaign-pack progression, and projection writes still look identical at the persistence boundary, making revision behavior, locking, audit visibility, and conflict handling harder to prove.
+
+Recommended next step:
+Build a checked writer inventory with one row per direct assignment and classify each writer as initialization, import, cleanup, projection, live gameplay mutation, or repair. Then migrate one clearly live mutation or repair path at a time through `mutate_session_state` or a named server-internal equivalent.
+
+### Medium-High: Hosted account/session storage still needs browser-flow proof
+
+Current evidence:
+- `aidm_frontend/src/useRuntimeSettings.ts` still has local/session storage code for account, workspace, and token-adjacent state while also supporting `http_only_cookie` transport.
+- Tests cover remembered account refresh, role downgrade refresh, logout cleanup, and some token migration behavior.
+- `scripts/deployment_readiness_check.py` expects `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false` for cookie-only hosted browser auth.
+
+Risk:
+Local/private operator mode is useful, but hosted beta still needs real browser evidence that browser-readable account tokens are disabled, logout clears account/capability state, workspace switching refreshes role state, and stale admin capability UI cannot persist after a downgrade.
+
+Recommended next step:
+Add or run a hosted-mode browser regression around login, `/api/accounts/session`, `/api/accounts/me`, logout, workspace switch, and stale `isWorkspaceAdmin` display. Keep local unauthenticated operator mode separate from hosted beta expectations.
+
+### Medium-High: Deployment-readiness checks still need live beta/staging evidence
+
+Current evidence:
+- `scripts/deployment_readiness_check.py` validates production env choices, CORS, secure cookie settings, bearer-token exceptions, metrics, `/api/health`, required security headers, and optional Socket.IO staging proof.
+- `Makefile` exposes `deployment-readiness`.
+- This automation run did not have a real beta/staging URL, env file, or auth token.
+
+Risk:
+Local code checks cannot prove hosted cookie flags, CORS, security headers, metrics exposure, Socket.IO worker behavior, or provider configuration in the actual target.
+
+Recommended next step:
+Run `make deployment-readiness DEPLOYMENT_READINESS_ARGS="--env-file <target-env> --target-url <target-url> --auth-token <token>"` against the actual beta target and save the result in `docs/release_checklist.md` or `docs/beta_runbook.md`.
+
+### Medium: Player resolver preview should still move to an explicit player DTO
+
+Current evidence:
+- Prior work removed resolver `debug` from non-`debug_read` responses.
+- The shared `CreatureResolutionResult` contract still has optional operator/debug fields, and there is not yet a dedicated player-facing resolver response type.
+
+Risk:
+The obvious debug leakage is closed, but a later operator-only resolver field could be added to the shared result and become player-visible unless the player preview response is allowlisted by design.
+
+Recommended next step:
+Define a dedicated player preview DTO or reusable allowlist sanitizer. Add a regression that compares player/admin resolver payload keys and fails if debug rankings, model names, normalized request metadata, or hidden candidate identifiers reappear in player responses.
+
+## Larger Suggested Improvements
+
+- Add a direct `parse_json_body` unit test file covering object, non-JSON, array, scalar, malformed JSON, and `null` bodies so the shared helper contract is checked independently of any one route.
+- Consider using a shared `validation_error` message for non-object JSON bodies, such as "Expected JSON object request body.", if the API should distinguish malformed JSON from wrong JSON shape.
+- Turn the direct `state_snapshot` writer scan into a checked inventory artifact and use it as the migration queue for centralized mutation ownership.
+- Add hosted-mode Playwright coverage for cookie-only account auth, logout cleanup, workspace switching, and stale role/capability clearing.
+- Attach the next real deployment-readiness output to `docs/release_checklist.md` or `docs/beta_runbook.md`.
+- Keep future safe-fix runs away from the broad pre-existing state-pipeline/auth diff until that patch set is committed, reviewed, or explicitly handed to the automation for continuation.
+
+## Recommended Next Run Focus
+
+1. Build the direct `state_snapshot` writer inventory and classify each writer by ownership category.
+2. Add the strict player resolver preview DTO/allowlist on top of the existing debug omission.
+3. Add hosted auth browser proof for logout, workspace switch, and stale admin capability clearing.
+4. Add direct unit coverage for `parse_json_body` helper shapes if no higher-risk safe fix is available.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-17 06:02 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the current dirty checkout, recent audit memory, report history, LLM fallback observability, telemetry surfaces, direct session snapshot writers, hosted auth/session storage, deployment-readiness workflow, frontend accessibility/storage scan targets, and lightweight developer workflow checks. The worktree was already dirty at the start of this run with pre-existing changes in creature route/contract files, state-pipeline files, auth/game-state tests, and this report. Those existing changes were preserved; this run only added a narrow LLM stream-fallback telemetry fix, a focused regression test, and this dated report.
+
+## What Was Inspected
+
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`, which showed the prior run's resolver debug hardening and carried-forward focus on state-snapshot writer ownership, hosted auth proof, and deployment-readiness evidence.
+- Current git status and diff shape to avoid overwriting unrelated or prior-run work:
+  - `aidm_frontend/src/apiContract.generated.ts`
+  - `aidm_server/api_type_contract.py`
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/game_state/extraction/post_dm_outcome_extractor.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+  - `aidm_server/game_state/validation/validator.py`
+  - `tests/test_auth.py`
+  - `tests/test_game_state_pipeline.py`
+  - `improvements_suggestions.md`
+- Top-of-file report history in `improvements_suggestions.md` to avoid repeating the 2026-06-16 creature resolver and bestiary preview fixes.
+- LLM fallback paths in `aidm_server/llm.py`, especially the difference between `query_dm_function`, `query_dm_function_stream`, `query_gpt`, and `query_gpt_stream` failure handling.
+- Telemetry event recording in `aidm_server/telemetry.py`, confirming that local metrics can count events even when external delivery is disabled.
+- Provider regression coverage in `tests/test_llm_provider.py`.
+- Defensive exception handling and outbound request patterns in `aidm_server/*`, `scripts/*`, and `tests/*`.
+- Direct session snapshot persistence via `rg "\.state_snapshot\s*=" aidm_server`, which still found runtime/system writers in campaign-pack progress/storage, session lifecycle/import, sessions routes, turn control, canon projection, applier, and turn pipeline code.
+- Hosted account/session storage in `aidm_frontend/src/useRuntimeSettings.ts` and its tests, including `sessionStorage`, `localStorage`, `accountTokenTransport`, and `http_only_cookie` handling.
+- Deployment-readiness workflow in `scripts/deployment_readiness_check.py`, `Makefile`, `docs/production-readiness.md`, `docs/beta_runbook.md`, and `docs/release_checklist.md`.
+- Frontend accessibility/security scan targets for common risks such as button types, ARIA usage, browser storage, and HTML injection sinks. No small isolated accessibility fix was more compelling than the LLM observability gap in this pass.
+
+## Small Safe Fix Made
+
+### Record telemetry when summary streaming falls back after provider failure
+
+Affected files:
+- `aidm_server/llm.py`
+- `tests/test_llm_provider.py`
+- `improvements_suggestions.md`
+
+Problem:
+`query_gpt_stream` already returned the same safe fallback message when a provider stream failed, but it swallowed the exception silently. Neighboring LLM paths already log warnings and emit telemetry events on provider failures. The silent path made summary-stream outages harder to diagnose from local metrics, beta incident panels, or logs.
+
+Change:
+- Added a warning log in `query_gpt_stream` when `provider.stream(...)` raises.
+- Added `telemetry_event('llm.query_gpt_stream.failed', payload={'error': ...}, severity='warning')`.
+- Preserved the exact fallback response text: `Session summary is temporarily unavailable due to AI provider unavailability.`
+- Added `tests/test_llm_provider.py::test_query_gpt_stream_records_telemetry_on_provider_failure`, which proves the fallback still returns and the warning telemetry is emitted.
+
+Rationale:
+This is a narrow observability fix on an existing exception path. It does not alter provider selection, prompt construction, streaming success behavior, user-visible fallback copy, persistence, auth, state mutation, or frontend behavior.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_llm_provider.py::test_query_gpt_stream_records_telemetry_on_provider_failure`
+  - Passed: 1 test.
+
+## High-Priority Findings
+
+### High: Direct session snapshot writers still need explicit ownership categories
+
+Current evidence:
+- `aidm_server/services/session_state_mutation.py` provides a central mutation helper.
+- Fresh scan still found direct instance writes such as:
+  - `aidm_server/services/campaign_pack_progress.py`
+  - `aidm_server/services/campaign_pack_storage.py`
+  - `aidm_server/services/campaign_pack.py`
+  - `aidm_server/services/session_import.py`
+  - `aidm_server/services/session_lifecycle.py`
+  - `aidm_server/blueprints/sessions.py`
+  - `aidm_server/turn_control.py`
+  - `aidm_server/canon_projection.py`
+  - `aidm_server/game_state/application/applier.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+
+Risk:
+Some direct writes are legitimate initialization, import, cleanup, projection, or server-owned application paths. The remaining risk is that live gameplay mutation, repair, campaign-pack progression, and projection writes still look identical at the persistence boundary, making lock ordering, revision behavior, audit visibility, and conflict handling harder to prove.
+
+Recommended next step:
+Create a small writer inventory with one row per direct assignment and classify each writer as initialization, import, cleanup, projection, live gameplay mutation, or repair. Then migrate one clearly live mutation or repair path at a time through `mutate_session_state` or a named server-internal equivalent.
+
+### Medium-High: Hosted account/session storage still needs browser-flow proof
+
+Current evidence:
+- `aidm_frontend/src/useRuntimeSettings.ts` still reads and writes account/workspace data through `sessionStorage` and `localStorage`.
+- It also supports `http_only_cookie` transport, and tests cover some token migration/session behavior.
+- `scripts/deployment_readiness_check.py` expects `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false` for cookie-only hosted browser auth.
+
+Risk:
+The local/private operator flow is useful, but hosted beta still needs real browser evidence that browser-readable account tokens are disabled, logout clears account/capability state, workspace switching refreshes role state, and stale admin capability UI cannot persist after a role downgrade.
+
+Recommended next step:
+Add or run a hosted-mode browser regression around login, `/api/accounts/session`, logout, workspace switch, and stale `isWorkspaceAdmin` display. Keep local unauthenticated operator mode separate from hosted beta expectations.
+
+### Medium-High: Deployment-readiness checks need live beta/staging evidence
+
+Current evidence:
+- `scripts/deployment_readiness_check.py` validates production env choices, CORS, secure cookie settings, bearer-token exceptions, metrics, `/api/health`, required security headers, and optional Socket.IO staging proof.
+- `Makefile` exposes `deployment-readiness`.
+- Docs and release checklist point to `--target-url` and `--auth-token`, but this automation run did not have a real beta/staging URL, env file, or token.
+
+Risk:
+Local code checks cannot prove hosted cookie flags, CORS, security headers, metrics exposure, Socket.IO worker behavior, or provider configuration in the actual target.
+
+Recommended next step:
+Run `make deployment-readiness DEPLOYMENT_READINESS_ARGS="--env-file <target-env> --target-url <target-url> --auth-token <token>"` against the actual beta target and save the result in the release checklist or beta runbook.
+
+### Medium: Player resolver preview is improved, but an explicit player DTO is still safer
+
+Current evidence:
+- The prior 2026-06-16 run removed resolver `debug` from non-`debug_read` responses.
+- The shared `CreatureResolutionResult` contract now has optional `debug`, but there is still not a dedicated player-facing resolver result type.
+
+Risk:
+The obvious debug leakage is closed, but a later operator-only resolver field could be added to the shared result and become player-visible unless the player preview response is allowlisted by design.
+
+Recommended next step:
+Define a dedicated player preview DTO or reusable allowlist sanitizer. Add a regression that directly compares player/admin resolver payload keys and fails if debug rankings, model names, normalized request metadata, or hidden candidate identifiers reappear in player responses.
+
+## Larger Suggested Improvements
+
+- Add a `make llm-check` or include a focused provider-fallback subset in `make dev-check` so streaming fallback telemetry regressions are easier to catch.
+- Turn the direct `state_snapshot` writer scan into a checked inventory artifact, then use it as the migration queue for centralized mutation ownership.
+- Add hosted-mode Playwright coverage for cookie-only account auth, logout cleanup, workspace switching, and stale role/capability clearing.
+- Attach the next real deployment-readiness output to `docs/release_checklist.md` or `docs/beta_runbook.md` so beta readiness is based on target evidence rather than local intent.
+- Keep small audit fixes away from the broad pre-existing state-pipeline/auth diff until that patch set is either committed, reviewed, or explicitly handed to the automation for continuation.
+
+## Recommended Next Run Focus
+
+1. Build the direct `state_snapshot` writer inventory and classify each writer by ownership category.
+2. Add the strict player resolver preview DTO/allowlist on top of the existing debug omission.
+3. Add hosted auth browser proof for logout, workspace switch, and stale admin capability clearing.
+4. Run deployment-readiness against the actual beta/staging target when URL, env file, and auth token are available.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-16 16:03 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the current dirty checkout, creature resolver preview security, API type contract consistency, auth/capability regression coverage, session-state mutation boundaries, hosted auth/storage readiness, deployment-readiness workflow, frontend TypeScript health, and developer workflow checks. The worktree was already dirty at the start of this run with existing changes in `aidm_server/blueprints/creatures.py`, state-pipeline files, auth/game-state tests, and this report. Those existing changes were preserved; this run only added a narrow resolver response hardening, matching contract/test updates, this dated report, and automation memory.
+
+## What Was Inspected
+
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`, which showed the prior run's bestiary save parsing fix and recommended focus on resolver preview sanitization, direct state writers, and hosted auth readiness.
+- Current git status and diff shape to avoid overwriting unrelated or prior-run work:
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/game_state/extraction/post_dm_outcome_extractor.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+  - `aidm_server/game_state/validation/validator.py`
+  - `tests/test_auth.py`
+  - `tests/test_game_state_pipeline.py`
+  - `improvements_suggestions.md`
+- Creature resolver API behavior in `aidm_server/blueprints/creatures.py` and resolver internals in `aidm_server/creatures/resolver.py`, especially the `debug.request`, `debug.rankings`, and `debug.generatedModel` fields returned by `/api/creatures/resolve`.
+- Capability policy in `aidm_server/capabilities.py` and workspace/account request helpers in `aidm_server/workspace_access.py` to reuse the existing `debug_read` capability boundary.
+- Auth/capability regression coverage in `tests/test_auth.py`, including player preview requests and admin save-capable resolver requests.
+- Backend-owned API contract generation:
+  - `aidm_server/api_type_contract.py`
+  - `scripts/generate_api_types.py`
+  - `aidm_frontend/src/apiContract.generated.ts`
+- Direct `Session.state_snapshot` writers and central mutation-service usage across `aidm_server/services/*`, `aidm_server/blueprints/*`, `aidm_server/canon_projection.py`, `aidm_server/turn_control.py`, and `aidm_server/game_state/*`.
+- Runtime account/session persistence in `aidm_frontend/src/useRuntimeSettings.ts`, including `sessionStorage`, `localStorage`, legacy cookie fallback, and hosted HTTP-only cookie transport expectations.
+- Hosted readiness checks in `scripts/deployment_readiness_check.py` and the `Makefile` `deployment-readiness` target.
+- Lightweight developer workflow health through generated-type, Python compile, whitespace, secret scan, and frontend TypeScript checks.
+
+## Small Safe Fix Made
+
+### Strip resolver debug internals from non-debug users
+
+Affected files:
+- `aidm_server/blueprints/creatures.py`
+- `aidm_server/api_type_contract.py`
+- `aidm_frontend/src/apiContract.generated.ts`
+- `tests/test_auth.py`
+
+Problem:
+`/api/creatures/resolve` allowed non-saving player previews, but the resolver returned the same debug-rich payload to every caller. The `debug` object includes normalized request details, ranking buckets, candidate creature IDs, scores, and generated model metadata. That information is useful for operators but too revealing for normal player previews.
+
+Change:
+- Added `_creature_resolution_response(...)` at the route boundary.
+- Kept full resolver results for callers with `debug_read`, which includes workspace admins and local unauthenticated operator mode.
+- Removed the `debug` field from non-`debug_read` responses without changing resolver selection, generated creature shape, save behavior, persistence, or normal admin debugging.
+- Made `CreatureResolutionResult.debug` optional in the backend API type contract and regenerated `aidm_frontend/src/apiContract.generated.ts`.
+- Extended `tests/test_auth.py::test_bestiary_authoring_endpoints_require_workspace_admin_account` to prove a player preview with `saveGenerated: "off"` succeeds but omits `debug`, while the corresponding admin resolver call still includes debug rankings.
+
+Rationale:
+This is a small route-boundary hardening fix. It reduces player-visible implementation leakage while preserving the operator/debug workflow and the local unauthenticated operator convention already used in the backend capability model.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_auth.py::test_bestiary_authoring_endpoints_require_workspace_admin_account`
+  - Passed: 1 test.
+- `./.venv/bin/python -m pytest tests/test_auth.py`
+  - Passed: 25 tests.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `./.venv/bin/python -m py_compile aidm_server/blueprints/creatures.py aidm_server/api_type_contract.py tests/test_auth.py scripts/generate_api_types.py`
+  - Passed.
+- `git diff --check -- aidm_server/blueprints/creatures.py aidm_server/api_type_contract.py aidm_frontend/src/apiContract.generated.ts tests/test_auth.py improvements_suggestions.md`
+  - Passed after this report was prepended.
+- `./.venv/bin/python scripts/scan_secrets.py aidm_server/blueprints/creatures.py aidm_server/api_type_contract.py aidm_frontend/src/apiContract.generated.ts tests/test_auth.py improvements_suggestions.md`
+  - Passed: no likely committed secrets found.
+- `npm --prefix aidm_frontend run typecheck`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Direct session snapshot writers still need explicit ownership categories
+
+Current evidence:
+- `aidm_server/services/session_state_mutation.py` provides locked, revision-aware mutation with audit stamping.
+- Direct `Session.state_snapshot` assignments still exist in runtime or system paths such as:
+  - `aidm_server/services/campaign_pack_progress.py`
+  - `aidm_server/services/campaign_pack.py`
+  - `aidm_server/services/campaign_pack_storage.py`
+  - `aidm_server/services/session_import.py`
+  - `aidm_server/services/session_lifecycle.py`
+  - `aidm_server/blueprints/sessions.py`
+  - `aidm_server/canon_projection.py`
+  - `aidm_server/turn_control.py`
+  - `aidm_server/game_state/application/applier.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+
+Risk:
+Some direct writes are legitimate initialization, import, cleanup, projection, or system-owned paths. The risk is that live mutation, repair, and progression writes still share the same raw assignment pattern, making it difficult to prove lock ordering, state revision behavior, audit visibility, and conflict handling.
+
+Recommended next step:
+Create a small inventory document or code comment table classifying each writer as initialization, import, cleanup, projection, live gameplay mutation, or repair. Migrate one live gameplay or repair path at a time through `mutate_session_state` or a named server-internal equivalent.
+
+### Medium-High: Player preview DTO is improved but still not fully explicit
+
+Current evidence:
+- This run removes `debug` from non-`debug_read` resolver responses.
+- Player preview responses still return the selected `creature`, `source`, `resolutionMethod`, `matchScore`, `generated`, `savedToBestiary`, and `notes`.
+- `aidm_server/api_type_contract.py` now models `debug` as optional, but there is not yet a dedicated `PlayerCreatureResolutionResult` type.
+
+Risk:
+Removing `debug` closes the obvious internal leakage, but a strict player-facing DTO would make future resolver fields safer by default. Without that split, a later operator-only field could be added to the general result and become player-visible.
+
+Recommended next step:
+Define a dedicated player preview DTO or a reusable response sanitizer with an allowlist of fields. Add a regression that fails if `debug`, rankings, generated model names, request normalization, or hidden candidate metadata reappear in player preview responses.
+
+### Medium-High: Hosted beta readiness still needs live target proof
+
+Current evidence:
+- `scripts/deployment_readiness_check.py` validates production environment settings, cookie auth, CORS, security headers, provider mode, metrics, and optional live target endpoints.
+- This run inspected the readiness script but did not have a beta/staging URL, production env file, or auth token to run live readiness.
+
+Risk:
+Local tests cannot prove hosted cookie flags, CSRF/CORS behavior, security headers, metrics exposure, Socket.IO worker behavior, or provider configuration in the actual beta target.
+
+Recommended next step:
+Run `make deployment-readiness DEPLOYMENT_READINESS_ARGS="--target-url <beta-url> --auth-token <token> ..."` with real beta/staging inputs and attach the output to `docs/beta_runbook.md` or the release checklist.
+
+### Medium: Hosted-mode account storage needs browser-flow proof
+
+Current evidence:
+- `aidm_frontend/src/useRuntimeSettings.ts` migrates legacy account tokens out of `localStorage`, supports session storage, records account token transport, and handles HTTP-only cookie transport.
+- The frontend still stores account snapshots in both `sessionStorage` and `localStorage`, and local/browser-readable cookie fallback remains available for non-hosted flows.
+- `scripts/deployment_readiness_check.py` expects `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false` for cookie-only hosted browser auth.
+
+Risk:
+The local operator flow is useful, but hosted beta still needs end-to-end evidence that browser-readable bearer tokens are disabled, logout clears account/capability state, workspace switching refreshes role state, and stale admin capability display cannot survive a role downgrade.
+
+Recommended next step:
+Add or run a hosted-mode browser regression around login, `/api/accounts/session`, logout, workspace switch, and stale `isWorkspaceAdmin` display. Keep local unauthenticated operator mode separate from hosted beta expectations.
+
+## Larger Suggested Improvements
+
+- Convert the direct `state_snapshot` writer inventory into a small migration queue with one owner, one expected mutation category, and one test target per writer.
+- Add a resolver response contract test that compares player and admin payload keys directly and documents which fields are intentionally shared.
+- Add a CI or `make dev-check` gate that runs `scripts/generate_api_types.py --check` whenever `aidm_server/api_type_contract.py` changes.
+- Add a short cleanup/documented command for ignored `.DS_Store` and `__pycache__` artifacts visible in local scans; this run did not remove them because they are unrelated local artifacts.
+- Keep security-sensitive route changes at capability boundaries first, with frontend visibility as a mirror of backend permissions rather than the source of truth.
+
+## Recommended Next Run Focus
+
+1. Inventory direct `Session.state_snapshot` writers and migrate one clearly live mutation path through a central mutation helper.
+2. Add a strict allowlist-based player creature resolver DTO, building on the `debug` omission from this run.
+3. Add hosted-mode auth/session storage proof around logout, workspace switch, and stale capability state.
+4. Run deployment-readiness against the actual beta target once target URL and token are available.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-16 06:05 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the current dirty checkout, creature/bestiary route request parsing, auth/capability tests, session-state mutation boundaries, creature resolver response shape, frontend runtime account/session persistence, deployment-readiness checks, local ignored artifacts, and lightweight developer workflow gates. The worktree was already dirty at the start of this run with existing changes in `aidm_server/blueprints/creatures.py`, state-pipeline files, auth/game-state tests, and this report. Those existing changes were preserved; this run only added a narrow compatible bestiary route parsing fix, one regression test, this dated report, and automation memory.
+
+## What Was Inspected
+
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`, which showed the prior run's creature route preflight work and recommended next focus.
+- Current git status and diff shape to avoid overwriting unrelated or prior-run work:
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/game_state/extraction/post_dm_outcome_extractor.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+  - `aidm_server/game_state/validation/validator.py`
+  - `tests/test_auth.py`
+  - `tests/test_game_state_pipeline.py`
+  - `improvements_suggestions.md`
+- Creature and bestiary route behavior in `aidm_server/blueprints/creatures.py`, especially `saveGenerated` and `save` request flags.
+- Auth/capability regression coverage in `tests/test_auth.py`.
+- Creature resolver DTO/debug behavior in `aidm_server/creatures/resolver.py` and the API type contract reference in `aidm_server/api_type_contract.py`.
+- Session-state mutation and direct snapshot persistence boundaries:
+  - `aidm_server/services/session_state_mutation.py`
+  - `aidm_server/blueprints/players.py`
+  - `aidm_server/services/campaign_pack_progress.py`
+  - `aidm_server/services/campaign_pack.py`
+  - `aidm_server/turn_control.py`
+  - `aidm_server/canon_projection.py`
+  - `aidm_server/blueprints/sessions.py`
+- Frontend runtime account/session storage in `aidm_frontend/src/useRuntimeSettings.ts` and related tests.
+- Hosted deployment-readiness checks in `scripts/deployment_readiness_check.py`.
+- Local ignored artifacts via `.gitignore` and `find . -name .DS_Store`.
+
+## Small Safe Fix Made
+
+### Normalize `save: "off"` for campaign bestiary pack previews
+
+Affected files:
+- `aidm_server/blueprints/creatures.py`
+- `tests/test_auth.py`
+
+Problem:
+`/api/campaigns/<campaign_id>/bestiary/generate-pack` already had a non-persisting preview mode through `save: false`, but the route only recognized the literal boolean `False`. Sibling creature routes now use `coerce_bool`, so request values such as `"off"`, `"false"`, or `"0"` could behave inconsistently across bestiary tooling.
+
+Change:
+- Parsed the `save` flag with the existing `coerce_bool(..., True)` helper before deciding whether to persist generated pack creatures.
+- Preserved default save-enabled behavior when the field is omitted or malformed.
+- Added `tests/test_auth.py::test_generate_pack_string_save_off_generates_without_persisting`, proving an admin request with `save: "off"` returns generated creatures, writes no `BestiaryEntry` rows, and records an operator audit with `savedCount: 0`.
+
+Rationale:
+This is a route-boundary consistency fix. It does not alter creature generation, persistence schema, authorization policy, or normal save-enabled behavior.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_auth.py::test_generate_pack_string_save_off_generates_without_persisting`
+  - Passed: 1 test.
+- `./.venv/bin/python -m pytest tests/test_auth.py`
+  - Passed: 25 tests.
+- `./.venv/bin/python -m py_compile aidm_server/blueprints/creatures.py tests/test_auth.py`
+  - Passed.
+- `git diff --check -- aidm_server/blueprints/creatures.py tests/test_auth.py improvements_suggestions.md`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py aidm_server/blueprints/creatures.py tests/test_auth.py improvements_suggestions.md`
+  - Passed: no likely committed secrets found.
+
+## High-Priority Findings
+
+### High: Player-safe creature preview responses still need a sanitized DTO
+
+Current evidence:
+- `aidm_server/blueprints/creatures.py` allows non-saving player previews for `/api/creatures/resolve`.
+- `aidm_server/creatures/resolver.py` returns `debug` data with normalized request details, ranking IDs, group internals, sources, and match scores.
+- `aidm_server/api_type_contract.py` still models `CreatureResolutionResult.debug` as part of the response shape.
+
+Risk:
+Preview access can expose encounter-selection internals or hidden authored creature identifiers. The current capability gates protect save-capable routes, but they do not define a player-safe response contract for resolver previews.
+
+Recommended next step:
+Split resolver responses into a player-safe preview DTO and an operator/debug DTO. Add non-admin tests proving preview responses omit `debug.rankings`, hidden catalog identifiers, model/generation details, and other operator-only diagnostics.
+
+### High: Direct session snapshot writers remain outside the centralized mutation service
+
+Current evidence:
+- `aidm_server/services/session_state_mutation.py` now provides locked, revision-aware mutation with audit stamping.
+- Several legitimate flows still assign `Session.state_snapshot` directly, including campaign-pack progress/import, turn control, canon projection, session metadata cleanup, and some player/session helpers.
+
+Risk:
+Some direct writes are system-owned and may be valid, but the mixed write model makes it harder to prove revision consistency, conflict behavior, audit coverage, and ordering when live gameplay, campaign-pack progression, and repair jobs touch the same session.
+
+Recommended next step:
+Create an explicit inventory of direct `state_snapshot` writers, classify them as initialization/system repair/live mutation, and migrate live mutation paths through `mutate_session_state` or a server-internal equivalent that preserves lock, revision, and audit semantics.
+
+### Medium-High: Hosted beta readiness still needs live target evidence
+
+Current evidence:
+- `scripts/deployment_readiness_check.py` validates production env requirements, auth, CORS, security headers, metrics, provider mode, and optional live target endpoints.
+- This run did not have a beta/staging target URL or production env file to verify.
+
+Risk:
+Local tests cannot prove hosted cookie behavior, CSRF, CORS, security headers, metrics exposure, Socket.IO worker behavior, or provider configuration in the actual beta environment.
+
+Recommended next step:
+Run `make deployment-readiness` or `scripts/deployment_readiness_check.py --target-url <beta-url> --auth-token <token>` with real beta/staging inputs and attach the output to `docs/beta_runbook.md` or the release checklist.
+
+### Medium: Runtime account storage still needs hosted-mode hardening proof
+
+Current evidence:
+- `aidm_frontend/src/useRuntimeSettings.ts` migrates legacy account tokens out of `localStorage`, supports session storage, and records an account-token transport mode.
+- The file still keeps account snapshots in both `sessionStorage` and `localStorage`, and local/browser-readable cookie fallback remains available for non-hosted flows.
+- The deployment-readiness script expects hosted HTTP-only cookie auth unless an explicit exception is supplied.
+
+Risk:
+The local/private operator flow is useful, but hosted beta needs evidence that browser-readable bearer tokens are disabled, stale admin capability display is cleared on logout/workspace switch, and account snapshots cannot keep privileged UI visible after role changes.
+
+Recommended next step:
+Add a hosted-mode regression or smoke path that proves `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false`, HTTP-only cookie transport is active, logout clears local account/capability state, and workspace switching refreshes `isWorkspaceAdmin`.
+
+## Larger Suggested Improvements
+
+- Define a route capability matrix for bestiary, custom races, campaign pack tools, imports, direct combat controls, session repairs, beta/debug endpoints, and player-visible previews.
+- Add resolver response contract tests for player previews and operator debug calls.
+- Convert direct session-state writes into named mutation categories with tests for revision increments, conflict responses, and audit records.
+- Add a small artifact-cleanup task or documented command for ignored `.DS_Store` files; they are ignored and untracked, so this run did not remove them.
+- Keep future state-pipeline work server-authoritative for mechanical cross-player damage and avoid allowing narration-only packets to bypass actor ownership.
+
+## Recommended Next Run Focus
+
+1. Sanitize the creature resolver preview DTO for non-operator users.
+2. Inventory direct `Session.state_snapshot` writers and migrate one small live-mutation path through the mutation service.
+3. Add hosted-mode auth/session storage proof around logout, workspace switch, and stale capability state.
+4. Run deployment-readiness against the actual beta target once a target URL and token are available.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-15 16:03 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: follow-up safe-improvement pass across creature/bestiary route authorization, save-preview request parsing, current auth regression coverage, prior 2026-06-15 audit findings, state-pipeline diff boundaries, frontend session/capability persistence, deployment-readiness hooks, and lightweight developer workflow checks. The worktree was already dirty at the start of this run with existing changes in `aidm_server/blueprints/creatures.py`, state-pipeline files, tests, and this report; those changes were preserved and only narrow compatible edits were added.
+
+## What Was Inspected
+
+- Recurring automation context and memory expectations. The automation memory file was missing at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`, so this run used the current report history and repository evidence rather than relying on a prior automation note.
+- Current uncommitted diffs to avoid overwriting unrelated work:
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/game_state/extraction/post_dm_outcome_extractor.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+  - `aidm_server/game_state/validation/validator.py`
+  - `tests/test_auth.py`
+  - `tests/test_game_state_pipeline.py`
+  - `improvements_suggestions.md`
+- Creature route capability and save behavior:
+  - `/api/creatures/resolve`
+  - `/api/creatures/evolve`
+  - `/api/sessions/<session_id>/combat/plan-enemy-intents`
+  - bestiary authoring helpers in `aidm_server/blueprints/creatures.py`
+- Auth and capability regression coverage in `tests/test_auth.py`, especially the combat-operator and bestiary-authoring tests added by the prior in-progress audit work.
+- Remaining state-pipeline ownership changes at a diff level, to ensure this run did not collide with the larger cross-player damage work already present.
+- Frontend session/capability persistence and accessibility surfaces:
+  - `aidm_frontend/src/useRuntimeSettings.ts`
+  - `aidm_frontend/src/BestiaryDebugPanel.tsx`
+- Developer workflow checks and release gates:
+  - `Makefile`
+  - `scripts/scan_secrets.py`
+  - `scripts/deployment_readiness_check.py`
+  - `pytest.ini`
+
+## Small Safe Fixes Made
+
+### Preflight save-capable creature evolution before evolution work
+
+Affected files:
+- `aidm_server/blueprints/creatures.py`
+- `tests/test_auth.py`
+
+Problem:
+`/api/creatures/evolve` validated `baseCreature`, then performed `evolve_creature(...)`, and only afterward checked whether a campaign save required `dm_authoring`. Non-admin save attempts were rejected before persistence, but they still consumed evolution work and could expose avoidable future cost if evolution becomes model-backed or heavier.
+
+Change:
+- Moved the existing `dm_authoring` preflight and campaign lookup ahead of `evolve_creature(...)` for save-enabled campaign requests.
+- Preserved non-saving preview behavior by still allowing `saveGenerated: false` style requests to evolve without saving.
+- Added `tests/test_auth.py::test_evolve_save_forbidden_preflights_before_evolution_work`, which monkeypatches `evolve_creature` to fail if it runs for a forbidden save request.
+
+Rationale:
+This keeps the same route policy while reducing resource work for forbidden requests. It is a route-boundary change only and does not alter the evolution algorithm or persistence format.
+
+### Align `saveGenerated` preview parsing at the route boundary
+
+Affected files:
+- `aidm_server/blueprints/creatures.py`
+- `tests/test_auth.py`
+
+Problem:
+The route preflights only treated the literal boolean `false` as a non-saving preview, while the creature resolver already accepts string-style booleans such as `"off"` and `"false"`. A player preview request using those existing API conventions could be rejected as if it intended to save.
+
+Change:
+- Added a small `_save_generated_enabled(...)` helper using the existing `coerce_bool` parser.
+- Reused it in both `/api/creatures/resolve` and `/api/creatures/evolve`.
+- Updated the bestiary auth regression to prove player preview requests with `saveGenerated: "off"` still succeed without saving.
+
+Rationale:
+This makes route authorization match the existing resolver request semantics and improves UX without broadening save-capable access.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_auth.py::test_evolve_save_forbidden_preflights_before_evolution_work`
+  - Passed: 1 test.
+- `./.venv/bin/python -m pytest tests/test_auth.py`
+  - Passed: 24 tests.
+- `./.venv/bin/python -m py_compile aidm_server/blueprints/creatures.py tests/test_auth.py`
+  - Passed.
+- `git diff --check -- aidm_server/blueprints/creatures.py tests/test_auth.py improvements_suggestions.md`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py aidm_server/blueprints/creatures.py tests/test_auth.py improvements_suggestions.md`
+  - Passed: no likely committed secrets found.
+
+## High-Priority Findings Refreshed This Run
+
+### High: Player-safe creature previews still need a sanitized response shape
+
+Current evidence:
+- `/api/creatures/resolve` now gates save-enabled campaign requests, but non-saving player previews remain allowed.
+- `aidm_server/creatures/resolver.py` still returns a `debug` object with ranking and request-normalization details.
+
+Risk:
+Preview access may leak encounter-selection internals or authored campaign/region creature identifiers. That may be acceptable for DM tools but should not be assumed player-safe without a response contract.
+
+Recommended next step:
+Split resolver output into a player-safe preview DTO and an operator/debug DTO. Add non-admin tests asserting previews omit `debug.rankings`, hidden catalog identifiers, and generated model details.
+
+### Medium-High: Mutable creative-content policy is still incomplete
+
+Current evidence:
+- Bestiary save-capable routes now use `dm_authoring`, but custom race generation/create/update/delete policy still appears separate from bestiary authoring.
+
+Risk:
+Without a route capability matrix, it remains unclear which content is player-owned homebrew, shared DM-authored catalog content, or workspace-admin-only content.
+
+Recommended next step:
+Define the route capability matrix before changing behavior. Then add ownership or admin-gate tests for custom races based on the intended product policy.
+
+### Medium-High: Hosted beta readiness still needs target-environment proof
+
+Current evidence:
+- Local auth, CSRF, security-header, Socket.IO, and deployment-readiness checks exist in code and scripts.
+- This run did not exercise the real hosted/staging target.
+
+Risk:
+Local tests cannot prove cookie auth, CSRF, logout cleanup, workspace switching, stale capability display, security headers, metrics, and Socket.IO affinity in the real deployment environment.
+
+Recommended next step:
+Run `make deployment-readiness` or `scripts/deployment_readiness_check.py` against the actual beta target with required staging proof, then attach the output to the beta checklist.
+
+## Larger Suggested Improvements
+
+- Add a route capability matrix for mutable routes, including bestiary, custom races, pack tools, session imports, combat controls, and beta/debug endpoints.
+- Normalize boolean request parsing for remaining save/preview flags such as campaign bestiary pack generation, where the endpoint still uses literal `is not False` semantics.
+- Add player-safe response contract tests for creature resolver previews, bestiary browsing, and custom race surfaces.
+- Add frontend session regression coverage for logout, workspace switching, and stale admin capability display.
+- Keep future state-pipeline changes server-authoritative for cross-player mechanical effects; avoid reintroducing model/narration ownership bypasses.
+
+## Recommended Next Run Focus
+
+1. Sanitize or split creature resolver debug fields for non-operator previews.
+2. Decide custom race ownership and capability policy, then encode it in tests.
+3. Normalize the remaining `save`/`saveGenerated` request parsing flags.
+4. Run hosted deployment-readiness checks and record the exact target evidence.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-15 06:04 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: focused safe-improvement pass across the current AIDM backend capability surface, creature/combat helper APIs, state-pipeline actor ownership for cross-player HP changes, prior dated audit recommendations, frontend capability/session storage, direct session-state write patterns, test coverage, and lightweight developer workflow checks. The worktree was clean at the start of this run. The top-of-file 2026-06-15 beta-hardening update showed that several stale findings from the 2026-06-14 automation memory had already been implemented, so this run verified the current code instead of reapplying older recommendations. A 07:33 MDT same-thread follow-up also fixed the enemy-damage case where Alice can act while a backend-resolved enemy attack damages Bob.
+
+## What Was Inspected
+
+- Automation memory for this recurring audit, especially the last run's combat/bestiary authorization findings and recommended next-run focus.
+- Current report history in this file, including the 2026-06-15 beta-hardening update and the 2026-06-14 route-capability audit.
+- Backend route capability and role checks:
+  - `aidm_server/capabilities.py`
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/blueprints/system.py`
+  - `aidm_server/blueprints/sessions.py`
+  - `aidm_server/blueprints/campaigns.py`
+  - `aidm_server/blueprints/races.py`
+- Creature resolver/debug behavior:
+  - `aidm_server/creatures/resolver.py`
+  - `aidm_server/creatures/evolution.py`
+  - `aidm_server/creatures/repository.py`
+- Session-state mutation and remaining direct snapshot write evidence:
+  - `aidm_server/services/session_state_mutation.py`
+  - `aidm_server/services/campaign_pack_storage.py`
+  - `aidm_server/services/campaign_pack_progress.py`
+  - `aidm_server/blueprints/players.py`
+- Frontend capability/session persistence and operator UI exposure:
+  - `aidm_frontend/src/useRuntimeSettings.ts`
+  - `aidm_frontend/src/BestiaryDebugPanel.tsx`
+  - `aidm_frontend/src/capabilities.ts`
+  - `aidm_frontend/src/App.test.tsx`
+- Existing regression coverage:
+  - `tests/test_auth.py`
+  - `tests/test_game_state_pipeline.py`
+  - `tests/test_creatures_combat.py`
+  - `tests/test_deployment_readiness_check.py`
+  - `tests/test_races_endpoints.py`
+- State-pipeline actor ownership and enemy-resolved combat damage:
+  - `aidm_server/game_state/extraction/post_dm_outcome_extractor.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+  - `aidm_server/game_state/validation/validator.py`
+  - `tests/test_game_state_pipeline.py`
+- Developer workflow checks:
+  - `Makefile`
+  - `pytest.ini`
+  - `scripts/scan_secrets.py`
+  - `scripts/deployment_readiness_check.py`
+
+## Small Safe Fixes Made
+
+### Require operator capability for enemy intent planning
+
+Affected files:
+- `aidm_server/blueprints/creatures.py`
+- `tests/test_auth.py`
+
+Problem:
+`/api/sessions/<session_id>/combat/plan-enemy-intents` was still workspace-visible after neighboring combat mutation/debug routes were moved behind operator capability checks. It returns hidden enemy intent planning data and should follow the same DM/operator boundary as combat debug and direct combat-state controls.
+
+Change:
+- Added `_combat_operator_forbidden_response()` to the enemy-intent planning route.
+- Extended `tests/test_auth.py::test_combat_operator_endpoints_require_workspace_admin_account` so player-role accounts get `403` and workspace-admin accounts still get an intent plan.
+
+Rationale:
+This is a narrow route-boundary hardening that reuses the existing helper and preserves local unauthenticated operator mode. It does not change intent planning itself or normal turn-driven combat behavior.
+
+### Require authoring capability for save-capable creature resolution
+
+Affected files:
+- `aidm_server/blueprints/creatures.py`
+- `tests/test_auth.py`
+
+Problem:
+`/api/creatures/resolve` can call the resolver with `campaignId`, and the resolver defaults `saveGenerated` to true. When resolution creates a generated or variant creature, it can save campaign/session bestiary content. That made the route inconsistent with the newly gated bestiary create/generate/evolve-save endpoints.
+
+Change:
+- Added a route preflight: when `campaignId` is present and `saveGenerated` is not explicitly `false`, require the existing `dm_authoring` capability.
+- Preserved non-saving player previews by allowing `saveGenerated: false`.
+- Extended `tests/test_auth.py::test_bestiary_authoring_endpoints_require_workspace_admin_account` to cover player `403`, non-saving player preview success, and admin success.
+
+Rationale:
+This keeps preview-only behavior available while preventing normal player accounts from indirectly persisting DM-authored creature content through the resolver. The change is contained to one route preflight and one auth regression.
+
+### Preserve trusted mechanical damage while blocking narration-authorized cross-player HP changes
+
+Affected files:
+- `aidm_server/game_state/extraction/post_dm_outcome_extractor.py`
+- `aidm_server/game_state/orchestration/turn_pipeline.py`
+- `aidm_server/game_state/validation/validator.py`
+- `tests/test_game_state_pipeline.py`
+
+Problem:
+The post-DM extractor had a narration-confirmation path that could authorize `health.damage` and `combat.participant.update` against another player when the DM text said that target took damage. That closed a live HP drift issue, but it made untrusted helper/model JSON too powerful: Alice's turn could authorize Bob's HP loss solely because narration included "Bob takes 4 damage." Tightening that path also needed to preserve legitimate cross-player damage when the backend has already resolved the mechanics, such as an enemy attack against Bob during Alice's turn, Alice's own trusted player-attack damage against Bob, or a known battlefield hazard damaging Bob.
+
+Change:
+- Removed the narration-confirmed cross-player damage/participant-HP authorization path from the extractor.
+- Limited `authorizedCrossActorChangeIds` ownership bypasses to the narrow safe allowlist already needed for named cross-player heals and combat XP rewards.
+- Added a post-DM bridge that converts only backend-owned `dmContextPacket.combatState.enemyResolvedActions` packets with `hit: true`, positive `damageTotal`, a real enemy participant, and a real player target into canonical `health.damage` changes.
+- Added a generic `trustedDamageEvents` bridge for server-resolved player attacks and environmental hazards. Player-attack events must come from the acting player; hazard events must reference a known battlefield hazard.
+- Validated trusted damage changes separately from helper/narration output, then validated all untrusted changes with the current `expected_actor_id` lock.
+- Added regressions proving narration-confirmed cross-player damage is filtered, while Alice's turn can still apply trusted enemy, player-attack, and hazard damage to Bob exactly once.
+
+Rationale:
+This keeps the ownership boundary intact: the LLM can narrate Bob taking damage, but the state system only mutates Bob when a server-owned mechanical packet says Bob took damage. The canonical `health.damage` path also syncs Bob's player row and combat participant HP without allowing redundant participant rewrites from narration.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_auth.py::test_combat_operator_endpoints_require_workspace_admin_account tests/test_auth.py::test_bestiary_authoring_endpoints_require_workspace_admin_account`
+  - Passed: 2 tests.
+- `./.venv/bin/python -m py_compile aidm_server/blueprints/creatures.py tests/test_auth.py`
+  - Passed.
+- `git diff --check -- aidm_server/blueprints/creatures.py tests/test_auth.py`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py aidm_server/blueprints/creatures.py tests/test_auth.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python -m pytest tests/test_auth.py`
+  - Passed: 23 tests.
+- `./.venv/bin/python -m pytest tests/test_creatures_combat.py::test_creature_deep_api_endpoints_for_pack_evolution_morale_and_debug tests/test_creatures_combat.py::test_combat_apply_state_changes_uses_request_scoped_ids_unless_keyed tests/test_creatures_combat.py::test_combat_apply_state_changes_rejects_stale_session_state_revision`
+  - Passed: 3 tests.
+- `./.venv/bin/python -m pytest tests/test_game_state_pipeline.py::test_post_dm_pipeline_applies_trusted_enemy_damage_to_non_acting_player tests/test_game_state_pipeline.py::test_post_dm_pipeline_applies_trusted_player_attack_damage_to_other_player tests/test_game_state_pipeline.py::test_post_dm_pipeline_applies_trusted_environment_hazard_damage_to_other_player tests/test_game_state_pipeline.py::test_post_dm_helper_filters_narration_confirmed_damage_to_other_player tests/test_game_state_pipeline.py::test_post_dm_helper_filters_narration_confirmed_cross_player_participant_hp_drop`
+  - Passed: 5 tests.
+- `./.venv/bin/python -m pytest tests/test_game_state_pipeline.py`
+  - Passed: 165 tests.
+- `./.venv/bin/python -m pytest tests/test_auth.py`
+  - Passed: 23 tests.
+- `./.venv/bin/python -m py_compile aidm_server/game_state/orchestration/turn_pipeline.py aidm_server/game_state/extraction/post_dm_outcome_extractor.py aidm_server/game_state/validation/validator.py aidm_server/blueprints/creatures.py tests/test_game_state_pipeline.py tests/test_auth.py`
+  - Passed.
+- `git diff --check -- aidm_server/game_state/orchestration/turn_pipeline.py aidm_server/game_state/extraction/post_dm_outcome_extractor.py aidm_server/game_state/validation/validator.py aidm_server/blueprints/creatures.py tests/test_game_state_pipeline.py tests/test_auth.py improvements_suggestions.md`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py aidm_server/blueprints/creatures.py aidm_server/game_state/extraction/post_dm_outcome_extractor.py aidm_server/game_state/orchestration/turn_pipeline.py aidm_server/game_state/validation/validator.py tests/test_auth.py tests/test_game_state_pipeline.py improvements_suggestions.md`
+  - Passed: no likely committed secrets found.
+
+Note: one adjacent pytest selector from older automation memory was stale and no longer matched the current test name. I resolved it to the current `test_combat_apply_state_changes_uses_request_scoped_ids_unless_keyed` selector before recording the successful verification above.
+
+## High-Priority Finding Resolved In The 07:33 MDT Follow-Up
+
+### Resolved: LLM narration alone could authorize cross-player HP damage
+
+Current evidence:
+- `aidm_server/game_state/extraction/post_dm_outcome_extractor.py` no longer emits authorized cross-actor damage IDs based on narration confirmation.
+- `aidm_server/game_state/validation/validator.py` no longer lets `authorizedCrossActorChangeIds` bypass ownership for `health.damage` or `combat.participant.update`.
+- `aidm_server/game_state/orchestration/turn_pipeline.py` now creates cross-player damage only from trusted backend packets: `enemyResolvedActions` or explicit `trustedDamageEvents` for player attacks and environmental hazards.
+
+Residual risk:
+Future combat mechanics that need cross-player effects should use explicit server-generated state changes, not helper/model authorization IDs. The new tests should be extended if saves, resistance, area effects, or multi-target damage move into this path.
+
+## High-Priority Findings Refreshed This Run
+
+### High: Creature resolver still returns debug rankings to non-saving player previews
+
+Current evidence:
+- `aidm_server/blueprints/creatures.py` still allows `/api/creatures/resolve` with `saveGenerated: false` for workspace-visible campaign requests.
+- `aidm_server/creatures/resolver.py` includes `debug` in every result and populates it with normalized request data plus campaign, region, and core ranking IDs/scores.
+
+Risk:
+The save-capable path is now gated, but the preview path can still reveal encounter-selection internals and potentially authored campaign/region creature IDs. That may be acceptable for a DM tool, but it is not clearly a player-safe response contract.
+
+Recommended next step:
+Split resolver responses into a player-safe preview shape and an operator debug shape. Add tests that assert player previews do not include `debug.rankings`, request echoes, generated model names, or hidden authored-catalog identifiers.
+
+### Medium-High: Creature evolve-save authorization happens after evolution work
+
+Current evidence:
+- `aidm_server/blueprints/creatures.py` computes the evolved creature before checking `_bestiary_authoring_forbidden_response()` for campaign saves.
+
+Risk:
+Non-admin save attempts are correctly rejected before persistence, but the server still performs avoidable evolution/balance work before returning `403`. If evolution later becomes model-backed or more expensive, this becomes a resource-control and information-flow issue.
+
+Recommended next step:
+Preflight the authoring capability before `evolve_creature(...)` when a request includes `campaignId` and save is enabled, while preserving `saveGenerated: false` preview behavior.
+
+### Medium-High: Public-beta session posture still needs hosted proof
+
+Current evidence:
+- `aidm_frontend/src/useRuntimeSettings.ts` has improved by moving auth/workspace tokens out of local storage, but it still stores account/workspace metadata in both session and local storage and keeps compatibility migration code for older browser state.
+- The 2026-06-15 beta-hardening update still lists target-environment deployment readiness, hosted metrics, Socket.IO worker model proof, and provider backup/restore rehearsal as remaining infrastructure work.
+
+Risk:
+Local browser persistence may be fine for current table workflows, but hosted beta needs proof that cookie-auth, CSRF, logout cleanup, workspace switching, stale capability display, security headers, metrics, and Socket.IO affinity all behave in the real target environment.
+
+Recommended next step:
+Run the deployment readiness gate against the actual hosted/staging target and add a small frontend session-regression pass around logout, workspace switching, and stale admin capability display.
+
+### Medium: Custom race authoring capability policy is still implicit
+
+Current evidence:
+- `aidm_server/blueprints/races.py` lets workspace-visible users generate, create, update, and delete custom races in the current workspace.
+
+Risk:
+This may be intentional player-authored homebrew, but it is a different policy from campaign bestiary authoring. Without a route capability matrix, it is hard to tell which creative content is player-owned, DM-authored, or workspace-admin-only.
+
+Recommended next step:
+Define the custom-race policy explicitly before changing behavior. If custom races are shared DM-authored catalog content, add role gates and non-admin 403 tests. If they are player-authored content, add ownership tests so one player cannot update/delete another player's draft.
+
+## Larger Suggested Improvements
+
+- Add a route capability matrix that classifies each mutable route as player action, player-owned authoring, DM authoring, runtime control, debug read, workspace admin, or server internal.
+- Introduce a sanitized resolver DTO so debug fields are opt-in and tied to `debug_read`.
+- Move authoring preflights before expensive generation/evolution work where save intent is known up front.
+- Add contract tests for "player-safe preview" responses across creature resolver, custom races, and bestiary browsing.
+- Run `make deployment-readiness` with the real staging/hosted env values and attach the output to the beta checklist.
+
+## Recommended Next Run Focus
+
+1. Preflight `/api/creatures/evolve` authoring checks before evolution work for save-enabled campaign requests.
+2. Add player-safe resolver response tests and strip/split debug fields for non-operator previews.
+3. Decide and test the custom-race ownership/capability policy.
+4. Refresh hosted deployment readiness evidence instead of relying only on local gates.
+
 # AIDM Beta-Hardening Implementation Update - 2026-06-15
 
 Scope: implementation pass for the prior closed-beta hardening recommendations across route authorization, serialized session-state mutation, operator/player UI separation, frontend decomposition, accessibility coverage, observability, deployment readiness, release workflow, and beta feedback loops. Older dated audit entries below are preserved as historical evidence; items listed there as open may now be resolved by this pass.

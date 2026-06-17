@@ -43,6 +43,7 @@ PLAYER_COMBAT_PARTICIPANT_CHANGE_TYPES = {
     'combat.condition.remove',
     'combat.ability.mark_used',
 }
+AUTHORIZED_CROSS_ACTOR_BYPASS_CHANGE_TYPES = {'health.heal', 'xp.add'}
 SCENE_TYPES = {'social', 'exploration', 'travel', 'combat', 'dungeon', 'rest', 'mystery', 'shopping', 'dialogue'}
 SCENE_MOODS = {'calm', 'tense', 'eerie', 'heroic', 'sad', 'mysterious', 'dangerous'}
 COMBAT_STATES = {'none', 'pending', 'active', 'resolved'}
@@ -2202,6 +2203,10 @@ def _state_change_actor_error(
     return None
 
 
+def _authorized_cross_actor_bypass_allowed(change_type: str) -> bool:
+    return change_type in AUTHORIZED_CROSS_ACTOR_BYPASS_CHANGE_TYPES
+
+
 def _combat_start_reopens_resolved_enemy(state: dict[str, Any], combat: dict[str, Any], normalized: dict[str, Any]) -> str | None:
     if normalized.get('allowResolvedEncounterRestart') or normalized.get('allow_resolved_encounter_restart'):
         return None
@@ -2692,7 +2697,11 @@ def validate_state_changes(
             rejected.append(_rejected(change, f"Unsupported state change type '{change_type}'."))
             continue
         actor_error = None
-        if not (change_id and change_id in authorized_cross_actor_ids):
+        if not (
+            change_id
+            and change_id in authorized_cross_actor_ids
+            and _authorized_cross_actor_bypass_allowed(change_type)
+        ):
             actor_error = _state_change_actor_error(state, change, change_type, expected_actor_id)
         if actor_error:
             rejected.append(_rejected(change, actor_error))

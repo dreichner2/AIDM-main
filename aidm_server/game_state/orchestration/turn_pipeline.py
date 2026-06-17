@@ -46,6 +46,14 @@ from aidm_server.turn_events import record_turn_event
 STATE_UPDATE_EVENT = 'state_update'
 MANAGED_STATE_DOMAINS = ['inventory', 'currency', 'health', 'xp', 'spells', 'scene', 'quests', 'locations', 'npcs', 'flags', 'combat']
 SAFE_PRE_DM_IMMEDIATE_CHANGE_TYPES = {'inventory.mark_used', 'inventory.equip', 'inventory.unequip'}
+TRUSTED_DAMAGE_SOURCE_TYPES = {
+    'player_attack': 'trusted_player_attack',
+    'player_resolved_attack': 'trusted_player_attack',
+    'environmental_hazard': 'trusted_environmental_hazard',
+    'environment_hazard': 'trusted_environmental_hazard',
+    'hazard': 'trusted_environmental_hazard',
+    'trap': 'trusted_environmental_hazard',
+}
 CONFIRMATION_DENIAL_PATTERN = re.compile(
     r"\b(?:do not|don't|does not|doesn't|did not|cannot|can't|fail|fails|failed|before you can|instead)\b",
     re.IGNORECASE,
@@ -963,6 +971,241 @@ def _dm_context_packet(
     }
 
 
+def _player_actors_by_id(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    actors: dict[str, dict[str, Any]] = {}
+    for actor in state.get('playerCharacters') or []:
+        if not isinstance(actor, dict):
+            continue
+        actor_id = str(actor.get('id') or '').strip()
+        if actor_id:
+            actors[actor_id] = actor
+    return actors
+
+
+def _trusted_enemy_resolved_damage_changes(
+    *,
+    state: dict[str, Any],
+    dm_context_packet: dict[str, Any],
+    turn_id: int | None,
+    already_applied_changes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    combat_state = dm_context_packet.get('combatState') if isinstance(dm_context_packet.get('combatState'), dict) else {}
+    resolved_actions = combat_state.get('enemyResolvedActions') if isinstance(combat_state.get('enemyResolvedActions'), list) else []
+    if not resolved_actions:
+        return []
+
+    players_by_actor_id = _player_actors_by_id(state)
+    if not players_by_actor_id:
+        return []
+    participants = _combat_participants(state)
+    already_signatures = {
+        signature
+        for change in already_applied_changes
+        if isinstance(change, dict)
+        for signature in [_state_change_signature(change)]
+        if signature
+    }
+
+    changes: list[dict[str, Any]] = []
+    for index, action in enumerate(resolved_actions):
+        if not isinstance(action, dict) or action.get('hit') is not True:
+            continue
+        damage_total = max(0, int_or_default(action.get('damageTotal'), default=0))
+        enemy_id = str(action.get('enemyId') or action.get('actorId') or '').strip()
+        target_id = str(action.get('targetId') or action.get('targetActorId') or '').strip()
+        if damage_total <= 0 or not enemy_id or target_id not in players_by_actor_id:
+            continue
+
+        enemy = _participant_by_id(participants, enemy_id)
+        if not isinstance(enemy, dict) or str(enemy.get('team') or '').strip().lower() != 'enemy':
+            continue
+        target_participant = _participant_by_id(participants, target_id)
+        if isinstance(target_participant, dict) and str(target_participant.get('team') or '').strip().lower() != 'player':
+            continue
+
+        enemy_name = _participant_name(enemy, enemy_id)
+        target_name = _participant_name(target_participant, str(players_by_actor_id[target_id].get('name') or target_id))
+        ability_id = str(action.get('abilityId') or '').strip()
+        damage_type = str(action.get('damageType') or '').strip().lower()
+        change = {
+            'id': stable_change_id(
+                'trusted_enemy_resolved_damage',
+                turn_id,
+                index,
+                enemy_id,
+                target_id,
+                ability_id,
+                damage_total,
+            ),
+            'turnId': turn_id,
+            'type': 'health.damage',
+            'actorId': target_id,
+            'amount': damage_total,
+            'source': 'enemy_resolved_action',
+            'sourceEnemyId': enemy_id,
+            'sourceAbilityId': ability_id or None,
+            'reason': f"Engine-resolved enemy action: {enemy_name} hit {target_name} for {damage_total} damage.",
+            'visible': True,
+        }
+        if damage_type:
+            change['damageType'] = damage_type
+        signature = _state_change_signature(change)
+        if signature and signature in already_signatures:
+            continue
+        changes.append(change)
+    return changes
+
+
+def _battlefield_hazards_by_id(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    combat = state.get('combat') if isinstance(state.get('combat'), dict) else {}
+    battlefield = combat.get('battlefield') if isinstance(combat.get('battlefield'), dict) else {}
+    hazards = battlefield.get('hazards') if isinstance(battlefield.get('hazards'), list) else []
+    by_id: dict[str, dict[str, Any]] = {}
+    for hazard in hazards:
+        if not isinstance(hazard, dict):
+            continue
+        hazard_id = str(hazard.get('id') or hazard.get('hazardId') or '').strip()
+        if hazard_id:
+            by_id[hazard_id] = hazard
+    return by_id
+
+
+def _trusted_damage_events(dm_context_packet: dict[str, Any]) -> list[dict[str, Any]]:
+    combat_state = dm_context_packet.get('combatState') if isinstance(dm_context_packet.get('combatState'), dict) else {}
+    events: list[dict[str, Any]] = []
+    for source in (dm_context_packet.get('trustedDamageEvents'), combat_state.get('trustedDamageEvents')):
+        if isinstance(source, list):
+            events.extend(event for event in source if isinstance(event, dict))
+    return events
+
+
+def _trusted_resolved_damage_changes(
+    *,
+    state: dict[str, Any],
+    dm_context_packet: dict[str, Any],
+    actor_id: str,
+    turn_id: int | None,
+    already_applied_changes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    events = _trusted_damage_events(dm_context_packet)
+    if not events:
+        return []
+
+    players_by_actor_id = _player_actors_by_id(state)
+    if not players_by_actor_id:
+        return []
+    participants = _combat_participants(state)
+    hazards_by_id = _battlefield_hazards_by_id(state)
+    already_signatures = {
+        signature
+        for change in already_applied_changes
+        if isinstance(change, dict)
+        for signature in [_state_change_signature(change)]
+        if signature
+    }
+
+    changes: list[dict[str, Any]] = []
+    expected_actor_id = str(actor_id or '').strip()
+    for index, event in enumerate(events):
+        source_type = str(event.get('sourceType') or event.get('source_type') or '').strip().lower()
+        source = TRUSTED_DAMAGE_SOURCE_TYPES.get(source_type)
+        if not source:
+            continue
+        if event.get('hit') is False:
+            continue
+        damage_total = max(
+            0,
+            int_or_default(
+                event.get('damageTotal', event.get('damageAmount', event.get('amount'))),
+                default=0,
+            ),
+        )
+        target_id = str(event.get('targetId') or event.get('targetActorId') or '').strip()
+        if damage_total <= 0 or target_id not in players_by_actor_id:
+            continue
+
+        source_id = ''
+        source_name = ''
+        if source == 'trusted_player_attack':
+            source_id = str(event.get('sourceActorId') or event.get('actorId') or '').strip()
+            if not source_id or source_id != expected_actor_id or source_id not in players_by_actor_id:
+                continue
+            source_participant = _participant_by_id(participants, source_id)
+            if isinstance(source_participant, dict) and str(source_participant.get('team') or '').strip().lower() != 'player':
+                continue
+            source_name = _participant_name(source_participant, str(players_by_actor_id[source_id].get('name') or source_id))
+        else:
+            source_id = str(event.get('hazardId') or event.get('sourceId') or '').strip()
+            hazard = hazards_by_id.get(source_id)
+            if not source_id or not isinstance(hazard, dict):
+                continue
+            source_name = str(event.get('hazardName') or hazard.get('name') or source_id).strip()
+
+        target_participant = _participant_by_id(participants, target_id)
+        if isinstance(target_participant, dict) and str(target_participant.get('team') or '').strip().lower() != 'player':
+            continue
+        target_name = _participant_name(target_participant, str(players_by_actor_id[target_id].get('name') or target_id))
+        damage_type = str(event.get('damageType') or event.get('damage_type') or '').strip().lower()
+        reason = (
+            f"Engine-resolved player attack: {source_name} hit {target_name} for {damage_total} damage."
+            if source == 'trusted_player_attack'
+            else f"Engine-resolved hazard: {source_name} damaged {target_name} for {damage_total} damage."
+        )
+        change = {
+            'id': stable_change_id(
+                'trusted_resolved_damage',
+                source,
+                turn_id,
+                index,
+                source_id,
+                target_id,
+                damage_total,
+                damage_type,
+            ),
+            'turnId': turn_id,
+            'type': 'health.damage',
+            'actorId': target_id,
+            'amount': damage_total,
+            'source': source,
+            'sourceId': source_id,
+            'reason': reason,
+            'visible': True,
+        }
+        if damage_type:
+            change['damageType'] = damage_type
+        signature = _state_change_signature(change)
+        if signature and signature in already_signatures:
+            continue
+        changes.append(change)
+    return changes
+
+
+def _without_trusted_damage_overlaps(
+    changes: list[dict[str, Any]],
+    trusted_changes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    trusted_ids = {str(change.get('id') or '').strip() for change in trusted_changes if isinstance(change, dict)}
+    trusted_signatures = {
+        signature
+        for change in trusted_changes
+        if isinstance(change, dict)
+        for signature in [_state_change_signature(change)]
+        if signature
+    }
+    filtered: list[dict[str, Any]] = []
+    for change in changes or []:
+        if not isinstance(change, dict):
+            continue
+        change_id = str(change.get('id') or '').strip()
+        if change_id and change_id in trusted_ids:
+            continue
+        signature = _state_change_signature(change)
+        if signature and signature in trusted_signatures:
+            continue
+        filtered.append(change)
+    return filtered
+
+
 def augment_rules_hint_with_state_packet(rules_hint_payload: dict[str, Any], dm_context_packet: dict[str, Any]) -> dict[str, Any]:
     updated = dict(rules_hint_payload)
     updated['state_pipeline'] = dm_context_packet
@@ -1259,12 +1502,73 @@ def post_dm_pipeline(
             if 'post_dm_semantic_dedupe' not in notes:
                 notes.append('post_dm_semantic_dedupe')
             post_extraction['notes'] = notes
-        post_validation = validate_state_changes(
+        dm_context_packet = pipeline.get('dmContextPacket') if isinstance(pipeline.get('dmContextPacket'), dict) else {}
+        trusted_enemy_damage_changes = _trusted_enemy_resolved_damage_changes(
             state=state_before_dm,
-            changes=post_extraction.get('proposedChanges') or [],
-            expected_actor_id=actor_id,
-            authorized_cross_actor_change_ids=post_extraction.get('authorizedCrossActorChangeIds') or [],
+            dm_context_packet=dm_context_packet,
+            turn_id=turn.turn_id,
+            already_applied_changes=already_applied,
         )
+        trusted_resolved_damage_changes = _trusted_resolved_damage_changes(
+            state=state_before_dm,
+            dm_context_packet=dm_context_packet,
+            actor_id=actor_id,
+            turn_id=turn.turn_id,
+            already_applied_changes=already_applied,
+        )
+        trusted_damage_changes = [*trusted_enemy_damage_changes, *trusted_resolved_damage_changes]
+        if trusted_damage_changes:
+            post_extraction = deepcopy(post_extraction)
+            post_extraction['proposedChanges'] = [
+                *trusted_damage_changes,
+                *_without_trusted_damage_overlaps(
+                    post_extraction.get('proposedChanges') or [],
+                    trusted_damage_changes,
+                ),
+            ]
+            notes = list(post_extraction.get('notes') or [])
+            if trusted_enemy_damage_changes and 'trusted_enemy_resolved_damage' not in notes:
+                notes.append('trusted_enemy_resolved_damage')
+            if trusted_resolved_damage_changes and 'trusted_resolved_damage' not in notes:
+                notes.append('trusted_resolved_damage')
+            post_extraction['notes'] = notes
+
+        trusted_damage_ids = {
+            str(change.get('id') or '').strip()
+            for change in trusted_damage_changes
+            if isinstance(change, dict) and str(change.get('id') or '').strip()
+        }
+        proposed_changes = [
+            change
+            for change in (post_extraction.get('proposedChanges') or [])
+            if isinstance(change, dict)
+        ]
+        trusted_changes = [
+            change
+            for change in proposed_changes
+            if str(change.get('id') or '').strip() in trusted_damage_ids
+        ]
+        untrusted_changes = [
+            change
+            for change in proposed_changes
+            if str(change.get('id') or '').strip() not in trusted_damage_ids
+        ]
+        if trusted_changes:
+            trusted_validation = validate_state_changes(state=state_before_dm, changes=trusted_changes)
+            untrusted_validation = validate_state_changes(
+                state=state_before_dm,
+                changes=untrusted_changes,
+                expected_actor_id=actor_id,
+                authorized_cross_actor_change_ids=post_extraction.get('authorizedCrossActorChangeIds') or [],
+            )
+            post_validation = _merge_validation_results(trusted_validation, untrusted_validation)
+        else:
+            post_validation = validate_state_changes(
+                state=state_before_dm,
+                changes=untrusted_changes,
+                expected_actor_id=actor_id,
+                authorized_cross_actor_change_ids=post_extraction.get('authorizedCrossActorChangeIds') or [],
+            )
         post_changes = validated_changes_for_application(post_validation)
         post_apply = apply_state_changes(state_before_dm, post_changes)
         final_state = post_apply['nextState']

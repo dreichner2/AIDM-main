@@ -21,6 +21,10 @@ def test_create_world_validates_request_body_and_fields(client):
     assert non_json_response.status_code == 400
     assert non_json_response.get_json()['error_code'] == 'validation_error'
 
+    array_body_response = client.post('/api/worlds', json=['not', 'an', 'object'])
+    assert array_body_response.status_code == 400
+    assert array_body_response.get_json()['error_code'] == 'validation_error'
+
     empty_name_response = client.post('/api/worlds', json={'name': '   '})
     assert empty_name_response.status_code == 400
     assert empty_name_response.get_json()['error_code'] == 'validation_error'

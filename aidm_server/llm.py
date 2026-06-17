@@ -199,5 +199,7 @@ def query_gpt_stream(prompt, system_message=None):
                 yield chunk
         if not yielded:
             yield 'No summary available.'
-    except Exception:
+    except Exception as exc:
+        logger.warning('Provider failure in query_gpt_stream: %s', str(exc))
+        telemetry_event('llm.query_gpt_stream.failed', payload={'error': str(exc)}, severity='warning')
         yield 'Session summary is temporarily unavailable due to AI provider unavailability.'

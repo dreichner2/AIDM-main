@@ -5298,7 +5298,7 @@ def test_post_dm_helper_filters_other_player_combat_mutations(app, monkeypatch):
     assert 'filtered_actor_ownership' in result['notes']
 
 
-def test_post_dm_helper_allows_dm_confirmed_enemy_damage_to_other_player(app, monkeypatch):
+def test_post_dm_helper_filters_narration_confirmed_damage_to_other_player(app, monkeypatch):
     class FakeProvider:
         def generate(self, _request):
             return ProviderResponse(
@@ -5338,30 +5338,33 @@ def test_post_dm_helper_allows_dm_confirmed_enemy_damage_to_other_player(app, mo
             turn_id=57,
         )
 
-    damage = next(change for change in result['proposedChanges'] if change.get('type') == 'health.damage')
-    assert damage['actorId'] == 'player_2'
-    assert damage['amount'] == 3
-    assert damage['id'] in result['authorizedCrossActorChangeIds']
     assert not any(
-        change.get('type') == 'combat.participant.update'
-        and change.get('participantId') == 'player_2'
+        change.get('type') in {'health.damage', 'combat.participant.update'}
+        and (change.get('actorId') == 'player_2' or change.get('participantId') == 'player_2')
         for change in result['proposedChanges']
     )
+    assert 'confirmed_damage' not in result.get('authorizedCrossActorChangeIds', [])
+    assert 'confirmed_participant' not in result.get('authorizedCrossActorChangeIds', [])
+    assert 'filtered_actor_ownership' in result['notes']
 
     validation = validate_state_changes(
         state=state,
-        changes=result['proposedChanges'],
+        changes=[
+            {
+                'id': 'confirmed_damage',
+                'type': 'health.damage',
+                'actorId': 'player_2',
+                'amount': 3,
+            }
+        ],
         expected_actor_id='player_1',
-        authorized_cross_actor_change_ids=result['authorizedCrossActorChangeIds'],
+        authorized_cross_actor_change_ids=['confirmed_damage'],
     )
-    applied = apply_state_changes(state, validated_changes_for_application(validation))
-    victim = applied['nextState']['playerCharacters'][1]
-    participant = applied['nextState']['combat']['participants'][1]
-    assert victim['health']['currentHp'] == 9
-    assert participant['hp']['current'] == 9
+    assert validation['accepted'] == []
+    assert validation['rejected'][0]['reason'] == 'State change actor does not match the current player.'
 
 
-def test_post_dm_helper_allows_dm_confirmed_cross_player_participant_hp_drop(app, monkeypatch):
+def test_post_dm_helper_filters_narration_confirmed_cross_player_participant_hp_drop(app, monkeypatch):
     class FakeProvider:
         def generate(self, _request):
             return ProviderResponse(
@@ -5400,22 +5403,29 @@ def test_post_dm_helper_allows_dm_confirmed_cross_player_participant_hp_drop(app
             turn_id=58,
         )
 
-    hp_update = next(change for change in result['proposedChanges'] if change.get('type') == 'combat.participant.update')
-    assert hp_update['participantId'] == 'player_2'
-    assert hp_update['hp']['current'] == 0
-    assert hp_update['id'] in result['authorizedCrossActorChangeIds']
+    assert not any(
+        change.get('type') == 'combat.participant.update'
+        and change.get('participantId') == 'player_2'
+        for change in result['proposedChanges']
+    )
+    assert 'confirmed_drop' not in result.get('authorizedCrossActorChangeIds', [])
+    assert 'filtered_actor_ownership' in result['notes']
 
     validation = validate_state_changes(
         state=state,
-        changes=result['proposedChanges'],
+        changes=[
+            {
+                'id': 'confirmed_drop',
+                'type': 'combat.participant.update',
+                'participantId': 'player_2',
+                'hp': {'current': 0, 'max': 12},
+            }
+        ],
         expected_actor_id='player_1',
-        authorized_cross_actor_change_ids=result['authorizedCrossActorChangeIds'],
+        authorized_cross_actor_change_ids=['confirmed_drop'],
     )
-    applied = apply_state_changes(state, validated_changes_for_application(validation))
-    victim = applied['nextState']['playerCharacters'][1]
-    participant = applied['nextState']['combat']['participants'][1]
-    assert victim['health']['currentHp'] == 0
-    assert participant['hp']['current'] == 0
+    assert validation['accepted'] == []
+    assert validation['rejected'][0]['reason'] == 'Combat participant change actor does not match the current player.'
 
 
 def test_post_dm_helper_inventory_remove_missing_quantity_does_not_apply_or_fallback(app, monkeypatch):
@@ -5524,6 +5534,499 @@ def test_post_dm_pipeline_skips_extraction_for_pending_roll_turn(app):
         assert result['postAppliedChanges'] == []
         assert item_names == ['Smooth Stone']
         assert TurnEvent.query.filter_by(turn_id=turn.turn_id, event_type='state_update').count() == 0
+
+
+def _seed_two_player_combat_pipeline_turn(
+    campaign,
+    player,
+    session_obj,
+    *,
+    dm_response,
+    dm_context_packet=None,
+    dm_context_packet_factory=None,
+):
+    bob = Player(
+        workspace_id=campaign.workspace_id,
+        campaign_id=campaign.campaign_id,
+        name='Bob',
+        character_name='Bob',
+        race='Human',
+        class_='Fighter',
+        level=1,
+        stats=safe_json_dumps({'current_hp': 12, 'hp_current': 12, 'max_hp': 12, 'hp_max': 12, 'temp_hp': 0}, {}),
+        inventory=safe_json_dumps([], {}),
+    )
+    db.session.add(bob)
+    db.session.flush()
+
+    alice_actor_id = f'player_{player.player_id}'
+    bob_actor_id = f'player_{bob.player_id}'
+    state = _two_player_state()
+    state['playerCharacters'][0].update(
+        {
+            'id': alice_actor_id,
+            'playerId': player.player_id,
+            'name': player.character_name,
+            'health': {'currentHp': 10, 'maxHp': 20, 'tempHp': 0, 'conditions': []},
+        }
+    )
+    state['playerCharacters'][1].update(
+        {
+            'id': bob_actor_id,
+            'playerId': bob.player_id,
+            'name': 'Bob',
+            'health': {'currentHp': 12, 'maxHp': 12, 'tempHp': 0, 'conditions': []},
+        }
+    )
+    state['currentScene'] = {'sceneType': 'combat', 'combatState': 'active', 'dangerLevel': 8}
+    state['combat'] = {
+        'status': 'active',
+        'round': 1,
+        'participants': [
+            {
+                'id': alice_actor_id,
+                'team': 'player',
+                'name': player.character_name,
+                'kind': 'player_character',
+                'hp': {'current': 10, 'max': 20, 'temp': 0},
+                'conditions': [],
+                'isAlive': True,
+                'isConscious': True,
+            },
+            {
+                'id': bob_actor_id,
+                'team': 'player',
+                'name': 'Bob',
+                'kind': 'player_character',
+                'hp': {'current': 12, 'max': 12, 'temp': 0},
+                'conditions': [],
+                'isAlive': True,
+                'isConscious': True,
+            },
+            {
+                'id': 'enemy_bandit_1',
+                'team': 'enemy',
+                'name': 'Bandit',
+                'kind': 'creature',
+                'hp': {'current': 9, 'max': 9, 'temp': 0},
+                'conditions': [],
+                'abilities': [{'id': 'scimitar', 'name': 'Scimitar'}],
+                'isAlive': True,
+                'isConscious': True,
+            },
+        ],
+        'battlefield': {
+            'environmentType': 'dungeon_room',
+            'hazards': [
+                {
+                    'id': 'hazard_burning_oil',
+                    'name': 'Burning Oil',
+                    'effect': 'Flames spread across the flagstones.',
+                    'damage': {'dice': '1d4', 'type': 'fire'},
+                }
+            ],
+        },
+    }
+    session_obj.state_snapshot = safe_json_dumps(state, {})
+    if dm_context_packet_factory:
+        dm_context_packet = dm_context_packet_factory(alice_actor_id, bob_actor_id)
+    dm_context_packet = dm_context_packet or {}
+
+    turn = DmTurn(
+        session_id=session_obj.session_id,
+        campaign_id=campaign.campaign_id,
+        player_id=player.player_id,
+        player_input='Alice acts.',
+        dm_output=dm_response,
+        status='completed',
+        metadata_json=safe_json_dumps(
+            {
+                STATE_PIPELINE_METADATA_KEY: {
+                    'version': STATE_PIPELINE_VERSION,
+                    'actorId': alice_actor_id,
+                    'stateBeforeDm': state,
+                    'preDmValidation': {'validatedActions': [], 'immediateChanges': []},
+                    'immediateValidation': {'accepted': [], 'rejected': [], 'modified': []},
+                    'immediateAppliedChanges': [],
+                    'combatAppliedChanges': [],
+                    'dmContextPacket': dm_context_packet,
+                }
+            },
+            {},
+        ),
+    )
+    db.session.add(turn)
+    db.session.commit()
+    return bob, alice_actor_id, bob_actor_id, turn
+
+
+def _stub_duplicate_bob_damage(monkeypatch, bob_actor_id, amount):
+    monkeypatch.setattr(
+        turn_pipeline_module,
+        'extract_post_dm_outcomes',
+        lambda **_kwargs: {
+            'proposedChanges': [
+                {
+                    'id': 'narration_duplicate_damage',
+                    'type': 'health.damage',
+                    'actorId': bob_actor_id,
+                    'amount': amount,
+                },
+                {
+                    'id': 'narration_participant_hp',
+                    'type': 'combat.participant.update',
+                    'participantId': bob_actor_id,
+                    'hp': {'current': max(0, 12 - amount), 'max': 12},
+                },
+            ],
+            'uncertainChanges': [],
+            'notes': ['test_helper'],
+            'debug': {'source': 'test'},
+        },
+    )
+    monkeypatch.setattr(
+        turn_pipeline_module,
+        'prepare_combat_from_dm_response',
+        lambda **_kwargs: {'changes': [], 'debug': {'source': 'test'}},
+    )
+
+
+def test_post_dm_pipeline_applies_trusted_enemy_damage_to_non_acting_player(app, monkeypatch):
+    ids = seed_world_campaign_player_session(app)
+    dm_response = 'The Bandit hits Bob. Bob takes 4 slashing damage.'
+
+    with app.app_context():
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        player = db.session.get(Player, ids['player_id'])
+        session_obj = db.session.get(Session, ids['session_id'])
+        assert campaign is not None
+        assert player is not None
+        assert session_obj is not None
+
+        bob = Player(
+            workspace_id=campaign.workspace_id,
+            campaign_id=campaign.campaign_id,
+            name='Bob',
+            character_name='Bob',
+            race='Human',
+            class_='Fighter',
+            level=1,
+            stats=safe_json_dumps({'current_hp': 12, 'hp_current': 12, 'max_hp': 12, 'hp_max': 12, 'temp_hp': 0}, {}),
+            inventory=safe_json_dumps([], {}),
+        )
+        db.session.add(bob)
+        db.session.flush()
+
+        alice_actor_id = f'player_{player.player_id}'
+        bob_actor_id = f'player_{bob.player_id}'
+        state = _two_player_state()
+        state['playerCharacters'][0].update(
+            {
+                'id': alice_actor_id,
+                'playerId': player.player_id,
+                'name': player.character_name,
+                'health': {'currentHp': 10, 'maxHp': 20, 'tempHp': 0, 'conditions': []},
+            }
+        )
+        state['playerCharacters'][1].update(
+            {
+                'id': bob_actor_id,
+                'playerId': bob.player_id,
+                'name': 'Bob',
+                'health': {'currentHp': 12, 'maxHp': 12, 'tempHp': 0, 'conditions': []},
+            }
+        )
+        state['currentScene'] = {'sceneType': 'combat', 'combatState': 'active', 'dangerLevel': 8}
+        state['combat'] = {
+            'status': 'active',
+            'round': 1,
+            'participants': [
+                {
+                    'id': alice_actor_id,
+                    'team': 'player',
+                    'name': player.character_name,
+                    'kind': 'player_character',
+                    'hp': {'current': 10, 'max': 20, 'temp': 0},
+                    'conditions': [],
+                    'isAlive': True,
+                    'isConscious': True,
+                },
+                {
+                    'id': bob_actor_id,
+                    'team': 'player',
+                    'name': 'Bob',
+                    'kind': 'player_character',
+                    'hp': {'current': 12, 'max': 12, 'temp': 0},
+                    'conditions': [],
+                    'isAlive': True,
+                    'isConscious': True,
+                },
+                {
+                    'id': 'enemy_bandit_1',
+                    'team': 'enemy',
+                    'name': 'Bandit',
+                    'kind': 'creature',
+                    'hp': {'current': 9, 'max': 9, 'temp': 0},
+                    'conditions': [],
+                    'abilities': [{'id': 'scimitar', 'name': 'Scimitar'}],
+                    'isAlive': True,
+                    'isConscious': True,
+                },
+            ],
+        }
+        session_obj.state_snapshot = safe_json_dumps(state, {})
+
+        turn = DmTurn(
+            session_id=session_obj.session_id,
+            campaign_id=campaign.campaign_id,
+            player_id=player.player_id,
+            player_input='Alice attacks the bandit.',
+            dm_output=dm_response,
+            status='completed',
+            metadata_json=safe_json_dumps(
+                {
+                    STATE_PIPELINE_METADATA_KEY: {
+                        'version': STATE_PIPELINE_VERSION,
+                        'actorId': alice_actor_id,
+                        'stateBeforeDm': state,
+                        'preDmValidation': {'validatedActions': [], 'immediateChanges': []},
+                        'immediateValidation': {'accepted': [], 'rejected': [], 'modified': []},
+                        'immediateAppliedChanges': [],
+                        'combatAppliedChanges': [],
+                        'dmContextPacket': {
+                            'combatState': {
+                                'enemyResolvedActions': [
+                                    {
+                                        'enemyId': 'enemy_bandit_1',
+                                        'enemyName': 'Bandit',
+                                        'targetId': bob_actor_id,
+                                        'targetName': 'Bob',
+                                        'intentType': 'attack',
+                                        'abilityId': 'scimitar',
+                                        'abilityName': 'Scimitar',
+                                        'hit': True,
+                                        'damageTotal': 4,
+                                        'damageType': 'slashing',
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                },
+                {},
+            ),
+        )
+        db.session.add(turn)
+        db.session.commit()
+
+        monkeypatch.setattr(
+            turn_pipeline_module,
+            'extract_post_dm_outcomes',
+            lambda **_kwargs: {
+                'proposedChanges': [
+                    {
+                        'id': 'narration_duplicate_damage',
+                        'type': 'health.damage',
+                        'actorId': bob_actor_id,
+                        'amount': 4,
+                    },
+                    {
+                        'id': 'narration_participant_hp',
+                        'type': 'combat.participant.update',
+                        'participantId': bob_actor_id,
+                        'hp': {'current': 8, 'max': 12},
+                    },
+                ],
+                'uncertainChanges': [],
+                'notes': ['test_helper'],
+                'debug': {'source': 'test'},
+            },
+        )
+        monkeypatch.setattr(
+            turn_pipeline_module,
+            'prepare_combat_from_dm_response',
+            lambda **_kwargs: {'changes': [], 'debug': {'source': 'test'}},
+        )
+
+        result = post_dm_pipeline(
+            turn=turn,
+            session_obj=session_obj,
+            campaign=campaign,
+            player=player,
+            dm_response_text=dm_response,
+        )
+        db.session.commit()
+
+        refreshed_session = db.session.get(Session, ids['session_id'])
+        refreshed_alice = db.session.get(Player, player.player_id)
+        refreshed_bob = db.session.get(Player, bob.player_id)
+        assert refreshed_session is not None
+        assert refreshed_alice is not None
+        assert refreshed_bob is not None
+        snapshot = safe_json_loads(refreshed_session.state_snapshot, {})
+        alice_actor = next(actor for actor in snapshot['playerCharacters'] if actor['id'] == alice_actor_id)
+        bob_actor = next(actor for actor in snapshot['playerCharacters'] if actor['id'] == bob_actor_id)
+        bob_participant = next(participant for participant in snapshot['combat']['participants'] if participant['id'] == bob_actor_id)
+        alice_stats = safe_json_loads(refreshed_alice.stats, {})
+        bob_stats = safe_json_loads(refreshed_bob.stats, {})
+        applied_damage = [
+            change
+            for change in result['postAppliedChanges']
+            if change.get('type') == 'health.damage' and change.get('actorId') == bob_actor_id
+        ]
+
+        assert 'trusted_enemy_resolved_damage' in result['postExtraction']['notes']
+        assert len(applied_damage) == 1
+        assert applied_damage[0]['source'] == 'enemy_resolved_action'
+        assert applied_damage[0]['amount'] == 4
+        assert applied_damage[0]['actualAmount'] == 4
+        assert all(change.get('id') != 'narration_duplicate_damage' for change in result['postAppliedChanges'])
+        assert any(
+            rejection['reason'] == 'Combat participant change actor does not match the current player.'
+            for rejection in result['postValidation']['rejected']
+        )
+        assert alice_actor['health']['currentHp'] == 10
+        assert bob_actor['health']['currentHp'] == 8
+        assert bob_participant['hp']['current'] == 8
+        assert alice_stats['current_hp'] == 10
+        assert bob_stats['current_hp'] == 8
+
+
+def test_post_dm_pipeline_applies_trusted_player_attack_damage_to_other_player(app, monkeypatch):
+    ids = seed_world_campaign_player_session(app)
+    dm_response = 'Alice strikes Bob. Bob takes 5 slashing damage.'
+
+    with app.app_context():
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        player = db.session.get(Player, ids['player_id'])
+        session_obj = db.session.get(Session, ids['session_id'])
+        assert campaign is not None
+        assert player is not None
+        assert session_obj is not None
+
+        bob, alice_actor_id, bob_actor_id, turn = _seed_two_player_combat_pipeline_turn(
+            campaign,
+            player,
+            session_obj,
+            dm_response=dm_response,
+            dm_context_packet_factory=lambda alice_id, bob_id: {
+                'combatState': {
+                    'trustedDamageEvents': [
+                        {
+                            'sourceType': 'player_attack',
+                            'sourceActorId': alice_id,
+                            'sourceName': player.character_name,
+                            'targetId': bob_id,
+                            'targetName': 'Bob',
+                            'hit': True,
+                            'damageTotal': 5,
+                            'damageType': 'slashing',
+                        }
+                    ]
+                }
+            },
+        )
+        _stub_duplicate_bob_damage(monkeypatch, bob_actor_id, 5)
+
+        result = post_dm_pipeline(
+            turn=turn,
+            session_obj=session_obj,
+            campaign=campaign,
+            player=player,
+            dm_response_text=dm_response,
+        )
+        db.session.commit()
+
+        refreshed_session = db.session.get(Session, ids['session_id'])
+        refreshed_bob = db.session.get(Player, bob.player_id)
+        assert refreshed_session is not None
+        assert refreshed_bob is not None
+        snapshot = safe_json_loads(refreshed_session.state_snapshot, {})
+        bob_actor = next(actor for actor in snapshot['playerCharacters'] if actor['id'] == bob_actor_id)
+        bob_participant = next(participant for participant in snapshot['combat']['participants'] if participant['id'] == bob_actor_id)
+        bob_stats = safe_json_loads(refreshed_bob.stats, {})
+        applied_damage = [
+            change
+            for change in result['postAppliedChanges']
+            if change.get('type') == 'health.damage' and change.get('actorId') == bob_actor_id
+        ]
+
+        assert 'trusted_resolved_damage' in result['postExtraction']['notes']
+        assert len(applied_damage) == 1
+        assert applied_damage[0]['source'] == 'trusted_player_attack'
+        assert applied_damage[0]['actualAmount'] == 5
+        assert all(change.get('id') != 'narration_duplicate_damage' for change in result['postAppliedChanges'])
+        assert bob_actor['health']['currentHp'] == 7
+        assert bob_participant['hp']['current'] == 7
+        assert bob_stats['current_hp'] == 7
+
+
+def test_post_dm_pipeline_applies_trusted_environment_hazard_damage_to_other_player(app, monkeypatch):
+    ids = seed_world_campaign_player_session(app)
+    dm_response = 'Burning oil splashes across Bob. Bob takes 3 fire damage.'
+
+    with app.app_context():
+        campaign = db.session.get(Campaign, ids['campaign_id'])
+        player = db.session.get(Player, ids['player_id'])
+        session_obj = db.session.get(Session, ids['session_id'])
+        assert campaign is not None
+        assert player is not None
+        assert session_obj is not None
+
+        bob, _alice_actor_id, bob_actor_id, turn = _seed_two_player_combat_pipeline_turn(
+            campaign,
+            player,
+            session_obj,
+            dm_response=dm_response,
+            dm_context_packet_factory=lambda _alice_id, bob_id: {
+                'combatState': {
+                    'trustedDamageEvents': [
+                        {
+                            'sourceType': 'environmental_hazard',
+                            'hazardId': 'hazard_burning_oil',
+                            'hazardName': 'Burning Oil',
+                            'targetId': bob_id,
+                            'targetName': 'Bob',
+                            'damageTotal': 3,
+                            'damageType': 'fire',
+                        }
+                    ]
+                }
+            },
+        )
+        _stub_duplicate_bob_damage(monkeypatch, bob_actor_id, 3)
+
+        result = post_dm_pipeline(
+            turn=turn,
+            session_obj=session_obj,
+            campaign=campaign,
+            player=player,
+            dm_response_text=dm_response,
+        )
+        db.session.commit()
+
+        refreshed_session = db.session.get(Session, ids['session_id'])
+        refreshed_bob = db.session.get(Player, bob.player_id)
+        assert refreshed_session is not None
+        assert refreshed_bob is not None
+        snapshot = safe_json_loads(refreshed_session.state_snapshot, {})
+        bob_actor = next(actor for actor in snapshot['playerCharacters'] if actor['id'] == bob_actor_id)
+        bob_participant = next(participant for participant in snapshot['combat']['participants'] if participant['id'] == bob_actor_id)
+        bob_stats = safe_json_loads(refreshed_bob.stats, {})
+        applied_damage = [
+            change
+            for change in result['postAppliedChanges']
+            if change.get('type') == 'health.damage' and change.get('actorId') == bob_actor_id
+        ]
+
+        assert 'trusted_resolved_damage' in result['postExtraction']['notes']
+        assert len(applied_damage) == 1
+        assert applied_damage[0]['source'] == 'trusted_environmental_hazard'
+        assert applied_damage[0]['actualAmount'] == 3
+        assert all(change.get('id') != 'narration_duplicate_damage' for change in result['postAppliedChanges'])
+        assert bob_actor['health']['currentHp'] == 9
+        assert bob_participant['hp']['current'] == 9
+        assert bob_stats['current_hp'] == 9
 
 
 def test_post_dm_pipeline_can_pick_up_scene_item_from_compact_state(app):

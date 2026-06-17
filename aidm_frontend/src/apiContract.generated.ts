@@ -95,7 +95,7 @@ export type BestiaryEntryPayload = {
 
 export type BestiaryListResponse = { campaign_id?: number; region_id?: string; entries: BestiaryEntryPayload[] | CreatureDefinition[] }
 
-export type CreatureResolutionResult = { creature: CreatureDefinition; source: CreatureSource | string; resolutionMethod: string; matchScore?: number | null; generated: boolean; savedToBestiary: boolean; notes: string[]; debug: JsonRecord }
+export type CreatureResolutionResult = { creature: CreatureDefinition; source: CreatureSource | string; resolutionMethod: string; matchScore?: number | null; generated: boolean; savedToBestiary: boolean; notes: string[]; debug?: JsonRecord }
 
 export type CreatureGenerateResponse = { creature: CreatureDefinition; generationSource: string; balance: JsonRecord }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -16,6 +17,7 @@ from aidm_server.llm import (
     estimate_text_tokens,
     get_provider,
     query_dm_function_stream,
+    query_gpt_stream,
 )
 from aidm_server.llm_providers import CodexCliProvider, get_helper_provider
 from aidm_server.provider_registry import provider_capabilities, provider_default_model, provider_runtime_model
@@ -241,6 +243,34 @@ def test_gemini_provider_stream_does_not_mix_models_after_partial_output(monkeyp
         next(stream_iter)
 
     assert attempts == ['models/gemini-3-flash-preview']
+
+
+def test_query_gpt_stream_records_telemetry_on_provider_failure(monkeypatch, caplog):
+    class FailingStreamProvider:
+        def stream(self, _request):
+            raise RuntimeError('stream transport failed')
+            yield 'unreachable'
+
+    import aidm_server.llm as llm_module
+
+    telemetry_events: list[dict] = []
+
+    def fake_telemetry_event(event_name, payload=None, severity='info'):
+        telemetry_events.append({'event_name': event_name, 'payload': payload or {}, 'severity': severity})
+
+    monkeypatch.setattr(llm_module, 'get_provider', lambda: FailingStreamProvider())
+    monkeypatch.setattr(llm_module, 'telemetry_event', fake_telemetry_event)
+
+    with caplog.at_level(logging.WARNING, logger='aidm_server.llm'):
+        chunks = list(query_gpt_stream('Summarize the session.', system_message='You summarize sessions.'))
+
+    assert chunks == ['Session summary is temporarily unavailable due to AI provider unavailability.']
+    assert 'Provider failure in query_gpt_stream: stream transport failed' in caplog.text
+    assert {
+        'event_name': 'llm.query_gpt_stream.failed',
+        'payload': {'error': 'stream transport failed'},
+        'severity': 'warning',
+    } in telemetry_events
 
 
 def test_extract_text_preserves_stream_whitespace():

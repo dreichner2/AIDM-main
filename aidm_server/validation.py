@@ -8,7 +8,8 @@ from flask import Request
 def parse_json_body(request: Request) -> dict | None:
     if not request.is_json:
         return None
-    return request.get_json(silent=True)
+    payload = request.get_json(silent=True)
+    return payload if isinstance(payload, dict) else None
 
 
 def missing_fields(payload: dict | None, required_fields: list[str]) -> list[str]:

@@ -118,7 +118,7 @@ API_TYPE_CONTRACTS: tuple[TypeContract, ...] = (
         ),
     ),
     TypeContract('BestiaryListResponse', alias='{ campaign_id?: number; region_id?: string; entries: BestiaryEntryPayload[] | CreatureDefinition[] }'),
-    TypeContract('CreatureResolutionResult', alias="{ creature: CreatureDefinition; source: CreatureSource | string; resolutionMethod: string; matchScore?: number | null; generated: boolean; savedToBestiary: boolean; notes: string[]; debug: JsonRecord }"),
+    TypeContract('CreatureResolutionResult', alias="{ creature: CreatureDefinition; source: CreatureSource | string; resolutionMethod: string; matchScore?: number | null; generated: boolean; savedToBestiary: boolean; notes: string[]; debug?: JsonRecord }"),
     TypeContract('CreatureGenerateResponse', alias='{ creature: CreatureDefinition; generationSource: string; balance: JsonRecord }'),
     TypeContract('CreatureBalanceResponse', alias='{ balance: CreatureBalanceMetadata; scaledCreature: CreatureDefinition }'),
     TypeContract('CreatureEvolveResponse', alias='{ creature: CreatureDefinition; entry?: BestiaryEntryPayload | null }'),

@@ -6,7 +6,7 @@ from typing import Any
 
 from flask import Blueprint, jsonify, request
 
-from aidm_server.capabilities import capability_forbidden_response
+from aidm_server.capabilities import capability_forbidden_response, current_actor_has_capability
 from aidm_server.combat.end_conditions import check_combat_end, combat_end_change
 from aidm_server.combat.intent_planner import attach_intents_to_combat, plan_enemy_intents
 from aidm_server.combat.state import default_battlefield, instantiate_creature, player_combat_participant
@@ -39,7 +39,7 @@ from aidm_server.services.session_state_mutation import (
     mutate_session_state,
     state_conflict_response,
 )
-from aidm_server.validation import coerce_int, parse_json_body
+from aidm_server.validation import coerce_bool, coerce_int, parse_json_body
 from aidm_server.workspace_access import (
     current_workspace_id,
     get_campaign,
@@ -62,6 +62,20 @@ def _bestiary_authoring_forbidden_response():
         'dm_authoring',
         'Only workspace admins can author or save campaign bestiary content.',
     )
+
+
+def _save_generated_enabled(payload: dict[str, Any]) -> bool:
+    raw_value = payload.get('saveGenerated') if 'saveGenerated' in payload else payload.get('save_generated')
+    parsed = coerce_bool(raw_value, True)
+    return True if parsed is None else parsed
+
+
+def _creature_resolution_response(result: dict[str, Any]) -> dict[str, Any]:
+    if current_actor_has_capability('debug_read'):
+        return result
+    public_result = dict(result)
+    public_result.pop('debug', None)
+    return public_result
 
 
 def _campaign_players(campaign: Campaign) -> list[Player]:
@@ -458,7 +472,10 @@ def generate_campaign_bestiary_pack(campaign_id: int):
         }
     )
     entries = []
-    if payload.get('save', True) is not False:
+    save_entries = coerce_bool(payload.get('save'), True)
+    if save_entries is None:
+        save_entries = True
+    if save_entries:
         for creature in creatures:
             entries.append(
                 save_bestiary_entry(
@@ -493,6 +510,11 @@ def resolve_creature():
     if payload is None:
         return error_response('validation_error', 'Expected JSON request body.', 400)
     campaign_id = payload.get('campaignId') or payload.get('campaign_id')
+    save_generated = _save_generated_enabled(payload)
+    if campaign_id and save_generated:
+        forbidden = _bestiary_authoring_forbidden_response()
+        if forbidden:
+            return forbidden
     workspace_id = current_workspace_id()
     if campaign_id:
         campaign = get_campaign(int(campaign_id))
@@ -501,7 +523,7 @@ def resolve_creature():
         workspace_id = campaign.workspace_id
     result = resolve_creature_for_encounter(payload, workspace_id=workspace_id)
     db.session.commit()
-    return jsonify(result)
+    return jsonify(_creature_resolution_response(result))
 
 
 @creatures_bp.post('/creatures/generate')
@@ -539,6 +561,16 @@ def evolve_creature_endpoint():
     base = payload.get('baseCreature') or payload.get('base_creature')
     if not isinstance(base, dict):
         return error_response('validation_error', 'baseCreature is required.', 400)
+    campaign_id = payload.get('campaignId') or payload.get('campaign_id')
+    save_generated = _save_generated_enabled(payload)
+    campaign = None
+    if campaign_id and save_generated:
+        forbidden = _bestiary_authoring_forbidden_response()
+        if forbidden:
+            return forbidden
+        campaign = get_campaign(int(campaign_id))
+        if not campaign:
+            return error_response('not_found', 'Campaign not found.', 404)
     context = payload.get('eventContext') if isinstance(payload.get('eventContext'), dict) else payload.get('event_context') if isinstance(payload.get('event_context'), dict) else payload
     evolved = evolve_creature(
         base,
@@ -547,14 +579,7 @@ def evolve_creature_endpoint():
         party_size=int(payload.get('partySize') or payload.get('party_size') or 4),
     )
     entry = None
-    campaign_id = payload.get('campaignId') or payload.get('campaign_id')
-    if campaign_id and payload.get('saveGenerated', payload.get('save_generated', True)) is not False:
-        forbidden = _bestiary_authoring_forbidden_response()
-        if forbidden:
-            return forbidden
-        campaign = get_campaign(int(campaign_id))
-        if not campaign:
-            return error_response('not_found', 'Campaign not found.', 404)
+    if campaign_id and save_generated and campaign:
         entry = save_bestiary_entry(
             workspace_id=campaign.workspace_id,
             campaign_id=campaign.campaign_id,
@@ -732,6 +757,9 @@ def plan_session_enemy_intents(session_id: int):
     session_obj = get_session(session_id)
     if not session_obj:
         return error_response('not_found', 'Session not found.', 404)
+    forbidden = _combat_operator_forbidden_response()
+    if forbidden:
+        return forbidden
     state = _session_state(session_obj)
     combat = state.get('combat') if isinstance(state.get('combat'), dict) else {}
     intent_plan = plan_enemy_intents(combat)
