@@ -777,6 +777,140 @@ function installFetchMock() {
           limit: 20,
         })
       }
+      if (method === 'GET' && path === '/api/beta/session-quality') {
+        const sessionId = Number(url.searchParams.get('session_id') ?? 20)
+        return jsonResponse({
+          session: {
+            session_id: sessionId,
+            campaign_id: 10,
+            name: 'Session Alpha',
+          },
+          summary: {
+            quality_status: 'review',
+            total_turn_count: 2,
+            completed_turn_count: 1,
+            failed_turn_count: 1,
+            awaiting_clarification_turn_count: 0,
+            turn_failure_rate: 0.5,
+            dm_response_latency_ms_avg: 1800,
+            dm_response_latency_ms_p95: 1800,
+            dm_response_latency_sample_count: 2,
+            latest_turn_id: 2,
+            latest_turn_status: 'failed',
+            latest_turn_at: fixedNow.toISOString(),
+            canon_job_count: 1,
+            canon_job_failed_count: 1,
+            canon_job_failure_rate: 1,
+            bad_turn_report_count: 1,
+            coherence_feedback_avg: 3.5,
+            coherence_feedback_count: 2,
+            state_mutation_count: 2,
+            operator_action_count: 1,
+          },
+          operator_summary: {
+            headline: 'Review recommended: 1 failed turn, 1 failed canon job, 1 bad-turn report.',
+            details: [
+              'Provider/model: deepseek / deepseek-v4-pro (2 turns).',
+              'Latency: 1800 ms p95, 1800 ms avg across 2 samples.',
+              'State/audit activity: 2 state mutations, 1 operator action.',
+            ],
+          },
+          provider_model_turn_counts: [
+            {
+              provider: 'deepseek',
+              model: 'deepseek-v4-pro',
+              turn_count: 2,
+            },
+          ],
+          recent_state_mutations: [],
+          recent_operator_actions: [],
+          limit: 5,
+        })
+      }
+      if (method === 'GET' && path === '/api/beta/support-bundle') {
+        const sessionId = url.searchParams.get('session_id')
+        const numericSessionId = sessionId ? Number(sessionId) : null
+        return jsonResponse({
+          generated_at: fixedNow.toISOString(),
+          workspace_id: 'owner',
+          filters: {
+            limit: Number(url.searchParams.get('limit') ?? 20),
+            session_id: numericSessionId,
+          },
+          runtime: { env: 'test', auth_required: true },
+          session: numericSessionId === null ? null : { session_id: numericSessionId, campaign_id: 10 },
+          beta_summary: metrics,
+          beta_slo: { status: 'visible' },
+          session_quality:
+            numericSessionId === null
+              ? null
+              : {
+                  session: { session_id: numericSessionId, campaign_id: 10, name: 'Session Alpha' },
+                  summary: {
+                    quality_status: 'review',
+                    total_turn_count: 2,
+                    completed_turn_count: 1,
+                    failed_turn_count: 1,
+                    awaiting_clarification_turn_count: 0,
+                    turn_failure_rate: 0.5,
+                    dm_response_latency_ms_avg: 1800,
+                    dm_response_latency_ms_p95: 1800,
+                    dm_response_latency_sample_count: 2,
+                    latest_turn_id: 2,
+                    latest_turn_status: 'failed',
+                    latest_turn_at: fixedNow.toISOString(),
+                    canon_job_count: 1,
+                    canon_job_failed_count: 1,
+                    canon_job_failure_rate: 1,
+                    bad_turn_report_count: 1,
+                    coherence_feedback_avg: 3.5,
+                    coherence_feedback_count: 2,
+                    state_mutation_count: 2,
+                    operator_action_count: 1,
+                  },
+                  operator_summary: {
+                    headline: 'Review recommended: 1 failed turn, 1 failed canon job, 1 bad-turn report.',
+                    details: [
+                      'Provider/model: deepseek / deepseek-v4-pro (2 turns).',
+                      'Latency: 1800 ms p95, 1800 ms avg across 2 samples.',
+                      'State/audit activity: 2 state mutations, 1 operator action.',
+                    ],
+                  },
+                  provider_model_turn_counts: [
+                    { provider: 'deepseek', model: 'deepseek-v4-pro', turn_count: 2 },
+                  ],
+                  recent_state_mutations: [],
+                  recent_operator_actions: [],
+                  limit: 20,
+                },
+          incidents: {
+            incidents: [],
+            summary: {
+              failed_turn_count: 1,
+              failed_canon_job_count: 1,
+              bad_turn_report_count: 1,
+              telemetry_incident_count: 1,
+            },
+            limit: 20,
+            session_id: numericSessionId ?? undefined,
+          },
+          audits: {
+            state_mutations: [],
+            operator_actions: [],
+            summary: {
+              state_mutation_count: 0,
+              operator_action_count: 0,
+            },
+            limit: 20,
+            session_id: numericSessionId ?? undefined,
+          },
+          recent_turns: [],
+          canon_jobs: [],
+          session_log_entries: [],
+          turn_events: [],
+          telemetry: {},
+        })
+      }
       if (method === 'GET' && path === '/api/llm/config') return jsonResponse(runtime)
       if ((method === 'PATCH' || method === 'POST') && path === '/api/llm/config') {
         const runtimeBody = body as { provider?: string; model?: string; persist?: boolean }
@@ -798,6 +932,28 @@ function installFetchMock() {
           status: 200,
           headers: { 'Content-Type': 'audio/mpeg' },
         })
+      }
+      if (method === 'POST' && path === '/api/feedback/coherence') {
+        return jsonResponse(
+          {
+            feedback_id: 902,
+            feedback: {
+              feedback_id: 902,
+              session_id: body.session_id,
+              turn_id: body.turn_id ?? null,
+              feedback_type: 'coherence',
+              category: body.category ?? 'coherence',
+              coherence_score: body.coherence_score,
+              notes: body.notes ?? null,
+              provider: 'deepseek',
+              model: 'deepseek-v4-pro',
+              turn_status: 'completed',
+              turn_latency_ms: 1800,
+              created_at: fixedNow.toISOString(),
+            },
+          },
+          { status: 201 },
+        )
       }
       if (method === 'POST' && path === '/api/feedback/bad-turn') {
         return jsonResponse(
@@ -1362,6 +1518,18 @@ describe('App user workflow regressions', () => {
     localStorage.clear()
     sessionStorage.clear()
     document.cookie = 'aidm_account_token=; Max-Age=0; Path=/; SameSite=Lax'
+    if (health.llm) {
+      health.llm.provider = 'deepseek'
+      health.llm.model = 'deepseek-v4-pro'
+      health.llm.configured = true
+      health.llm.latest_turn = null
+    }
+    runtime.current = health.llm!
+    runtime.persisted = true
+    delete runtime.runtime_scope
+    delete runtime.restart_required_for_other_workers
+    ttsConfig.configured = true
+    ttsConfig.model = 'aura-2-draco-en'
     localStorage.setItem('aidm:selectedCampaignId', '10')
     localStorage.setItem('aidm:selectedSessionId', '20')
     localStorage.setItem('aidm:selectedPlayerId', '30')
@@ -1419,7 +1587,7 @@ describe('App user workflow regressions', () => {
   it('reports a saved DM turn for beta review with the session and turn id', async () => {
     await renderLoadedApp()
 
-    const reportButtons = screen.getAllByRole('button', { name: 'Report bad turn' })
+    const reportButtons = await screen.findAllByRole('button', { name: 'Report bad turn' })
     fireEvent.click(reportButtons[reportButtons.length - 1])
 
     await waitFor(() =>
@@ -1436,6 +1604,34 @@ describe('App user workflow regressions', () => {
       ),
     )
     expect(screen.getByRole('button', { name: 'Bad turn reported' })).toBeDisabled()
+  })
+
+  it('submits beta turn quality feedback from the latest DM response', async () => {
+    await renderLoadedApp()
+
+    const prompt = await screen.findByRole('form', { name: 'Beta turn feedback' })
+    fireEvent.click(within(prompt).getByRole('button', { name: 'Coherence 3' }))
+    fireEvent.click(within(prompt).getByRole('button', { name: 'Fun 5' }))
+    fireEvent.click(within(prompt).getByRole('button', { name: 'Rules 2' }))
+    fireEvent.click(within(prompt).getByRole('button', { name: 'Record' }))
+
+    await waitFor(() =>
+      expect(fetchCalls).toContainEqual(
+        expect.objectContaining({
+          method: 'POST',
+          path: '/api/feedback/coherence',
+          body: {
+            session_id: 20,
+            turn_id: 2,
+            coherence_score: 3,
+            category: 'beta_turn_prompt',
+            fun_score: 5,
+            rules_score: 2,
+          },
+        }),
+      ),
+    )
+    expect(await screen.findByText('Feedback sent.')).toBeInTheDocument()
   })
 
   it('sends structured item composer metadata for buying arbitrary items', async () => {
@@ -2845,7 +3041,7 @@ describe('App user workflow regressions', () => {
 
     await waitFor(() => expect(providerSelect).toHaveValue('fallback'))
     expect(
-      await screen.findByText('Fallback provider active. No live LLM.'),
+      await screen.findByText('Fallback provider active.'),
     ).toBeInTheDocument()
     expect(fetchCalls).toEqual(
       expect.arrayContaining([
@@ -2864,6 +3060,80 @@ describe('App user workflow regressions', () => {
       ]),
     )
     expect(screen.queryByText(/Runtime switch failed/i)).not.toBeInTheDocument()
+  })
+
+  it('surfaces beta runtime notices for local private mode', async () => {
+    await renderLoadedApp()
+
+    const notices = await screen.findByLabelText('Beta runtime notices')
+    expect(within(notices).getByText('Local/Private')).toBeInTheDocument()
+    expect(within(notices).getByText('Auth disabled.')).toBeInTheDocument()
+  })
+
+  it('opens known beta limitations from runtime notices', async () => {
+    await renderLoadedApp()
+
+    const notesToggle = await screen.findByRole('button', { name: 'Beta Notes' })
+    expect(notesToggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(notesToggle)
+
+    const notes = await screen.findByRole('note', { name: 'Known beta limitations' })
+    expect(notesToggle).toHaveAttribute('aria-expanded', 'true')
+    expect(within(notes).getByText('Known Limitations')).toBeInTheDocument()
+    expect(
+      within(notes).getByText(/Closed beta is for controlled playtests/i),
+    ).toBeInTheDocument()
+    expect(
+      within(notes).getByText(/Hosted cookie auth, CSRF, Socket.IO, and restore behavior/i),
+    ).toBeInTheDocument()
+
+    fireEvent.click(within(notes).getByRole('button', { name: 'Close beta notes' }))
+
+    await waitFor(() => expect(screen.queryByRole('note', { name: 'Known beta limitations' })).not.toBeInTheDocument())
+    expect(notesToggle).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('surfaces unavailable TTS in beta runtime notices', async () => {
+    ttsConfig.configured = false
+
+    await renderLoadedApp()
+
+    const notices = await screen.findByLabelText('Beta runtime notices')
+    expect(within(notices).getByText('TTS')).toBeInTheDocument()
+    expect(
+      within(notices).getByText('Deepgram TTS unavailable.'),
+    ).toBeInTheDocument()
+  })
+
+  it('surfaces missing live provider configuration in beta runtime notices', async () => {
+    if (health.llm) {
+      health.llm.configured = false
+    }
+
+    await renderLoadedApp()
+
+    const notices = await screen.findByLabelText('Beta runtime notices')
+    expect(within(notices).getByText('Provider Key')).toBeInTheDocument()
+    expect(
+      within(notices).getByText('Live DM responses need a configured provider key.'),
+    ).toBeInTheDocument()
+  })
+
+  it('surfaces process-local provider scope in beta runtime notices', async () => {
+    runtime.runtime_scope = 'process'
+    runtime.restart_required_for_other_workers = true
+
+    await renderLoadedApp()
+
+    const notices = await screen.findByLabelText('Beta runtime notices')
+    expect(within(notices).getByText('Process-Local')).toBeInTheDocument()
+    expect(
+      within(notices).getByText('Restart other workers to match.'),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Process-local')).toHaveAttribute(
+      'title',
+      'Provider changes apply to this backend process; restart other workers to match.',
+    )
   })
 
   it('keeps restored legacy passwordless sessions in password setup', async () => {
@@ -3735,10 +4005,10 @@ describe('App user workflow regressions', () => {
   it('keeps long DM responses visible in the current response and full response views', async () => {
     await renderLoadedApp()
 
-    expect(screen.getAllByText(/Full narrator ending remains visible/i).length).toBeGreaterThan(0)
+    await waitFor(() => expect(screen.getAllByText(/Full narrator ending remains visible/i).length).toBeGreaterThan(0))
 
     fireEvent.click(screen.getByRole('tab', { name: 'DM Response' }))
-    expect(screen.getAllByText(/Full narrator ending remains visible/i).length).toBeGreaterThan(0)
+    await waitFor(() => expect(screen.getAllByText(/Full narrator ending remains visible/i).length).toBeGreaterThan(0))
   })
 
   it('keeps the latest DM response expanded when a state update arrives after it', async () => {
@@ -3897,11 +4167,49 @@ describe('App user workflow regressions', () => {
     expect(screen.getByText('Canon extraction job failed.')).toBeInTheDocument()
     expect(screen.getByText('socket.dm_persist_failed recorded 1 time.')).toBeInTheDocument()
     expect(screen.getAllByText('deepseek / deepseek-v4-pro').length).toBeGreaterThan(0)
+    const qualityCard = await screen.findByRole('region', { name: 'Selected session quality' })
+    expect(within(qualityCard).getByRole('heading', { name: 'Session Quality' })).toBeInTheDocument()
+    expect(within(qualityCard).getByText('Review')).toBeInTheDocument()
+    expect(within(qualityCard).getByText('Session Alpha')).toBeInTheDocument()
+    expect(within(qualityCard).getByText('1800 ms')).toBeInTheDocument()
+    expect(within(qualityCard).getByText('Provider/model: deepseek / deepseek-v4-pro (2 turns)')).toBeInTheDocument()
+    expect(
+      within(qualityCard).getByText('Review recommended: 1 failed turn, 1 failed canon job, 1 bad-turn report.'),
+    ).toBeInTheDocument()
+    expect(
+      within(qualityCard).getByText('Latency: 1800 ms p95, 1800 ms avg across 2 samples.'),
+    ).toBeInTheDocument()
+
+    const createObjectURL = vi.fn(() => 'blob:support-bundle')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL,
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revokeObjectURL,
+    })
+    const downloadClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Export support bundle for session 20' })[0])
+
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob)))
+    expect(downloadClick).toHaveBeenCalled()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:support-bundle')
     expect(fetchCalls).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           method: 'GET',
           path: '/api/beta/incidents',
+        }),
+        expect.objectContaining({
+          method: 'GET',
+          path: '/api/beta/session-quality',
+        }),
+        expect.objectContaining({
+          method: 'GET',
+          path: '/api/beta/support-bundle',
         }),
       ]),
     )

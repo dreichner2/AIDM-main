@@ -162,7 +162,7 @@ replace every placeholder in the deployment provider's secret/env manager.
 | `AIDM_CONTENT_SECURITY_POLICY` | Optional CSP override for hosted frontend serving. |
 | `AIDM_CORS_ALLOWLIST` | Comma-separated REST origins. |
 | `AIDM_SOCKET_CORS_ALLOWLIST` | Comma-separated Socket.IO origins. |
-| `AIDM_SOCKETIO_WORKER_MODEL` | Production worker model: `single`, `sticky`, or `message_queue`. |
+| `AIDM_SOCKETIO_WORKER_MODEL` | Production worker model: `single`, `sticky`, or `message_queue`; RC1 uses the `single` decision in `docs/socketio_worker_model.md`. |
 | `AIDM_SOCKETIO_MESSAGE_QUEUE` | Socket.IO message queue URL when `AIDM_SOCKETIO_WORKER_MODEL=message_queue`. |
 | `AIDM_RATE_LIMIT_STORE` | `memory` or `database`. Use `database` for multi-process deployments. |
 | `AIDM_TURN_COORDINATOR_STORE` | `memory` or `database`. Use `database` for multi-process deployments. |
@@ -189,15 +189,39 @@ replace every placeholder in the deployment provider's secret/env manager.
 | `make bundle-budget` | Check frontend bundle budget. |
 | `make smoke` | Run the backend beta smoke flow. |
 | `make scenario-regression` | Run deterministic scenario quality checks for narration, rules, state, and memory. |
+| `make hosted-cookie-auth-smoke` | Prove hosted-mode cookie account auth, CSRF, role refresh, socket auth, and logout cleanup in an isolated runtime; add `HOSTED_COOKIE_AUTH_SMOKE_ARGS="--target-url <target-url> ..."` for hosted/staging proof. |
+| `make security-forbidden-smoke` | Prove a non-admin account is rejected by combat operator, bestiary authoring/save, and beta operator endpoints; add `SECURITY_FORBIDDEN_SMOKE_ARGS="--target-url <target-url> --account-token <token> --workspace-id <id> --campaign-id <id> --session-id <id> --evidence-report tmp/release/security-forbidden-evidence.md"` for hosted/staging proof. |
+| `make session-export-import-smoke` | Prove session export/import restores turn events into a new active session without duplicating raw source logs; add `SESSION_EXPORT_IMPORT_SMOKE_ARGS="--target-url <target-url> --auth-token <token> --workspace-id <id> --session-id <id> --player-id <id> --evidence-report tmp/release/export-import-evidence.md"` for hosted/staging proof. |
+| `make hosted-rc-evidence` | Run the hosted/staging RC evidence plan as one command; pass `HOSTED_RC_EVIDENCE_ARGS="--target-url <url> --auth-token <operator-token> --workspace-id <id> --non-admin-token <token> --campaign-id <id> --session-id <id> ..."`. The command reports `manual-evidence-required` until backup/restore proof, worker-process proof, and source-archive attachment proof are supplied with the matching evidence flags, and rejects placeholder/example/localhost manual proof values. |
+| `make beta-slo-baseline` | Render `tmp/release/beta-slo-baseline.md` from `/api/beta/slo` and `/api/beta/incidents`; pass `BETA_SLO_BASELINE_ARGS="--target-url <target-url> --auth-token <token> ..."`. |
 | `make backup-restore-drill` | Create a non-destructive SQLite backup and verify a restored copy; pass `BACKUP_RESTORE_DRILL_ARGS="--database-uri sqlite:////path/to/dnd_ai_dm.db"` for a specific DB. |
+| `make migration-chain-drill` | Run a non-destructive Alembic `upgrade head -> downgrade base -> upgrade head` drill against an isolated SQLite database. |
 | `make observability-check` | Validate the Prometheus/Grafana observability bundle; pass `OBSERVABILITY_CHECK_ARGS="--check-docker-compose --require-docker"` for a Docker-backed compose check. |
 | `make browser-smoke` | Run the frontend browser smoke script. |
 | `make visual-smoke` | Run the frontend visual smoke script. |
+| `make visual-smoke-review` | Review the latest visual-smoke screenshots and write `tmp/release/visual-smoke-review.md` plus JSON evidence. |
+| `make frontend-npm-ci-evidence` | Run `npm ci` in `aidm_frontend` and write `tmp/release/frontend-npm-ci-evidence.md`/`.json` for final frontend lockfile-install signoff. |
+| `make packaging-cleanup-evidence` | Verify `make clean`/`make clean-deps` cleanup coverage and source-archive exclusions without deleting `tmp/release`; writes `tmp/release/packaging-cleanup-evidence.md`/`.json`. |
 | `make secrets` | Run the repo secret scanner. |
 | `make api-types` | Regenerate frontend API contract types from backend routes. |
+| `make socketio-worker-model-decision` | Verify the RC1 Socket.IO worker-model decision, production env template, production server command, and docs agree. |
 | `make closed-beta-rc` | Run the full local closed-beta release-candidate gate. |
 | `make closed-beta-rc-fast` | Run the RC gate without browser smoke or dependency audits for local iteration. |
-| `make deployment-readiness DEPLOYMENT_READINESS_ARGS="..."` | Validate hosted closed-beta env choices and optional live `/api/health`/metrics/security-header checks. |
+| `make github-actions-evidence` | Render `tmp/release/github-actions-evidence.md`/`.json`; pass `GITHUB_ACTIONS_EVIDENCE_ARGS="--auto-gh --include-gh-details"` to discover run URLs plus read-only workflow/run diagnostics with `gh`, or pass `--ci-run-url <url> --closed-beta-rc-run-url <url>` manually. |
+| `make rc-issue-evidence` | Render local RC evidence snippets for issues `#3`-`#9`. |
+| `make rc-issue-closure-evidence` | Read generated issue snippets and GitHub issue state for `#3`-`#9`, then write `tmp/release/rc-issue-closure-evidence.md`/`.json` without posting or closing issues. |
+| `make release-evidence-packet` | Render `tmp/release/release-evidence-packet.md`, a single handoff manifest for RC evidence, issue snippets, source archive, visual smoke, GitHub Actions evidence, hosted RC evidence, external proof inputs/execution plan, signoff draft/status, security/export-import evidence, deployment-readiness evidence, and beta SLO status. |
+| `make rc-recommendation-matrix` | Render `tmp/release/rc-recommendation-matrix.md`/`.json`, mapping the original RC recommendations to current evidence and separating local implementation from hosted/manual proof. |
+| `make external-proof-inputs` | Render `tmp/release/external-proof-inputs.md`/`.json`, a fillable hosted/GitHub/operator proof template generated from the release packet, recommendation matrix, and operator signoff action plan. |
+| `make external-proof-execution-plan` | Render `tmp/release/external-proof-execution-plan.md`/`.json`, grouping remaining external proof into ordered candidate, GitHub Actions, hosted-readiness, hosted-smoke, manual-provider, and final-signoff phases. |
+| `make operator-signoff-values-template` | Render `tmp/release/external-proof-values.example.json`; copy it locally to `tmp/release/external-proof-values.json` when filling proof links/paths. Sensitive token fields are intentionally omitted from the template; pass live auth tokens only through commands or a secret manager. |
+| `make operator-signoff-from-inputs` | Render `tmp/release/operator-signoff.from-inputs.json` plus status artifacts from a filled `tmp/release/external-proof-values.json` for review before final operator signoff. The renderer rejects persisted token fields such as `operator_auth_token` or `non_admin_token`. |
+| `make operator-signoff-draft` | Seed `tmp/release/operator-signoff.draft.json` from `tmp/release/release-evidence-packet.json`; only proven GitHub/hosted/manual evidence is marked provided, and local or placeholder proof remains pending. |
+| `make operator-signoff-action-plan` | Render `tmp/release/operator-signoff-action-plan.md`/`.json` from the signoff draft and release packet, listing the exact commands, inputs, and evidence fields still needed for final signoff. |
+| `make operator-signoff-status` | Render `tmp/release/operator-signoff-status.md`/`.json` from `tmp/release/operator-signoff.json`; start from `docs/rc_operator_signoff_manifest.example.json` and add `OPERATOR_SIGNOFF_STATUS_ARGS="--require-complete"` before final RC issue closure. Final signoff rejects placeholder commit/operator metadata, non-hosted or example `target_url` values, and provided evidence that still points at placeholder/example/localhost sources. |
+| `make rc-handoff-artifacts` | Build the full local RC handoff bundle: source archive, issue snippets, recommendation matrix, external proof inputs, external proof execution plan, signoff values template, signoff-from-inputs preview, operator signoff status/draft/action plan, release evidence packet, and checklist status. |
+| `make post-rc-issue-evidence` | Preview generated RC issue comments; add `POST_RC_ISSUE_EVIDENCE_ARGS="--post"` to post with `gh`. |
+| `make deployment-readiness DEPLOYMENT_READINESS_ARGS="..."` | Validate hosted closed-beta env choices and optional live `/api/health`/metrics/security-header checks; add `--evidence-report` to save a Markdown/JSON artifact. |
 | `make db-upgrade` | Run Flask database migrations. |
 | `make reproject-session SESSION_ID=...` | Rebuild projections for one session. |
 | `make reproject-all` | Rebuild projections for all sessions. |
@@ -348,6 +372,7 @@ Smoke and safety checks:
 make smoke
 make browser-smoke
 make visual-smoke
+make visual-smoke-review
 make secrets
 pip-audit -r requirements.txt
 ```
@@ -362,6 +387,18 @@ curl http://127.0.0.1:5050/api/tts/config
 
 The CI workflow mirrors the important local gates: backend tests, frontend
 tests/build, bundle budget, secret scanning, and dependency/security checks.
+The manual `Closed Beta RC` workflow also uploads a `closed-beta-rc-evidence`
+artifact with the RC report, issue snippets, release evidence packet, source
+archive, visual-smoke screenshots/review evidence, and GitHub Actions run URL
+evidence when those files are produced.
+
+Closed-beta handoff docs:
+
+- `docs/release_checklist.md` tracks the RC1 gate criteria.
+- `docs/beta_runbook.md` covers operator startup, incident review, and safe
+  beta flags.
+- `docs/beta_tester_onboarding.md` is the invite-ready tester guide.
+- `docs/auth_modes.md` maps local, private, and hosted auth modes.
 
 ## Database And Migrations
 
@@ -406,6 +443,9 @@ not necessarily what the running backend is serving.
   local development.
 - Production bootstrap requires `AIDM_OBSERVABILITY_PROVIDER`, `AIDM_ALERT_OWNER`,
   and an explicit `AIDM_SOCKETIO_WORKER_MODEL`.
+- For the first hosted closed beta, use the `single` worker-model decision in
+  `docs/socketio_worker_model.md`: `AIDM_SOCKETIO_WORKER_MODEL=single`,
+  `AIDM_SOCKETIO_ASYNC_MODE=eventlet`, and `WEB_CONCURRENCY=1`.
 - For hosted same-origin auth, enable `AIDM_ACCOUNT_COOKIE_AUTH_ENABLED=true`,
   keep `AIDM_ACCOUNT_COOKIE_SECURE=true`, and set
   `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false` when browser JavaScript should not

@@ -25,6 +25,11 @@ import type { SceneMusicControlPayload, SceneMusicSyncState } from './SceneMusic
 import type { ActivePlayer, Campaign, ClarificationRequest, Player, SessionState, SessionSummary, TimelineEntry } from './types'
 
 export type MainTab = 'turns' | 'dm' | 'notes'
+export type TurnQualityScores = {
+  coherence: number
+  fun: number
+  rules: number
+}
 
 type ChatTextSize = 'default' | 'large' | 'extra'
 type ChatTextFont = 'default' | 'sans' | 'mono'
@@ -44,6 +49,12 @@ type DmExecutionStats = {
 type CanonFact = [fact: string, source: string]
 
 const CHAT_TEXT_SETTINGS_STORAGE_KEY = 'aidm:chatTextSettings'
+const QUALITY_SCORE_OPTIONS = [1, 2, 3, 4, 5] as const
+const DEFAULT_TURN_QUALITY_SCORES: TurnQualityScores = {
+  coherence: 4,
+  fun: 4,
+  rules: 4,
+}
 const DEFAULT_CHAT_TEXT_SETTINGS: ChatTextSettings = {
   size: 'default',
   font: 'default',
@@ -117,6 +128,9 @@ type SessionBoardProps = {
   reportedBadTurnIds: Set<number>
   reportingBadTurnIds: Set<number>
   reportBadTurn: (entry: TimelineEntry) => void
+  ratedTurnQualityIds: Set<number>
+  ratingTurnQualityIds: Set<number>
+  submitTurnQuality: (entry: TimelineEntry, scores: TurnQualityScores) => void
   expandedTurnIds: Set<string>
   setExpandedTurnIds: Dispatch<SetStateAction<Set<string>>>
   selectedPlayer: Player | null
@@ -179,6 +193,10 @@ function timelineTurnId(entry: TimelineEntry) {
 
 function canReportBadTurn(entry: TimelineEntry | null) {
   return Boolean(entry && entry.role === 'dm' && !entry.streaming && timelineTurnId(entry) !== null)
+}
+
+function canRateTurnQuality(entry: TimelineEntry | null) {
+  return canReportBadTurn(entry)
 }
 
 function RollWaitBanner({ notice }: { notice: PendingRollNotice }) {
@@ -325,6 +343,9 @@ export function SessionBoard({
   reportedBadTurnIds,
   reportingBadTurnIds,
   reportBadTurn,
+  ratedTurnQualityIds,
+  ratingTurnQualityIds,
+  submitTurnQuality,
   expandedTurnIds,
   setExpandedTurnIds,
   selectedPlayer,
@@ -349,6 +370,7 @@ export function SessionBoard({
   const loading = workspaceLoading || sessionLoading
   const [chatTextSettings, setChatTextSettings] = useState(loadChatTextSettings)
   const [chatTextMenuOpen, setChatTextMenuOpen] = useState(false)
+  const [qualityDrafts, setQualityDrafts] = useState<Record<number, TurnQualityScores>>({})
   const streamLabel =
     currentResponseEntry && turnPersistenceLabel(currentResponseEntry)
       ? turnPersistenceLabel(currentResponseEntry)
@@ -393,6 +415,77 @@ export function SessionBoard({
       >
         <ClipboardList size={15} />
       </button>
+    )
+  }
+
+  const updateQualityDraft = (turnId: number, field: keyof TurnQualityScores, value: number) => {
+    setQualityDrafts((current) => ({
+      ...current,
+      [turnId]: {
+        ...(current[turnId] ?? DEFAULT_TURN_QUALITY_SCORES),
+        [field]: value,
+      },
+    }))
+  }
+
+  const renderQualityScoreGroup = (
+    turnId: number,
+    field: keyof TurnQualityScores,
+    label: string,
+    draft: TurnQualityScores,
+  ) => (
+    <div className="turn-quality-score-group">
+      <span>{label}</span>
+      <div>
+        {QUALITY_SCORE_OPTIONS.map((score) => (
+          <button
+            key={`${field}-${score}`}
+            type="button"
+            aria-label={`${label} ${score}`}
+            aria-pressed={draft[field] === score}
+            onClick={() => updateQualityDraft(turnId, field, score)}
+          >
+            {score}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+
+  const renderQualityPrompt = (entry: TimelineEntry | null) => {
+    if (!entry || !canRateTurnQuality(entry)) return null
+    const turnId = timelineTurnId(entry)
+    if (turnId === null) return null
+    const submitted = ratedTurnQualityIds.has(turnId)
+    const submitting = ratingTurnQualityIds.has(turnId)
+    const draft = qualityDrafts[turnId] ?? DEFAULT_TURN_QUALITY_SCORES
+
+    if (submitted) {
+      return (
+        <div className="turn-quality-prompt submitted" role="status">
+          <strong>Beta feedback</strong>
+          <span>Feedback sent.</span>
+        </div>
+      )
+    }
+
+    return (
+      <form
+        className="turn-quality-prompt"
+        aria-label="Beta turn feedback"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (!submitting) submitTurnQuality(entry, draft)
+        }}
+      >
+        <strong>Beta feedback</strong>
+        {renderQualityScoreGroup(turnId, 'coherence', 'Coherence', draft)}
+        {renderQualityScoreGroup(turnId, 'fun', 'Fun', draft)}
+        {renderQualityScoreGroup(turnId, 'rules', 'Rules', draft)}
+        <button type="submit" disabled={submitting}>
+          {submitting ? 'Recording' : 'Record'}
+        </button>
+      </form>
     )
   }
 
@@ -675,6 +768,7 @@ export function SessionBoard({
                   <div className="response-copy">
                     <p>{latestDmText}</p>
                   </div>
+                  {renderQualityPrompt(currentResponseEntry)}
                   <div className={`stream-state ${sendPending || streamingTurnActive ? 'streaming' : ''}`}>
                     <span />
                     {streamLabel}
@@ -722,6 +816,7 @@ export function SessionBoard({
               <div className="response-copy">
                 <p>{latestDmText}</p>
               </div>
+              {renderQualityPrompt(currentResponseEntry)}
               <div className={`stream-state ${sendPending || streamingTurnActive ? 'streaming' : ''}`}>
                 <span />
                 {streamLabel}

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from scripts.deployment_readiness_check import (
     REQUIRED_SECURITY_HEADERS,
+    main,
     merged_env,
     parse_env_file,
     validate_environment,
@@ -37,6 +39,13 @@ def _ready_env(**overrides: str) -> dict[str, str]:
     }
     env.update(overrides)
     return env
+
+
+def _write_ready_env_file(path: Path, **overrides: str) -> None:
+    path.write_text(
+        '\n'.join(f'{key}={value}' for key, value in _ready_env(**overrides).items()) + '\n',
+        encoding='utf-8',
+    )
 
 
 def test_parse_env_file_supports_comments_export_and_quotes(tmp_path: Path):
@@ -206,3 +215,101 @@ def test_parse_env_file_rejects_invalid_lines(tmp_path: Path):
 
     with pytest.raises(ValueError, match='expected KEY=value'):
         parse_env_file(env_file)
+
+
+def test_main_writes_markdown_evidence_report_for_env_check(tmp_path: Path):
+    env_file = tmp_path / '.env.production'
+    report_path = tmp_path / 'deployment-readiness.md'
+    _write_ready_env_file(env_file)
+
+    exit_code = main(['--env-file', str(env_file), '--evidence-report', str(report_path)])
+
+    assert exit_code == 0
+    report = report_path.read_text(encoding='utf-8')
+    assert '# Deployment Readiness Evidence' in report
+    assert '- Status: passed' in report
+    assert f'- Env file: `{env_file}`' in report
+    assert '| Environment configuration | passed | 0 | 1 |' in report
+    assert 'AIDM_SOCKETIO_WORKER_MODEL=single requires exactly one backend worker' in report
+
+
+def test_main_writes_default_evidence_report_path(tmp_path: Path, monkeypatch):
+    env_file = tmp_path / '.env.production'
+    _write_ready_env_file(env_file)
+    monkeypatch.setattr('scripts.deployment_readiness_check.REPO_ROOT', tmp_path)
+
+    exit_code = main(['--env-file', str(env_file), '--evidence-report'])
+
+    report_path = tmp_path / 'tmp/release/deployment-readiness-evidence.md'
+    assert exit_code == 0
+    assert report_path.exists()
+    assert '# Deployment Readiness Evidence' in report_path.read_text(encoding='utf-8')
+
+
+def test_main_writes_json_evidence_report_for_live_target(tmp_path: Path, monkeypatch):
+    env_file = tmp_path / '.env.production'
+    report_path = tmp_path / 'deployment-readiness.json'
+    _write_ready_env_file(env_file)
+    security_headers = {header: 'set' for header in REQUIRED_SECURITY_HEADERS}
+
+    def fake_get(url, headers, timeout):
+        assert headers == {'Authorization': 'Bearer live-token'}
+        assert timeout == 3
+        if url.endswith('/api/health'):
+            return _FakeResponse(
+                payload={
+                    'status': 'ok',
+                    'env': 'production',
+                    'auth_required': True,
+                    'llm': {'provider': 'gemini'},
+                },
+                headers=security_headers,
+            )
+        if url.endswith('/api/metrics'):
+            return _FakeResponse(payload={'counters': {}, 'timings': {}, 'beta': {}})
+        if url.endswith('/api/metrics/prometheus'):
+            return _FakeResponse(
+                text='# TYPE aidm_telemetry_enabled gauge\naidm_telemetry_enabled 1\naidm_beta_bad_turn_reports 0\n',
+                headers={'Content-Type': 'text/plain'},
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr('scripts.deployment_readiness_check.requests.get', fake_get)
+
+    exit_code = main(
+        [
+            '--env-file',
+            str(env_file),
+            '--target-url',
+            'https://aidm.example.test',
+            '--auth-token',
+            'live-token',
+            '--timeout-seconds',
+            '3',
+            '--evidence-report',
+            str(report_path),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(report_path.read_text(encoding='utf-8'))
+    assert payload['status'] == 'passed'
+    assert payload['options']['auth_token_provided'] is True
+    assert payload['options']['target_url'] == 'https://aidm.example.test'
+    assert payload['sections'][0]['label'] == 'Environment configuration'
+    assert payload['sections'][1]['label'] == 'Live target checks'
+    assert payload['sections'][1]['status'] == 'passed'
+
+
+def test_main_writes_evidence_report_when_env_file_is_invalid(tmp_path: Path):
+    env_file = tmp_path / '.env.production'
+    report_path = tmp_path / 'deployment-readiness.md'
+    env_file.write_text('AIDM_ENV production\n', encoding='utf-8')
+
+    exit_code = main(['--env-file', str(env_file), '--evidence-report', str(report_path)])
+
+    assert exit_code == 1
+    report = report_path.read_text(encoding='utf-8')
+    assert '- Status: failed' in report
+    assert 'Environment file load' in report
+    assert 'expected KEY=value' in report

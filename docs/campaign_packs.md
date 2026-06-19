@@ -143,6 +143,7 @@ Run the local pack tool before importing or publishing a pack:
 ```bash
 PACK=docs/examples/the_road_of_unremembered_kings_campaign.json
 python scripts/aidm_pack.py lint "$PACK"
+python scripts/aidm_pack.py report "$PACK"
 python scripts/aidm_pack.py preview "$PACK"
 python scripts/aidm_pack.py graph "$PACK"
 python scripts/aidm_pack.py test-checkpoints "$PACK"
@@ -150,9 +151,11 @@ python scripts/aidm_pack.py test-checkpoints "$PACK"
 
 The linter uses the same import dry-run validator as the API, then adds authoring checks for unreachable checkpoints, missing completion cues, hidden records visible at start, large prompt-budget records, dependency declarations, and `pack_only` checkpoints without rejoin targets.
 
-The frontend import dialog exposes the same lint and graph preview so authors can edit JSON and inspect warnings before creating a campaign.
+The `report` command prints an author-facing validation summary for starting references, populated authored collections, visible-at-start records, hidden player records, checkpoint reachability, optional/terminal checkpoints, encounter checkpoint linkage, and loose encounters. Add `--json` when release evidence or external authoring tools need the structured report.
 
-The API endpoint `POST /api/campaigns/pack-tools/lint` returns `ok`, `issues`, `summary`, `preview`, and `graph`. Warnings do not block import; errors do.
+The frontend import dialog exposes the same lint, graph, and authoring report preview so authors can edit JSON and inspect warnings before creating a campaign.
+
+The API endpoint `POST /api/campaigns/pack-tools/lint` returns `ok`, `issues`, `summary`, `preview`, `graph`, and `authoring_report`. Warnings do not block import; errors do.
 
 ## Installed Pack Library
 

@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 from aidm_server.database import db
-from aidm_server.models import CanonJob, DmCoherenceFeedback, DmTurn, Session
+from aidm_server.models import (
+    CanonJob,
+    DmCoherenceFeedback,
+    DmTurn,
+    Session,
+    SessionLogEntry,
+    TurnEvent,
+    safe_json_dumps,
+    safe_json_loads,
+)
 from aidm_server.telemetry import telemetry_event
 from tests.helpers import seed_world_campaign_player_session
 
@@ -72,11 +81,22 @@ def test_submit_feedback_and_beta_summary(client, app):
             'session_id': ids['session_id'],
             'turn_id': turn_id,
             'coherence_score': 4,
+            'category': 'beta_turn_prompt',
+            'fun_score': 5,
+            'rules_score': 3,
             'notes': 'Solid continuity',
         },
     )
     assert feedback_response.status_code == 201
-    assert feedback_response.get_json()['feedback_id'] > 0
+    feedback_payload = feedback_response.get_json()
+    assert feedback_payload['feedback_id'] > 0
+    assert feedback_payload['feedback']['category'] == 'beta_turn_prompt'
+
+    with app.app_context():
+        feedback = db.session.get(DmCoherenceFeedback, feedback_payload['feedback_id'])
+        metadata = safe_json_loads(feedback.metadata_json, {})
+        assert metadata['fun_score'] == 5
+        assert metadata['rules_score'] == 3
 
     summary_response = client.get('/api/beta/summary')
     assert summary_response.status_code == 200
@@ -134,6 +154,26 @@ def test_bad_turn_feedback_and_beta_incidents(client, app):
                 error_text='extractor timeout',
             )
         )
+        session_obj = db.session.get(Session, ids['session_id'])
+        session_obj.state_snapshot = safe_json_dumps({'revision': 3, 'scene': {'location': 'North Door'}}, {})
+        db.session.add(
+            SessionLogEntry(
+                session_id=ids['session_id'],
+                entry_type='system',
+                message='Failed turn recorded for operator review.',
+                metadata_json=safe_json_dumps({'turn_id': failed_turn.turn_id}, {}),
+            )
+        )
+        db.session.add(
+            TurnEvent(
+                session_id=ids['session_id'],
+                campaign_id=ids['campaign_id'],
+                turn_id=failed_turn.turn_id,
+                player_id=ids['player_id'],
+                event_type='turn.failed',
+                payload_json=safe_json_dumps({'reason': 'test failure'}, {}),
+            )
+        )
         db.session.commit()
         turn_id = failed_turn.turn_id
 
@@ -171,8 +211,55 @@ def test_bad_turn_feedback_and_beta_incidents(client, app):
     assert incidents_payload['summary']['failed_turn_count'] == 1
     assert incidents_payload['summary']['failed_canon_job_count'] == 1
 
+    session_incidents_response = client.get(f'/api/beta/incidents?session_id={ids["session_id"]}&limit=10')
+    assert session_incidents_response.status_code == 200
+    assert session_incidents_response.get_json()['session_id'] == ids['session_id']
+
+    quality_response = client.get(f'/api/beta/session-quality?session_id={ids["session_id"]}&limit=10')
+    assert quality_response.status_code == 200
+    quality_payload = quality_response.get_json()
+    assert quality_payload['session']['session_id'] == ids['session_id']
+    assert quality_payload['summary']['quality_status'] == 'review'
+    assert quality_payload['summary']['total_turn_count'] == 1
+    assert quality_payload['summary']['failed_turn_count'] == 1
+    assert quality_payload['summary']['canon_job_failed_count'] == 1
+    assert quality_payload['summary']['bad_turn_report_count'] == 1
+    assert quality_payload['summary']['dm_response_latency_ms_p95'] == 450.0
+    assert quality_payload['operator_summary']['headline'] == (
+        'Review recommended: 1 failed turn, 1 failed canon job, 1 bad-turn report.'
+    )
+    assert 'Provider/model: gemini / gemini-3-flash-preview (1 turn).' in quality_payload['operator_summary']['details']
+    assert 'Latency: 450 ms p95, 450 ms avg across 1 sample.' in quality_payload['operator_summary']['details']
+    assert quality_payload['provider_model_turn_counts'] == [
+        {'provider': 'gemini', 'model': 'gemini-3-flash-preview', 'turn_count': 1}
+    ]
+
+    support_bundle_response = client.get(f'/api/beta/support-bundle?session_id={ids["session_id"]}&limit=10')
+    assert support_bundle_response.status_code == 200
+    support_bundle = support_bundle_response.get_json()
+    assert support_bundle['workspace_id'] == 'owner'
+    assert support_bundle['filters'] == {'session_id': ids['session_id'], 'limit': 10}
+    assert support_bundle['session']['session_id'] == ids['session_id']
+    assert support_bundle['session']['state_snapshot_keys'] == ['revision', 'scene']
+    assert support_bundle['incidents']['summary']['bad_turn_report_count'] == 1
+    assert support_bundle['incidents']['summary']['failed_turn_count'] == 1
+    assert support_bundle['incidents']['summary']['failed_canon_job_count'] == 1
+    assert support_bundle['audits']['summary'] == {'operator_action_count': 0, 'state_mutation_count': 0}
+    assert support_bundle['session_quality']['summary']['quality_status'] == 'review'
+    assert support_bundle['session_quality']['summary']['failed_turn_count'] == 1
+    assert support_bundle['session_quality']['operator_summary'] == quality_payload['operator_summary']
+    assert support_bundle['recent_turns'][0]['turn_id'] == turn_id
+    assert support_bundle['canon_jobs'][0]['error_text'] == 'extractor timeout'
+    assert support_bundle['session_log_entries'][0]['message'] == 'Failed turn recorded for operator review.'
+    assert support_bundle['turn_events'][0]['event_type'] == 'turn.failed'
+    assert support_bundle['telemetry']['incident_counters']['event.socket.dm_persist_failed'] == 1
+
 
 def test_feedback_validation_errors(client):
+    response = client.get('/api/beta/session-quality')
+    assert response.status_code == 400
+    assert response.get_json()['error_code'] == 'validation_error'
+
     response = client.post('/api/feedback/coherence', data='not-json', content_type='text/plain')
     assert response.status_code == 400
     assert response.get_json()['error_code'] == 'validation_error'
@@ -182,5 +269,9 @@ def test_feedback_validation_errors(client):
     assert response.get_json()['error_code'] == 'validation_error'
 
     response = client.post('/api/feedback/coherence', json={'session_id': 1, 'coherence_score': 7})
+    assert response.status_code == 400
+    assert response.get_json()['error_code'] == 'validation_error'
+
+    response = client.post('/api/feedback/coherence', json={'session_id': 1, 'coherence_score': 4, 'fun_score': 7})
     assert response.status_code == 400
     assert response.get_json()['error_code'] == 'validation_error'

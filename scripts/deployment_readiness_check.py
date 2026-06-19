@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime
 from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path
 import sys
@@ -30,6 +32,13 @@ REQUIRED_SECURITY_HEADERS = {
     'Referrer-Policy',
     'Permissions-Policy',
 }
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class ReportSection:
+    label: str
+    report: 'ReadinessReport'
 
 
 @dataclass
@@ -318,6 +327,121 @@ def _merge_reports(*reports: ReadinessReport) -> ReadinessReport:
     return merged
 
 
+def _iso_now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def _report_path(path: Path) -> Path:
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _relative_or_absolute(path: Path | None) -> str:
+    if path is None:
+        return ''
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _section_payload(section: ReportSection) -> dict[str, object]:
+    return {
+        'label': section.label,
+        'status': 'passed' if section.report.ok else 'failed',
+        'errors': section.report.errors,
+        'warnings': section.report.warnings,
+    }
+
+
+def _options_payload(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        'env_file': _relative_or_absolute(args.env_file),
+        'target_url': args.target_url or '',
+        'auth_token_provided': bool(args.auth_token),
+        'timeout_seconds': args.timeout_seconds,
+        'same_origin_deployment': bool(args.same_origin_deployment),
+        'auth_storage_exception_provided': bool(args.auth_storage_exception.strip()),
+        'socketio_staging_proof_provided': bool(args.socketio_staging_proof.strip()),
+        'allow_fallback_provider': bool(args.allow_fallback_provider),
+        'allow_non_production_target': bool(args.allow_non_production_target),
+    }
+
+
+def write_evidence_report(
+    path: Path,
+    *,
+    sections: list[ReportSection],
+    started_at: str,
+    finished_at: str,
+    args: argparse.Namespace,
+) -> None:
+    output_path = _report_path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    status = 'passed' if all(section.report.ok for section in sections) else 'failed'
+    payload = {
+        'status': status,
+        'started_at': started_at,
+        'finished_at': finished_at,
+        'options': _options_payload(args),
+        'sections': [_section_payload(section) for section in sections],
+    }
+    if output_path.suffix.lower() == '.json':
+        output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        return
+
+    rows = [
+        '| Check | Status | Errors | Warnings |',
+        '| --- | --- | ---: | ---: |',
+    ]
+    for section in sections:
+        rows.append(
+            f'| {section.label} | {"passed" if section.report.ok else "failed"} '
+            f'| {len(section.report.errors)} | {len(section.report.warnings)} |'
+        )
+
+    details: list[str] = []
+    for section in sections:
+        details.extend(['', f'## {section.label}', '', f'- Status: {"passed" if section.report.ok else "failed"}'])
+        if section.report.warnings:
+            details.append('- Warnings:')
+            details.extend(f'  - {warning}' for warning in section.report.warnings)
+        else:
+            details.append('- Warnings: none')
+        if section.report.errors:
+            details.append('- Errors:')
+            details.extend(f'  - {error}' for error in section.report.errors)
+        else:
+            details.append('- Errors: none')
+
+    options = payload['options']
+    output_path.write_text(
+        '\n'.join(
+            [
+                '# Deployment Readiness Evidence',
+                '',
+                f'- Status: {status}',
+                f'- Started: {started_at}',
+                f'- Finished: {finished_at}',
+                f"- Env file: `{options['env_file'] or 'process environment'}`",
+                f"- Target URL: `{options['target_url'] or 'not checked'}`",
+                f"- Auth token provided: {options['auth_token_provided']}",
+                f"- Same-origin deployment: {options['same_origin_deployment']}",
+                f"- Auth storage exception provided: {options['auth_storage_exception_provided']}",
+                f"- Socket.IO staging proof provided: {options['socketio_staging_proof_provided']}",
+                f"- Allow fallback provider: {options['allow_fallback_provider']}",
+                f"- Allow non-production target: {options['allow_non_production_target']}",
+                '',
+                '## Checks',
+                '',
+                *rows,
+                *details,
+                '',
+            ]
+        ),
+        encoding='utf-8',
+    )
+
+
 def _print_report(report: ReadinessReport) -> None:
     for warning in report.warnings:
         print(f'[deployment-readiness][warning] {warning}')
@@ -358,39 +482,73 @@ def build_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Allow live endpoint checks against a staging target that does not report env=production.',
     )
+    parser.add_argument(
+        '--evidence-report',
+        nargs='?',
+        const=Path('tmp/release/deployment-readiness-evidence.md'),
+        default=None,
+        type=Path,
+        help='Write a Markdown or JSON deployment-readiness evidence report.',
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    started_at = _iso_now()
     try:
         env = merged_env(args.env_file)
     except Exception as exc:
         print(f'[deployment-readiness][error] {exc}')
+        if args.evidence_report is not None:
+            report = ReadinessReport(errors=[str(exc)])
+            write_evidence_report(
+                args.evidence_report,
+                sections=[ReportSection('Environment file load', report)],
+                started_at=started_at,
+                finished_at=_iso_now(),
+                args=args,
+            )
+            print(f'[deployment-readiness] Evidence report written to {_report_path(args.evidence_report)}.')
         return 1
 
-    reports = [
-        validate_environment(
-            env,
-            same_origin_deployment=args.same_origin_deployment,
-            auth_storage_exception=args.auth_storage_exception,
-            socketio_staging_proof=args.socketio_staging_proof,
-            allow_fallback_provider=args.allow_fallback_provider,
+    sections = [
+        ReportSection(
+            'Environment configuration',
+            validate_environment(
+                env,
+                same_origin_deployment=args.same_origin_deployment,
+                auth_storage_exception=args.auth_storage_exception,
+                socketio_staging_proof=args.socketio_staging_proof,
+                allow_fallback_provider=args.allow_fallback_provider,
+            ),
         )
     ]
     if args.target_url:
-        reports.append(
-            validate_live_target(
-                args.target_url,
-                auth_token=args.auth_token or '',
-                timeout_seconds=args.timeout_seconds,
-                allow_fallback_provider=args.allow_fallback_provider,
-                allow_non_production_target=args.allow_non_production_target,
+        sections.append(
+            ReportSection(
+                'Live target checks',
+                validate_live_target(
+                    args.target_url,
+                    auth_token=args.auth_token or '',
+                    timeout_seconds=args.timeout_seconds,
+                    allow_fallback_provider=args.allow_fallback_provider,
+                    allow_non_production_target=args.allow_non_production_target,
+                ),
             )
         )
 
-    report = _merge_reports(*reports)
+    report = _merge_reports(*(section.report for section in sections))
     _print_report(report)
+    if args.evidence_report is not None:
+        write_evidence_report(
+            args.evidence_report,
+            sections=sections,
+            started_at=started_at,
+            finished_at=_iso_now(),
+            args=args,
+        )
+        print(f'[deployment-readiness] Evidence report written to {_report_path(args.evidence_report)}.')
     return 0 if report.ok else 1
 
 

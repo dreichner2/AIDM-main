@@ -1,7 +1,6 @@
 import { lazy, Suspense, useEffect, useState, type Dispatch, type FormEvent, type SetStateAction } from 'react'
 import { ChevronDown, Coins, ExternalLink, ShieldCheck, ShieldOff, Swords } from 'lucide-react'
 import { ThinIcon } from './AppChrome'
-import { BestiaryDebugPanel } from './BestiaryDebugPanel'
 import { CampaignPackPanel, type CampaignPackControlAction } from './CampaignPackPanel'
 import {
   truncateText,
@@ -19,6 +18,9 @@ import type { MainTab } from './SessionBoard'
 
 const BetaIncidentPanel = lazy(() =>
   import('./BetaIncidentPanel').then((module) => ({ default: module.BetaIncidentPanel })),
+)
+const BestiaryDebugPanel = lazy(() =>
+  import('./BestiaryDebugPanel').then((module) => ({ default: module.BestiaryDebugPanel })),
 )
 
 export type InspectorTab = 'party' | 'map' | 'magic' | 'canon' | 'inventory' | 'bestiary' | 'ops'
@@ -737,13 +739,21 @@ export function InspectorPanel({
       ) : null}
 
       {inspectorTab === 'bestiary' ? (
-        <BestiaryDebugPanel
-          baseUrl={baseUrl}
-          auth={auth}
-          selectedCampaignId={selectedCampaignId}
-          selectedSessionId={selectedSessionId}
-          canUseOperatorTools={canUseOperatorTools}
-        />
+        <Suspense
+          fallback={
+            <section className="inspector-box bestiary-debug-panel" aria-label="Bestiary tools">
+              <div className="empty-row">Loading bestiary tools...</div>
+            </section>
+          }
+        >
+          <BestiaryDebugPanel
+            baseUrl={baseUrl}
+            auth={auth}
+            selectedCampaignId={selectedCampaignId}
+            selectedSessionId={selectedSessionId}
+            canUseOperatorTools={canUseOperatorTools}
+          />
+        </Suspense>
       ) : null}
 
       {inspectorTab === 'ops' && canUseOperatorTools ? (
@@ -754,7 +764,7 @@ export function InspectorPanel({
             </section>
           }
         >
-          <BetaIncidentPanel baseUrl={baseUrl} auth={auth} />
+          <BetaIncidentPanel baseUrl={baseUrl} auth={auth} selectedSessionId={selectedSessionId} />
         </Suspense>
       ) : null}
 

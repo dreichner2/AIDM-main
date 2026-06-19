@@ -46,7 +46,7 @@ import { PlayerDeleteDialog } from './PlayerDeleteDialog'
 import { useModalFocusTrap } from './useModalFocusTrap'
 import { ApiClientError, WORKSPACE_ID_HEADER, apiFetch, storedRuntimeAccessSnapshot } from './api'
 import { actorCapabilitiesAllowOperatorTools } from './capabilities'
-import { SessionBoard, type MainTab } from './SessionBoard'
+import { SessionBoard, type MainTab, type TurnQualityScores } from './SessionBoard'
 import {
   abilityOptionsFromStatBlock,
   buildMapMeta,
@@ -88,6 +88,7 @@ import type {
   BetaSummary,
   Campaign,
   ClarificationRequest,
+  CoherenceFeedbackResponse,
   Health,
   LlmRuntimeConfig,
   Player,
@@ -136,6 +137,7 @@ const PlayerEditDialog = lazy(() =>
 const CreateCampaignDialog = lazy(() =>
   import('./CreateCampaignDialog').then((module) => ({ default: module.CreateCampaignDialog })),
 )
+const BetaRuntimeNotesPanel = lazy(() => import('./BetaRuntimeNotesPanel'))
 function preloadDiceRollDialog() {
   if (import.meta.env.MODE === 'test') return
   void loadDiceRollDialog()
@@ -520,6 +522,8 @@ function App() {
   const [turnStatuses, setTurnStatuses] = useState<Record<number, string>>({})
   const [reportedBadTurnIds, setReportedBadTurnIds] = useState<Set<number>>(() => new Set())
   const [reportingBadTurnIds, setReportingBadTurnIds] = useState<Set<number>>(() => new Set())
+  const [ratedTurnQualityIds, setRatedTurnQualityIds] = useState<Set<number>>(() => new Set())
+  const [ratingTurnQualityIds, setRatingTurnQualityIds] = useState<Set<number>>(() => new Set())
   const [clarificationRequest, setClarificationRequest] = useState<ClarificationRequest | null>(null)
   const [mainTab, setMainTab] = useState<MainTab>('turns')
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('party')
@@ -528,6 +532,7 @@ function App() {
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [betaNotesOpen, setBetaNotesOpen] = useState(false)
   const [railCollapsed, setRailCollapsed] = useState(false)
   const [mobileViewport, setMobileViewport] = useState(isPhoneLayoutViewport)
   const [mobileRailOpen, setMobileRailOpen] = useState(false)
@@ -906,6 +911,8 @@ function App() {
   useEffect(() => {
     setReportedBadTurnIds(new Set())
     setReportingBadTurnIds(new Set())
+    setRatedTurnQualityIds(new Set())
+    setRatingTurnQualityIds(new Set())
   }, [activeSessionId])
 
   const reportBadTurn = useCallback(
@@ -943,6 +950,46 @@ function App() {
       }
     },
     [activeSessionId, auth, baseUrl, pushError, reportedBadTurnIds, reportingBadTurnIds],
+  )
+
+  const submitTurnQuality = useCallback(
+    async (entry: TimelineEntry, scores: TurnQualityScores) => {
+      const turnId = numberValue(entry.metadata.turn_id)
+      if (!activeSessionId || turnId === null) {
+        pushError('validation', 'Choose a saved DM turn before sending beta feedback.')
+        return
+      }
+      if (ratedTurnQualityIds.has(turnId) || ratingTurnQualityIds.has(turnId)) return
+      setRatingTurnQualityIds((current) => new Set(current).add(turnId))
+      try {
+        await apiFetch<CoherenceFeedbackResponse>(
+          baseUrl,
+          '/api/feedback/coherence',
+          auth,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              session_id: activeSessionId,
+              turn_id: turnId,
+              coherence_score: scores.coherence,
+              category: 'beta_turn_prompt',
+              fun_score: scores.fun,
+              rules_score: scores.rules,
+            }),
+          },
+        )
+        setRatedTurnQualityIds((current) => new Set(current).add(turnId))
+      } catch (error) {
+        pushError('persistence', `Could not send beta feedback: ${error instanceof Error ? error.message : String(error)}`)
+      } finally {
+        setRatingTurnQualityIds((current) => {
+          const next = new Set(current)
+          next.delete(turnId)
+          return next
+        })
+      }
+    },
+    [activeSessionId, auth, baseUrl, pushError, ratedTurnQualityIds, ratingTurnQualityIds],
   )
 
   const {
@@ -2733,6 +2780,51 @@ function App() {
         : 'Offline'
   const runtimeTone =
     runtimePending || health === null ? 'neutral' : runtime?.configured ? 'good' : 'warn'
+  const betaRuntimeNotices: Array<{
+    id: string
+    title: string
+    message: string
+    tone: 'info' | 'warn'
+  }> = []
+  if (safeModeActive) {
+    betaRuntimeNotices.push({
+      id: 'fallback-provider',
+      title: 'Safe Mode',
+      message: 'Fallback provider active.',
+      tone: 'warn',
+    })
+  } else if (health?.status === 'ok' && runtime && !runtime.configured) {
+    betaRuntimeNotices.push({
+      id: 'missing-provider-key',
+      title: 'Provider Key',
+      message: 'Live DM responses need a configured provider key.',
+      tone: 'warn',
+    })
+  }
+  if (ttsConfig && !ttsConfig.configured) {
+    betaRuntimeNotices.push({
+      id: 'tts-unavailable',
+      title: 'TTS',
+      message: 'Deepgram TTS unavailable.',
+      tone: 'info',
+    })
+  }
+  if (health?.auth_required === false) {
+    betaRuntimeNotices.push({
+      id: 'local-auth-disabled',
+      title: 'Local/Private',
+      message: 'Auth disabled.',
+      tone: 'info',
+    })
+  }
+  if (llmConfig?.restart_required_for_other_workers) {
+    betaRuntimeNotices.push({
+      id: 'process-local-runtime',
+      title: 'Process-Local',
+      message: 'Restart other workers to match.',
+      tone: 'info',
+    })
+  }
   const loadedTextLength = timeline.reduce((total, entry) => total + entry.text.length, 0)
   const estimatedContextTokens = Math.round(loadedTextLength / 4)
   const contextMeterPercent = Math.min(
@@ -2805,6 +2897,7 @@ function App() {
     railCollapsed ? 'rail-collapsed' : '',
     fullscreenActive ? 'fullscreen-active' : '',
     safeModeActive ? 'safe-mode-active' : '',
+    betaRuntimeNotices.length ? 'runtime-notices-active' : '',
     mobileRailOpen ? 'mobile-rail-open' : '',
     mobileInspectorOpen ? 'mobile-inspector-open' : '',
   ].filter(Boolean).join(' ')
@@ -3059,11 +3152,39 @@ function App() {
         </div>
       </header>
 
-      {safeModeActive ? (
-        <div className="safe-mode-banner" role="status" aria-live="polite">
-          <strong>Safe Mode</strong>
-          <span>Fallback provider active. No live LLM.</span>
+      {betaRuntimeNotices.length ? (
+        <div
+          className="beta-runtime-notices"
+          role="status"
+          aria-live="polite"
+          aria-label="Beta runtime notices"
+        >
+          {betaRuntimeNotices.map((notice) => (
+            <div
+              key={notice.id}
+              className={`beta-runtime-notice ${notice.tone}`}
+            >
+              <strong>{notice.title}</strong>
+              <span>{notice.message}</span>
+            </div>
+          ))}
+          <button
+            type="button"
+            className="beta-runtime-notes-toggle"
+            aria-expanded={betaNotesOpen}
+            aria-controls="beta-runtime-known-limitations"
+            onClick={() => setBetaNotesOpen((current) => !current)}
+          >
+            <ThinIcon name="book" size={14} />
+            <span>Beta Notes</span>
+          </button>
         </div>
+      ) : null}
+
+      {betaRuntimeNotices.length && betaNotesOpen ? (
+        <Suspense fallback={null}>
+          <BetaRuntimeNotesPanel onClose={() => setBetaNotesOpen(false)} />
+        </Suspense>
       ) : null}
 
       <button
@@ -3163,6 +3284,9 @@ function App() {
         reportedBadTurnIds={reportedBadTurnIds}
         reportingBadTurnIds={reportingBadTurnIds}
         reportBadTurn={reportBadTurn}
+        ratedTurnQualityIds={ratedTurnQualityIds}
+        ratingTurnQualityIds={ratingTurnQualityIds}
+        submitTurnQuality={submitTurnQuality}
         expandedTurnIds={expandedTurnIds}
         setExpandedTurnIds={setExpandedTurnIds}
         selectedPlayer={selectedPlayer}

@@ -55,6 +55,8 @@ def test_http_response_includes_security_headers(client):
     assert response.headers.get('Permissions-Policy') == 'camera=(), microphone=(), geolocation=(), payment=()'
     csp = response.headers.get('Content-Security-Policy', '')
     assert "default-src 'self'" in csp
+    assert "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com" in csp
+    assert "font-src 'self' data: https://fonts.gstatic.com" in csp
     assert "frame-ancestors 'none'" in csp
 
 

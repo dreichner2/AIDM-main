@@ -22,7 +22,14 @@ from aidm_server.models import (
     World,
 )
 from aidm_server.services.campaign_pack_progress import PROGRESS_CHANGED_EVENT
-from aidm_server.turn_events import DM_RESPONSE_EVENT, PLAYER_MESSAGE_EVENT, SESSION_ENDED_EVENT, SESSION_RECAP_EVENT, SESSION_STARTED_EVENT
+from aidm_server.turn_events import (
+    DM_RESPONSE_EVENT,
+    PLAYER_MESSAGE_EVENT,
+    SESSION_ENDED_EVENT,
+    SESSION_RECAP_EVENT,
+    SESSION_STARTED_EVENT,
+    record_turn_event,
+)
 from tests.helpers import seed_world_campaign_player_session
 
 
@@ -343,6 +350,88 @@ def test_import_session_from_export_restores_state_events_and_projected_log(clie
         assert 'I test the restored gate.' in log_entries[0].message
         assert 'The restored gate opens.' in log_entries[1].message
         assert 'This should not be duplicated' not in '\n'.join(entry.message for entry in log_entries)
+
+
+def test_export_session_returns_importable_shape_and_round_trips_without_log_duplication(client, app):
+    ids = seed_world_campaign_player_session(app)
+
+    with app.app_context():
+        session = db.session.get(Session, ids['session_id'])
+        assert session is not None
+        session.name = 'Exportable Ash Gate'
+        db.session.add(
+            SessionState(
+                session_id=ids['session_id'],
+                current_location='Ash Gate',
+                current_quest='Prove export/import',
+                rolling_summary='The party prepared an export proof.',
+                active_segments=json.dumps([{'title': 'Ash Gate'}]),
+                memory_snippets=json.dumps([{'summary': 'Export memory'}]),
+            )
+        )
+        db.session.add(
+            SessionLogEntry(
+                session_id=ids['session_id'],
+                message='This source-only log should not be duplicated on import.',
+                entry_type='system',
+                metadata_json=json.dumps({'source': 'export_route_test'}),
+            )
+        )
+        record_turn_event(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            event_type=PLAYER_MESSAGE_EVENT,
+            payload={'speaker': 'Seraphina', 'message': 'I test the export gate.'},
+        )
+        record_turn_event(
+            session_id=ids['session_id'],
+            campaign_id=ids['campaign_id'],
+            player_id=ids['player_id'],
+            event_type=DM_RESPONSE_EVENT,
+            payload={'message': 'The export gate answers.'},
+        )
+        db.session.commit()
+
+    export_response = client.get(f"/api/sessions/{ids['session_id']}/export?player_id={ids['player_id']}")
+
+    assert export_response.status_code == 200
+    export_payload = export_response.get_json()
+    assert export_payload['selectedIds'] == {
+        'campaignId': ids['campaign_id'],
+        'sessionId': ids['session_id'],
+        'playerId': ids['player_id'],
+    }
+    assert export_payload['campaign']['campaign_id'] == ids['campaign_id']
+    assert export_payload['selectedSession']['display_name'] == 'Exportable Ash Gate'
+    assert export_payload['selectedPlayer']['player_id'] == ids['player_id']
+    assert [player['player_id'] for player in export_payload['players']] == [ids['player_id']]
+    assert export_payload['sessionState']['current_location'] == 'Ash Gate'
+    assert 'This source-only log should not be duplicated' in '\n'.join(
+        entry['message'] for entry in export_payload['logEntries']
+    )
+    assert [event['event_type'] for event in export_payload['turnEvents']] == [
+        PLAYER_MESSAGE_EVENT,
+        DM_RESPONSE_EVENT,
+    ]
+
+    import_response = client.post('/api/sessions/import', json=export_payload)
+
+    assert import_response.status_code == 201
+    import_payload = import_response.get_json()
+    assert import_payload['counts'] == {
+        'turn_events': 2,
+        'projected_log_entries': 2,
+        'log_entries': 0,
+        'session_state': 1,
+    }
+    imported_session_id = import_payload['session_id']
+    imported_log_response = client.get(f'/api/sessions/{imported_session_id}/log?limit=100')
+    assert imported_log_response.status_code == 200
+    imported_messages = '\n'.join(entry['message'] for entry in imported_log_response.get_json()['entries'])
+    assert 'I test the export gate.' in imported_messages
+    assert 'The export gate answers.' in imported_messages
+    assert 'This source-only log should not be duplicated' not in imported_messages
 
 
 def test_import_session_preserves_campaign_pack_state_progress_events_and_archive_restore(client, app):

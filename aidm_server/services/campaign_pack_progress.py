@@ -9,6 +9,7 @@ from aidm_server.game_state.models import stable_slug
 from aidm_server.models import CampaignSegment, Session, TurnEvent, safe_json_dumps, safe_json_loads
 from aidm_server.services.campaign_pack_snapshot import migrate_campaign_pack_snapshot
 from aidm_server.services.campaign_pack_storage import (
+    campaign_pack_progress_lock_session_ids,
     propagate_shared_campaign_pack_progress,
     record_campaign_pack_progress_event,
 )
@@ -69,7 +70,7 @@ def update_campaign_pack_progress(
     triggered_segments: list[dict] | None = None,
     turn_id: int | None = None,
 ) -> CampaignPackProgressResult:
-    with session_turn_coordinator.serialized(session_id):
+    with session_turn_coordinator.serialized_many(campaign_pack_progress_lock_session_ids(session_id)):
         return _update_campaign_pack_progress_locked(
             session_id=session_id,
             campaign_id=campaign_id,
@@ -345,7 +346,7 @@ def control_campaign_pack_progress(
     actor: str | None = None,
     expected_revision: int | None = None,
 ) -> CampaignPackControlResult:
-    with session_turn_coordinator.serialized(session_id):
+    with session_turn_coordinator.serialized_many(campaign_pack_progress_lock_session_ids(session_id)):
         return _control_campaign_pack_progress_locked(
             session_id=session_id,
             action=action,

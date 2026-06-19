@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -194,6 +194,15 @@ class ConfiguredSessionTurnCoordinator:
                 yield wait_ms
             finally:
                 _HELD_SESSION_IDS.reset(token)
+
+    @contextmanager
+    def serialized_many(self, session_ids):
+        normalized_ids = sorted({int(session_id) for session_id in session_ids if session_id is not None})
+        waits: dict[int, float] = {}
+        with ExitStack() as stack:
+            for session_id in normalized_ids:
+                waits[session_id] = stack.enter_context(self.serialized(session_id))
+            yield waits
 
     def discard_session(self, session_id: int) -> bool:
         return self._active_coordinator().discard_session(session_id)

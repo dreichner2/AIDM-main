@@ -155,6 +155,17 @@ def test_import_road_of_unremembered_kings_example_pack_dry_run(client, app):
         assert Campaign.query.filter_by(title='The Road of Unremembered Kings').count() == 0
 
 
+def test_import_example_campaign_pack_rejects_malformed_optional_json(client):
+    response = client.post(
+        '/api/campaigns/example-packs/bleakmoor_intro/import',
+        data='{',
+        content_type='application/json',
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()['error_code'] == 'validation_error'
+
+
 def test_import_example_campaign_pack_can_use_existing_world(client, app):
     with app.app_context():
         world = World(name='Shared Table World', description='Existing setting')
@@ -524,6 +535,8 @@ def test_campaign_pack_lint_endpoint_returns_authoring_issues(client):
     assert payload['ok'] is False
     assert payload['summary']['packId'] == 'lint_endpoint_pack'
     assert payload['graph']['reachable'] == ['cp_start']
+    assert payload['authoring_report']['checkpoints']['reachable'] == 1
+    assert payload['authoring_report']['collections'][0]['collection'] == 'locations'
     assert any(issue['code'] == 'hidden_record_visible_at_start' for issue in payload['issues'])
 
 

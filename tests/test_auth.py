@@ -184,11 +184,14 @@ def test_beta_incidents_require_workspace_admin_account_but_players_can_report(t
         json={'session_id': session_id, 'turn_id': turn_id, 'category': 'state'},
     )
     player_incidents = client.get('/api/beta/incidents', headers=headers)
+    player_bundle = client.get(f'/api/beta/support-bundle?session_id={session_id}', headers=headers)
 
     assert report_response.status_code == 201
     assert report_response.get_json()['feedback']['provider'] == 'fallback'
     assert player_incidents.status_code == 403
     assert player_incidents.get_json()['details']['required_capability'] == 'debug_read'
+    assert player_bundle.status_code == 403
+    assert player_bundle.get_json()['details']['required_capability'] == 'debug_read'
 
     with app.app_context():
         membership = AccountWorkspaceMembership.query.filter_by(account_id=account_id, workspace_id='owner').one()
@@ -200,6 +203,14 @@ def test_beta_incidents_require_workspace_admin_account_but_players_can_report(t
     payload = admin_incidents.get_json()
     assert payload['summary']['bad_turn_report_count'] == 1
     assert payload['summary']['failed_turn_count'] == 1
+
+    admin_bundle = client.get(f'/api/beta/support-bundle?session_id={session_id}', headers=headers)
+    assert admin_bundle.status_code == 200
+    bundle_payload = admin_bundle.get_json()
+    assert bundle_payload['session']['session_id'] == session_id
+    assert bundle_payload['incidents']['summary']['bad_turn_report_count'] == 1
+    assert bundle_payload['incidents']['summary']['failed_turn_count'] == 1
+    assert bundle_payload['recent_turns'][0]['turn_id'] == turn_id
 
 
 def test_auth_required_allows_cors_preflight_without_token(tmp_path, monkeypatch):

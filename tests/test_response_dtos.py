@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import aidm_server.blueprints.creatures as creatures_blueprint
 from aidm_server.database import db
 from aidm_server.models import CampaignSegment, Map
 from tests.helpers import seed_world_campaign_player_session
@@ -54,3 +55,33 @@ def test_shared_world_dto_matches_list_and_detail_endpoints(client):
     listed_payload = next(item for item in list_payload if item['world_id'] == world_id)
 
     assert detail_payload == listed_payload
+
+
+def test_player_creature_resolution_response_is_public_allowlist(monkeypatch):
+    result = {
+        'creature': {'id': 'wolf', 'name': 'Wolf'},
+        'source': 'core',
+        'resolutionMethod': 'core_match',
+        'matchScore': 0.96,
+        'generated': False,
+        'savedToBestiary': False,
+        'notes': [],
+        'debug': {'rankings': [{'id': 'wolf'}]},
+        'operatorOnly': {'model': 'debug-model'},
+    }
+
+    monkeypatch.setattr(creatures_blueprint, 'current_actor_has_capability', lambda capability: False)
+
+    assert creatures_blueprint._creature_resolution_response(result) == {
+        'creature': {'id': 'wolf', 'name': 'Wolf'},
+        'source': 'core',
+        'resolutionMethod': 'core_match',
+        'matchScore': 0.96,
+        'generated': False,
+        'savedToBestiary': False,
+        'notes': [],
+    }
+
+    monkeypatch.setattr(creatures_blueprint, 'current_actor_has_capability', lambda capability: True)
+
+    assert creatures_blueprint._creature_resolution_response(result) == result

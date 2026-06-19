@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+    open-pull-requests-limit: 5
+    groups:
+      python-runtime:
+        patterns:
+          - '*'
+
+  - package-ecosystem: npm
+    directory: /aidm_frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:30'
+    open-pull-requests-limit: 5
+    groups:
+      frontend-runtime:
+        patterns:
+          - '*'

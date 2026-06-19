@@ -129,3 +129,20 @@ def test_configured_turn_coordinator_allows_nested_same_session_lock(app):
                 assert coordinator.lock_count() == 1
 
         assert coordinator.discard_session(session_id) is True
+
+
+def test_configured_turn_coordinator_serializes_many_in_deduped_order(app):
+    first = seed_world_campaign_player_session(app)['session_id']
+    second = seed_world_campaign_player_session(app)['session_id']
+    coordinator = ConfiguredSessionTurnCoordinator()
+
+    with app.app_context():
+        with coordinator.serialized_many([second, first, second]) as waits:
+            assert list(waits) == sorted({first, second})
+            assert coordinator.lock_count() == 2
+            with coordinator.serialized(first) as inner_wait_ms:
+                assert inner_wait_ms == 0.0
+                assert coordinator.lock_count() == 2
+
+        assert coordinator.discard_session(first) is True
+        assert coordinator.discard_session(second) is True

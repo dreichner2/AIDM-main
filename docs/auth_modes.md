@@ -1,0 +1,69 @@
+# AIDM Auth Mode Matrix
+
+Use this matrix when choosing runtime settings for local development, private
+testing, Tailscale exposure, or hosted closed beta. When a mode is exposed beyond
+loopback, prefer the stricter setting if there is any uncertainty.
+
+| Mode | Intended exposure | Required auth posture | Token/cookie storage | CORS posture | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Local loopback development | `127.0.0.1` or `localhost` only | `AIDM_AUTH_REQUIRED=false` is acceptable for solo dev. | Browser session/local storage is acceptable for local account convenience. | Localhost-only or wildcard during isolated dev. | Do not reuse this mode for public tunnels. |
+| Private LAN testing | Trusted private network only | `AIDM_AUTH_REQUIRED=true`; configure `AIDM_API_AUTH_TOKENS` or workspace token mappings. | Bearer tokens are acceptable for private/manual testing. | Explicit LAN origin allowlists. | Treat as temporary; use real accounts for meaningful beta play. |
+| Tailscale private beta | Tailnet users, optionally Funnel when intentionally exposed | `AIDM_AUTH_REQUIRED=true`; non-loopback exposure must not run auth-disabled. | Prefer account login; bearer tokens are acceptable for operator checks. | Explicit Funnel or tailnet origins. | Verify `/api/health` shows auth required before sharing links. |
+| Hosted same-origin closed beta | Public HTTPS app and API on one origin | `AIDM_AUTH_REQUIRED=true`; strong API/admin tokens; account auth enabled. | `AIDM_ACCOUNT_COOKIE_AUTH_ENABLED=true`, `AIDM_ACCOUNT_COOKIE_SECURE=true`, `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false`. | Empty same-origin CORS or exact hosted origin only. | Unsafe REST writes must send `X-AIDM-CSRF-Token` from the companion `aidm_csrf_token` cookie. |
+| Hosted cross-origin closed beta | Public HTTPS frontend and API on different origins | `AIDM_AUTH_REQUIRED=true`; strong API/admin tokens; document why cross-origin is needed. | Prefer HTTP-only cookie auth only when cookie domain/SameSite rules are proven; otherwise document bearer-token exception. | Exact frontend/API origins only; no wildcard. | Run deployment-readiness with the documented exception flags when applicable. |
+| API/operator automation | CLI, CI, or admin-only scripts | `AIDM_AUTH_REQUIRED=true`; scoped token or workspace token mapping. | Bearer token from secret manager, not browser storage. | Not browser-facing unless explicitly needed. | Keep operator capabilities narrower than normal player/session actions. |
+
+## Baseline Env By Exposure
+
+### Loopback-only development
+
+```bash
+AIDM_ENV=development
+AIDM_AUTH_REQUIRED=false
+AIDM_CORS_ALLOWLIST=http://127.0.0.1:5173,http://localhost:5173
+AIDM_SOCKET_CORS_ALLOWLIST=http://127.0.0.1:5173,http://localhost:5173
+```
+
+### Tailscale or LAN closed beta
+
+```bash
+AIDM_ENV=production
+AIDM_AUTH_REQUIRED=true
+AIDM_API_AUTH_TOKENS=<strong-token>
+AIDM_CORS_ALLOWLIST=<exact-ui-origin>
+AIDM_SOCKET_CORS_ALLOWLIST=<exact-ui-origin>
+AIDM_SECURITY_HEADERS_ENABLED=true
+```
+
+### Hosted same-origin closed beta
+
+```bash
+AIDM_ENV=production
+AIDM_AUTH_REQUIRED=true
+AIDM_API_AUTH_TOKENS=<strong-operator-token>
+AIDM_AUTO_CREATE_SCHEMA=false
+AIDM_RATE_LIMIT_STORE=database
+AIDM_TURN_COORDINATOR_STORE=database
+AIDM_SOCKETIO_WORKER_MODEL=single
+AIDM_SECURITY_HEADERS_ENABLED=true
+AIDM_ACCOUNT_COOKIE_AUTH_ENABLED=true
+AIDM_ACCOUNT_COOKIE_SECURE=true
+AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false
+```
+
+## Required Proof Before Wider Beta
+
+- `GET /api/health` reports the expected environment, auth-required state, and
+  provider/model.
+- `scripts/deployment_readiness_check.py` passes against the target env and URL.
+- `make hosted-cookie-auth-smoke` proves cookie-only login, CSRF on unsafe
+  writes, logout cleanup, workspace role refresh, and Socket.IO auth in an
+  isolated local hosted-mode runtime, and can write
+  `tmp/release/hosted-cookie-auth-evidence.md` with `--evidence-report`.
+  Run a browser smoke against the real hosted URL before inviting external testers.
+- For hosted/staging proof, run
+  `make hosted-cookie-auth-smoke HOSTED_COOKIE_AUTH_SMOKE_ARGS="--target-url <target-url> --account-intent signup --evidence-report tmp/release/hosted-cookie-auth-evidence.md"`.
+  Use `--account-intent login --username <user> --password <pass>` when the
+  target requires a pre-provisioned test account.
+- Any bearer-token browser exception is documented with a reason and reviewed
+  before testers are invited.

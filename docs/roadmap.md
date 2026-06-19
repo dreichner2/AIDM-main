@@ -95,10 +95,12 @@ Archived review material lives in:
 - Set the hosted `AIDM_OBSERVABILITY_PROVIDER` and `AIDM_ALERT_OWNER` values in
   the target environment, then run the deployment-readiness gate and prove
   metrics/alert ingestion in staging.
-- Set `AIDM_SOCKETIO_WORKER_MODEL` for the target environment and run a
-  staging smoke test that proves client event delivery under that worker model;
-  pass the proof note or URL to `--socketio-staging-proof` for sticky or
-  message-queue deployments.
+- For hosted RC1, use the `single` worker-model decision in
+  `docs/socketio_worker_model.md`, then attach hosted process evidence showing
+  exactly one backend worker. If the target intentionally overrides that
+  decision, run a staging smoke test that proves client event delivery under the
+  selected model and pass the proof note or URL to `--socketio-staging-proof`
+  for sticky or message-queue deployments.
 - Enable `AIDM_ACCOUNT_COOKIE_AUTH_ENABLED=true` and
   `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false` for hosted same-origin cookie-only
   auth when the deployment threat model calls for it.

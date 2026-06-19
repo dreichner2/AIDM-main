@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Download, RefreshCcw } from 'lucide-react'
 import { ApiClientError, apiFetch } from './api'
-import type { BetaIncidentsResponse, JsonRecord } from './types'
+import type { BetaIncidentsResponse, BetaSessionQualityResponse, BetaSupportBundleResponse, JsonRecord } from './types'
 
 type BetaIncidentPanelProps = {
   baseUrl: string
   auth: string
+  selectedSessionId: number | null
 }
 
 const INCIDENT_LIMIT = 20
@@ -22,6 +24,10 @@ function textValue(value: unknown, fallback = '') {
 
 function numberValue(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 function incidentTypeLabel(incident: JsonRecord) {
@@ -62,6 +68,24 @@ function formatTime(value: unknown) {
   })
 }
 
+function filenameTimestamp(date = new Date()) {
+  return date.toISOString().replace(/[:.]/g, '-')
+}
+
+function downloadJsonFile(payload: BetaSupportBundleResponse, filename: string) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const objectUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = filename
+  anchor.rel = 'noopener'
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(objectUrl)
+}
+
 function incidentMeta(incident: JsonRecord) {
   const meta = []
   const campaignId = numberValue(incident.campaign_id)
@@ -86,10 +110,54 @@ function incidentMeta(incident: JsonRecord) {
   return meta
 }
 
-export function BetaIncidentPanel({ baseUrl, auth }: BetaIncidentPanelProps) {
+function numberLabel(value: unknown, fallback = '0') {
+  const numeric = numberValue(value)
+  if (numeric === null) return fallback
+  return Number.isInteger(numeric) ? String(numeric) : numeric.toFixed(1)
+}
+
+function percentLabel(value: unknown) {
+  const numeric = numberValue(value)
+  return numeric === null ? 'n/a' : `${Math.round(numeric * 100)}%`
+}
+
+function latencyLabel(value: unknown) {
+  const numeric = numberValue(value)
+  return numeric === null ? 'n/a' : `${Math.round(numeric)} ms`
+}
+
+function providerModelSummary(rows: JsonRecord[]) {
+  const first = rows.find(isRecord)
+  if (!first) return 'Provider/model: none'
+  const provider = textValue(first.provider, 'unknown')
+  const model = textValue(first.model, 'unknown')
+  const turnCount = numberValue(first.turn_count)
+  const countSuffix = turnCount === null ? '' : ` (${turnCount} turn${turnCount === 1 ? '' : 's'})`
+  return `Provider/model: ${provider} / ${model}${countSuffix}`
+}
+
+function operatorSummaryDetails(value: unknown) {
+  if (!isRecord(value)) return { headline: '', details: [] as string[] }
+  const headline = textValue(value.headline)
+  const details = Array.isArray(value.details)
+    ? value.details.map((item) => textValue(item)).filter(Boolean)
+    : []
+  return { headline, details }
+}
+
+function qualityStatusLabel(status: unknown) {
+  return textValue(status, 'clean').toLowerCase() === 'review' ? 'Review' : 'Clean'
+}
+
+export function BetaIncidentPanel({ baseUrl, auth, selectedSessionId }: BetaIncidentPanelProps) {
   const [incidents, setIncidents] = useState<BetaIncidentsResponse | null>(null)
+  const [sessionQuality, setSessionQuality] = useState<BetaSessionQualityResponse | null>(null)
   const [loading, setLoading] = useState(false)
+  const [qualityLoading, setQualityLoading] = useState(false)
+  const [bundleLoadingKey, setBundleLoadingKey] = useState('')
   const [error, setError] = useState('')
+  const [qualityError, setQualityError] = useState('')
+  const [bundleError, setBundleError] = useState('')
 
   const loadIncidents = useCallback(async (cancelled?: () => boolean) => {
     if (cancelled?.()) return
@@ -115,6 +183,67 @@ export function BetaIncidentPanel({ baseUrl, auth }: BetaIncidentPanelProps) {
     }
   }, [auth, baseUrl])
 
+  const loadSessionQuality = useCallback(async (cancelled?: () => boolean) => {
+    if (cancelled?.()) return
+    if (selectedSessionId === null) {
+      setSessionQuality(null)
+      setQualityError('')
+      setQualityLoading(false)
+      return
+    }
+    setQualityLoading(true)
+    setQualityError('')
+    try {
+      const payload = await apiFetch<BetaSessionQualityResponse>(
+        baseUrl,
+        `/api/beta/session-quality?session_id=${selectedSessionId}&limit=5`,
+        auth,
+      )
+      if (!cancelled?.()) setSessionQuality(payload)
+    } catch (loadError) {
+      const message =
+        loadError instanceof ApiClientError && loadError.status === 403
+          ? 'Workspace admin access is required to inspect session quality.'
+          : loadError instanceof Error
+            ? loadError.message
+            : String(loadError)
+      if (!cancelled?.()) {
+        setSessionQuality(null)
+        setQualityError(message)
+      }
+    } finally {
+      if (!cancelled?.()) setQualityLoading(false)
+    }
+  }, [auth, baseUrl, selectedSessionId])
+
+  const downloadSupportBundle = useCallback(async (sessionId?: number | null) => {
+    const scope = sessionId !== undefined && sessionId !== null ? `session-${sessionId}` : 'workspace'
+    const params = new URLSearchParams({ limit: String(INCIDENT_LIMIT) })
+    if (sessionId !== undefined && sessionId !== null) {
+      params.set('session_id', String(sessionId))
+    }
+    setBundleLoadingKey(scope)
+    setBundleError('')
+    try {
+      const payload = await apiFetch<BetaSupportBundleResponse>(
+        baseUrl,
+        `/api/beta/support-bundle?${params.toString()}`,
+        auth,
+      )
+      downloadJsonFile(payload, `aidm-support-bundle-${scope}-${filenameTimestamp()}.json`)
+    } catch (bundleLoadError) {
+      const message =
+        bundleLoadError instanceof ApiClientError && bundleLoadError.status === 403
+          ? 'Workspace admin access is required to export support bundles.'
+          : bundleLoadError instanceof Error
+            ? bundleLoadError.message
+            : String(bundleLoadError)
+      setBundleError(message)
+    } finally {
+      setBundleLoadingKey('')
+    }
+  }, [auth, baseUrl])
+
   useEffect(() => {
     let cancelled = false
     void Promise.resolve().then(() => loadIncidents(() => cancelled))
@@ -123,40 +252,145 @@ export function BetaIncidentPanel({ baseUrl, auth }: BetaIncidentPanelProps) {
     }
   }, [loadIncidents])
 
-  const summary = incidents?.summary
+  useEffect(() => {
+    let cancelled = false
+    void Promise.resolve().then(() => loadSessionQuality(() => cancelled))
+    return () => {
+      cancelled = true
+    }
+  }, [loadSessionQuality])
+
+  const incidentSummary = incidents?.summary
   const incidentRows = incidents?.incidents ?? []
+  const displayError = error || bundleError
+  const qualitySummary = sessionQuality?.summary ?? null
+  const qualityStatus = qualityStatusLabel(qualitySummary?.quality_status)
+  const qualityStatusClass = qualityStatus.toLowerCase()
+  const operatorSummary = operatorSummaryDetails(sessionQuality?.operator_summary)
+  const qualitySessionName = sessionQuality
+    ? textValue(sessionQuality.session.name, `session ${sessionQuality.session.session_id ?? selectedSessionId ?? ''}`)
+    : ''
 
   return (
     <section className="inspector-box beta-incident-panel" aria-label="Beta incidents">
       <div className="box-title">
         <h3>Beta Incidents</h3>
-        <button type="button" onClick={() => void loadIncidents()} disabled={loading}>
-          {loading ? 'Refreshing...' : 'Refresh'}
-        </button>
+        <div className="incident-panel-actions">
+          <button
+            type="button"
+            onClick={() => void downloadSupportBundle()}
+            disabled={bundleLoadingKey === 'workspace'}
+            aria-label="Export workspace support bundle"
+          >
+            <Download aria-hidden="true" size={14} />
+            <span>{bundleLoadingKey === 'workspace' ? 'Exporting...' : 'Bundle'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadIncidents()}
+            disabled={loading}
+            aria-label="Refresh beta incidents"
+          >
+            <RefreshCcw aria-hidden="true" size={14} />
+            <span>{loading ? 'Refreshing...' : 'Refresh'}</span>
+          </button>
+        </div>
       </div>
 
       <div className="incident-summary-grid" aria-label="Incident summary">
         <div>
           <span>Turns</span>
-          <strong>{summary?.failed_turn_count ?? 0}</strong>
+          <strong>{incidentSummary?.failed_turn_count ?? 0}</strong>
         </div>
         <div>
           <span>Canon</span>
-          <strong>{summary?.failed_canon_job_count ?? 0}</strong>
+          <strong>{incidentSummary?.failed_canon_job_count ?? 0}</strong>
         </div>
         <div>
           <span>Reports</span>
-          <strong>{summary?.bad_turn_report_count ?? 0}</strong>
+          <strong>{incidentSummary?.bad_turn_report_count ?? 0}</strong>
         </div>
         <div>
           <span>Events</span>
-          <strong>{summary?.telemetry_incident_count ?? 0}</strong>
+          <strong>{incidentSummary?.telemetry_incident_count ?? 0}</strong>
         </div>
       </div>
 
-      {error ? <div className="bestiary-message error">{error}</div> : null}
-      {!error && loading && !incidents ? <div className="empty-row">Loading incidents...</div> : null}
-      {!error && !loading && incidents && !incidentRows.length ? (
+      <section className="session-quality-card" aria-label="Selected session quality">
+        <div className="session-quality-header">
+          <div>
+            <h3>Session Quality</h3>
+            <span>{selectedSessionId === null ? 'No session selected' : qualitySessionName || `session ${selectedSessionId}`}</span>
+          </div>
+          {sessionQuality ? (
+            <strong className={`session-quality-status ${qualityStatusClass}`}>{qualityStatus}</strong>
+          ) : null}
+        </div>
+        {selectedSessionId === null ? <div className="empty-row">Select a session to view quality.</div> : null}
+        {qualityError ? <div className="bestiary-message error">{qualityError}</div> : null}
+        {!qualityError && qualityLoading && !sessionQuality ? <div className="empty-row">Loading session quality...</div> : null}
+        {!qualityError && sessionQuality && qualitySummary ? (
+          <>
+            <div className="session-quality-grid" aria-label="Session quality metrics">
+              <div>
+                <span>Turns</span>
+                <strong>{numberLabel(qualitySummary.total_turn_count)}</strong>
+              </div>
+              <div>
+                <span>Failed</span>
+                <strong>
+                  {numberLabel(qualitySummary.failed_turn_count)}
+                  <small>{percentLabel(qualitySummary.turn_failure_rate)}</small>
+                </strong>
+              </div>
+              <div>
+                <span>P95</span>
+                <strong>{latencyLabel(qualitySummary.dm_response_latency_ms_p95)}</strong>
+              </div>
+              <div>
+                <span>Canon</span>
+                <strong>
+                  {numberLabel(qualitySummary.canon_job_failed_count)} / {numberLabel(qualitySummary.canon_job_count)}
+                </strong>
+              </div>
+              <div>
+                <span>Reports</span>
+                <strong>{numberLabel(qualitySummary.bad_turn_report_count)}</strong>
+              </div>
+              <div>
+                <span>Clarify</span>
+                <strong>{numberLabel(qualitySummary.awaiting_clarification_turn_count)}</strong>
+              </div>
+            </div>
+            <div className="session-quality-meta">
+              <span>{providerModelSummary(sessionQuality.provider_model_turn_counts)}</span>
+              <span>
+                State/audit: {numberLabel(qualitySummary.state_mutation_count)} state,{' '}
+                {numberLabel(qualitySummary.operator_action_count)} operator
+              </span>
+              <span>
+                Coherence: {numberLabel(qualitySummary.coherence_feedback_avg, 'n/a')} from{' '}
+                {numberLabel(qualitySummary.coherence_feedback_count)} report
+                {numberValue(qualitySummary.coherence_feedback_count) === 1 ? '' : 's'}
+              </span>
+            </div>
+            {operatorSummary.headline || operatorSummary.details.length ? (
+              <div className="session-quality-operator-summary" aria-label="Operator session summary">
+                {operatorSummary.headline ? <strong>{operatorSummary.headline}</strong> : null}
+                {operatorSummary.details.length ? (
+                  <ul>
+                    {operatorSummary.details.map((detail) => <li key={detail}>{detail}</li>)}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </section>
+
+      {displayError ? <div className="bestiary-message error">{displayError}</div> : null}
+      {!displayError && loading && !incidents ? <div className="empty-row">Loading incidents...</div> : null}
+      {!displayError && !loading && incidents && !incidentRows.length ? (
         <div className="empty-row">No beta incidents recorded.</div>
       ) : null}
 
@@ -165,11 +399,27 @@ export function BetaIncidentPanel({ baseUrl, auth }: BetaIncidentPanelProps) {
           const severity = incidentSeverity(incident)
           const meta = incidentMeta(incident)
           const createdAt = formatTime(incident.created_at)
+          const sessionId = numberValue(incident.session_id)
+          const sessionBundleKey = sessionId !== null ? `session-${sessionId}` : ''
           return (
             <article key={incidentKey(incident, index)} className={`incident-card severity-${severity}`}>
               <div className="incident-card-title">
                 <strong>{incidentTypeLabel(incident)}</strong>
-                <span>{severity}</span>
+                <div className="incident-card-title-actions">
+                  <span>{severity}</span>
+                  {sessionId !== null ? (
+                    <button
+                      type="button"
+                      className="incident-bundle-button"
+                      onClick={() => void downloadSupportBundle(sessionId)}
+                      disabled={bundleLoadingKey === sessionBundleKey}
+                      aria-label={`Export support bundle for session ${sessionId}`}
+                      title={`Export support bundle for session ${sessionId}`}
+                    >
+                      <Download aria-hidden="true" size={13} />
+                    </button>
+                  ) : null}
+                </div>
               </div>
               <p>{incidentMessage(incident)}</p>
               {meta.length ? (

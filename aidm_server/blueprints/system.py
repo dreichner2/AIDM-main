@@ -21,13 +21,16 @@ from aidm_server.models import (
     DmTurn,
     OperatorActionAudit,
     Session,
+    SessionLogEntry,
     SessionStateMutationAudit,
     safe_json_dumps,
     safe_json_loads,
+    TurnEvent,
 )
 from aidm_server.services.runtime_config import current_llm_payload
 from aidm_server.telemetry import get_telemetry, prometheus_text_from_snapshot, telemetry_event, telemetry_metric, telemetry_timing
 from aidm_server.text_sanitization import normalize_tts_text
+from aidm_server.time_utils import utc_now
 from aidm_server.validation import coerce_int, missing_fields, optional_text, parse_json_body
 from aidm_server.workspace_access import current_account_id, current_account_is_workspace_admin, current_workspace_id, get_session as workspace_session
 
@@ -104,16 +107,22 @@ def _bad_turn_category(value) -> str:
     return normalized if normalized in BAD_TURN_CATEGORIES else 'other'
 
 
-def _validate_score(value, *, default: int | None = None) -> tuple[int | None, str | None]:
+def _validate_score(value, *, default: int | None = None, field: str = 'coherence_score') -> tuple[int | None, str | None]:
     if value in (None, '') and default is not None:
         return default, None
     try:
         score = int(value)
     except (TypeError, ValueError):
-        return None, 'coherence_score must be an integer between 1 and 5.'
+        return None, f'{field} must be an integer between 1 and 5.'
     if score < 1 or score > 5:
-        return None, 'coherence_score must be an integer between 1 and 5.'
+        return None, f'{field} must be an integer between 1 and 5.'
     return score, None
+
+
+def _optional_feedback_score(payload: dict, field: str) -> tuple[int | None, str | None]:
+    if payload.get(field) in (None, ''):
+        return None, None
+    return _validate_score(payload.get(field), field=field)
 
 
 def _telemetry_incident_counts() -> list[dict]:
@@ -615,6 +624,15 @@ def submit_coherence_feedback():
     notes, notes_error = optional_text(payload.get('notes'), max_length=2000, field='notes', default=None)
     if notes_error:
         return error_response('validation_error', notes_error, 400)
+    category, category_error = optional_text(payload.get('category'), max_length=64, field='category', default='coherence')
+    if category_error:
+        return error_response('validation_error', category_error, 400)
+    fun_score, fun_score_error = _optional_feedback_score(payload, 'fun_score')
+    if fun_score_error:
+        return error_response('validation_error', fun_score_error, 400)
+    rules_score, rules_score_error = _optional_feedback_score(payload, 'rules_score')
+    if rules_score_error:
+        return error_response('validation_error', rules_score_error, 400)
 
     session_obj = workspace_session(session_id)
     if not session_obj:
@@ -630,17 +648,26 @@ def submit_coherence_feedback():
         session_id=session_obj.session_id,
         turn_id=turn_id,
         feedback_type='coherence',
-        category='coherence',
+        category=category or 'coherence',
         coherence_score=score,
         provider=turn_obj.llm_provider if turn_obj else None,
         model=turn_obj.llm_model if turn_obj else None,
         notes=notes,
+        metadata_json=safe_json_dumps(
+            {
+                'fun_score': fun_score,
+                'rules_score': rules_score,
+                'reported_by_account_id': current_account_id(),
+                'reported_by_workspace_admin': current_account_is_workspace_admin(),
+            },
+            {},
+        ),
     )
     db.session.add(feedback)
     db.session.commit()
     telemetry_metric('system.feedback.submitted_total', 1)
 
-    return jsonify({'feedback_id': feedback.feedback_id}), 201
+    return jsonify({'feedback_id': feedback.feedback_id, 'feedback': _turn_feedback_payload(feedback, turn_obj)}), 201
 
 
 @system_bp.route('/feedback/bad-turn', methods=['POST'])
@@ -723,20 +750,28 @@ def beta_slo_summary():
     return jsonify(_beta_slo_summary())
 
 
-@system_bp.route('/beta/incidents', methods=['GET'])
-def beta_incidents():
-    forbidden = capability_forbidden_response('debug_read', 'Only workspace admins can inspect beta incidents.')
-    if forbidden:
-        return forbidden
+def _bounded_limit(value, *, default: int = 25, maximum: int = 100) -> int:
+    limit = coerce_int(value, default)
+    return max(1, min(limit or default, maximum))
 
-    telemetry_metric('system.beta_incidents.requests_total', 1)
-    limit = coerce_int(request.args.get('limit'), 25)
-    limit = max(1, min(limit or 25, 100))
+
+def _optional_positive_int(value, *, field: str) -> tuple[int | None, str | None]:
+    if value in (None, ''):
+        return None, None
+    parsed = coerce_int(value)
+    if not parsed or parsed < 1:
+        return None, f'{field} must be a positive integer.'
+    return parsed, None
+
+
+def _beta_incidents_payload(limit: int, *, session_id: int | None = None) -> dict:
     workspace_id = current_workspace_id()
 
     turns_query = db.session.query(DmTurn).join(Campaign, DmTurn.campaign_id == Campaign.campaign_id).filter(
         Campaign.workspace_id == workspace_id,
     )
+    if session_id is not None:
+        turns_query = turns_query.filter(DmTurn.session_id == session_id)
     failed_turns = (
         turns_query.filter(DmTurn.status == 'failed')
         .order_by(DmTurn.created_at.desc(), DmTurn.turn_id.desc())
@@ -747,6 +782,8 @@ def beta_incidents():
     canon_jobs_query = db.session.query(CanonJob).join(Campaign, CanonJob.campaign_id == Campaign.campaign_id).filter(
         Campaign.workspace_id == workspace_id,
     )
+    if session_id is not None:
+        canon_jobs_query = canon_jobs_query.filter(CanonJob.session_id == session_id)
     failed_canon_jobs = (
         canon_jobs_query.filter(CanonJob.status == 'failed')
         .order_by(CanonJob.updated_at.desc(), CanonJob.job_id.desc())
@@ -760,6 +797,8 @@ def beta_incidents():
         .join(Campaign, Session.campaign_id == Campaign.campaign_id)
         .filter(Campaign.workspace_id == workspace_id)
     )
+    if session_id is not None:
+        feedback_query = feedback_query.filter(DmCoherenceFeedback.session_id == session_id)
     bad_turn_reports = (
         feedback_query.filter(DmCoherenceFeedback.feedback_type == 'bad_turn')
         .order_by(DmCoherenceFeedback.created_at.desc(), DmCoherenceFeedback.feedback_id.desc())
@@ -821,18 +860,33 @@ def beta_incidents():
     incidents.extend(telemetry_incidents)
     incidents.sort(key=lambda item: str(item.get('created_at') or ''), reverse=True)
 
-    return jsonify(
-        {
-            'incidents': incidents[:limit],
-            'summary': {
-                'failed_turn_count': turns_query.filter(DmTurn.status == 'failed').count(),
-                'failed_canon_job_count': canon_jobs_query.filter(CanonJob.status == 'failed').count(),
-                'bad_turn_report_count': feedback_query.filter(DmCoherenceFeedback.feedback_type == 'bad_turn').count(),
-                'telemetry_incident_count': len(telemetry_incidents),
-            },
-            'limit': limit,
-        }
-    )
+    return {
+        'incidents': incidents[:limit],
+        'summary': {
+            'failed_turn_count': turns_query.filter(DmTurn.status == 'failed').count(),
+            'failed_canon_job_count': canon_jobs_query.filter(CanonJob.status == 'failed').count(),
+            'bad_turn_report_count': feedback_query.filter(DmCoherenceFeedback.feedback_type == 'bad_turn').count(),
+            'telemetry_incident_count': len(telemetry_incidents),
+        },
+        'limit': limit,
+        **({'session_id': session_id} if session_id is not None else {}),
+    }
+
+
+@system_bp.route('/beta/incidents', methods=['GET'])
+def beta_incidents():
+    forbidden = capability_forbidden_response('debug_read', 'Only workspace admins can inspect beta incidents.')
+    if forbidden:
+        return forbidden
+
+    telemetry_metric('system.beta_incidents.requests_total', 1)
+    limit = _bounded_limit(request.args.get('limit'), default=25, maximum=100)
+    session_id, session_error = _optional_positive_int(request.args.get('session_id'), field='session_id')
+    if session_error:
+        return error_response('validation_error', session_error, 400)
+    if session_id is not None and not workspace_session(session_id):
+        return error_response('session_not_found', 'Session not found.', 404)
+    return jsonify(_beta_incidents_payload(limit, session_id=session_id))
 
 
 def _state_mutation_audit_payload(row: SessionStateMutationAudit) -> dict:
@@ -873,15 +927,7 @@ def _operator_action_audit_payload(row: OperatorActionAudit) -> dict:
     }
 
 
-@system_bp.route('/beta/audits', methods=['GET'])
-def beta_audits():
-    forbidden = capability_forbidden_response('debug_read', 'Only workspace admins can inspect beta audit logs.')
-    if forbidden:
-        return forbidden
-
-    telemetry_metric('system.beta_audits.requests_total', 1)
-    limit = coerce_int(request.args.get('limit'), 25)
-    limit = max(1, min(limit or 25, 100))
+def _beta_audits_payload(limit: int, *, session_id: int | None = None) -> dict:
     workspace_id = current_workspace_id()
 
     state_mutation_query = (
@@ -890,6 +936,9 @@ def beta_audits():
         .filter(Campaign.workspace_id == workspace_id)
     )
     operator_action_query = OperatorActionAudit.query.filter_by(workspace_id=workspace_id)
+    if session_id is not None:
+        state_mutation_query = state_mutation_query.filter(SessionStateMutationAudit.session_id == session_id)
+        operator_action_query = operator_action_query.filter_by(session_id=session_id)
 
     state_mutations = (
         state_mutation_query.order_by(
@@ -908,14 +957,423 @@ def beta_audits():
         .all()
     )
 
+    return {
+        'state_mutations': [_state_mutation_audit_payload(row) for row in state_mutations],
+        'operator_actions': [_operator_action_audit_payload(row) for row in operator_actions],
+        'summary': {
+            'state_mutation_count': state_mutation_query.count(),
+            'operator_action_count': operator_action_query.count(),
+        },
+        'limit': limit,
+        **({'session_id': session_id} if session_id is not None else {}),
+    }
+
+
+def _rate(numerator: int, denominator: int) -> float:
+    return (numerator / denominator) if denominator else 0.0
+
+
+def _count_label(count: int | float | None, singular: str, plural: str | None = None) -> str:
+    value = int(count or 0)
+    return f'{value} {singular if value == 1 else (plural or singular + "s")}'
+
+
+def _latency_summary(summary: dict) -> str:
+    sample_count = int(summary.get('dm_response_latency_sample_count') or 0)
+    if sample_count <= 0:
+        return 'Latency: no completed DM latency samples.'
+    p95 = summary.get('dm_response_latency_ms_p95')
+    avg = summary.get('dm_response_latency_ms_avg')
+    p95_label = 'n/a' if p95 is None else f'{round(float(p95))} ms p95'
+    avg_label = 'n/a' if avg is None else f'{round(float(avg))} ms avg'
+    return f'Latency: {p95_label}, {avg_label} across {_count_label(sample_count, "sample")}.'
+
+
+def _provider_model_summary(provider_model_turn_counts: list[dict]) -> str:
+    if not provider_model_turn_counts:
+        return 'Provider/model: none recorded.'
+    primary = provider_model_turn_counts[0]
+    provider = str(primary.get('provider') or 'unknown')
+    model = str(primary.get('model') or 'unknown')
+    count = int(primary.get('turn_count') or 0)
+    extra = len(provider_model_turn_counts) - 1
+    extra_suffix = f', plus {extra} other provider/model pair{"s" if extra != 1 else ""}' if extra > 0 else ''
+    return f'Provider/model: {provider} / {model} ({_count_label(count, "turn")}{extra_suffix}).'
+
+
+def _beta_session_operator_summary(summary: dict, provider_model_turn_counts: list[dict]) -> dict:
+    failed_turns = int(summary.get('failed_turn_count') or 0)
+    failed_canon_jobs = int(summary.get('canon_job_failed_count') or 0)
+    bad_turn_reports = int(summary.get('bad_turn_report_count') or 0)
+    awaiting_clarifications = int(summary.get('awaiting_clarification_turn_count') or 0)
+    review_reasons = [
+        _count_label(failed_turns, 'failed turn') if failed_turns else '',
+        _count_label(failed_canon_jobs, 'failed canon job') if failed_canon_jobs else '',
+        _count_label(bad_turn_reports, 'bad-turn report') if bad_turn_reports else '',
+        _count_label(awaiting_clarifications, 'unresolved clarification') if awaiting_clarifications else '',
+    ]
+    review_reasons = [reason for reason in review_reasons if reason]
+    headline = (
+        'Review recommended: ' + ', '.join(review_reasons) + '.'
+        if review_reasons
+        else 'Clean session: no failed turns, canon failures, bad-turn reports, or unresolved clarifications.'
+    )
+    details = [
+        _provider_model_summary(provider_model_turn_counts),
+        _latency_summary(summary),
+        (
+            'State/audit activity: '
+            f'{_count_label(summary.get("state_mutation_count"), "state mutation")}, '
+            f'{_count_label(summary.get("operator_action_count"), "operator action")}.'
+        ),
+        (
+            'Feedback: '
+            f'{_count_label(summary.get("coherence_feedback_count"), "coherence report")} '
+            f'with average {summary.get("coherence_feedback_avg") if summary.get("coherence_feedback_avg") is not None else "n/a"}.'
+        ),
+    ]
+    return {'headline': headline, 'details': details}
+
+
+def _beta_session_quality_payload(session_obj: Session, *, limit: int = 5) -> dict:
+    workspace_id = current_workspace_id()
+    session_id = session_obj.session_id
+
+    turns_query = DmTurn.query.filter_by(session_id=session_id, campaign_id=session_obj.campaign_id)
+    total_turns = turns_query.with_entities(func.count(DmTurn.turn_id)).scalar() or 0
+    completed_turns = (
+        turns_query.filter(DmTurn.status.in_(('completed', 'clarification_resolved')))
+        .with_entities(func.count(DmTurn.turn_id))
+        .scalar()
+        or 0
+    )
+    failed_turns = turns_query.filter(DmTurn.status == 'failed').with_entities(func.count(DmTurn.turn_id)).scalar() or 0
+    awaiting_clarification_turns = (
+        turns_query.filter(DmTurn.status == 'awaiting_clarification')
+        .with_entities(func.count(DmTurn.turn_id))
+        .scalar()
+        or 0
+    )
+    latency_values = [
+        int(row[0])
+        for row in turns_query.filter(DmTurn.latency_ms.isnot(None)).with_entities(DmTurn.latency_ms).all()
+        if row[0] is not None
+    ]
+    latest_turn = turns_query.order_by(DmTurn.created_at.desc(), DmTurn.turn_id.desc()).first()
+    provider_model_rows = (
+        turns_query.with_entities(DmTurn.llm_provider, DmTurn.llm_model, func.count(DmTurn.turn_id))
+        .group_by(DmTurn.llm_provider, DmTurn.llm_model)
+        .order_by(func.count(DmTurn.turn_id).desc())
+        .all()
+    )
+
+    canon_jobs_query = CanonJob.query.filter_by(session_id=session_id, campaign_id=session_obj.campaign_id)
+    canon_job_count = canon_jobs_query.with_entities(func.count(CanonJob.job_id)).scalar() or 0
+    failed_canon_jobs = (
+        canon_jobs_query.filter(CanonJob.status == 'failed').with_entities(func.count(CanonJob.job_id)).scalar() or 0
+    )
+
+    feedback_query = DmCoherenceFeedback.query.filter_by(session_id=session_id)
+    feedback_count = (
+        feedback_query.filter(DmCoherenceFeedback.feedback_type == 'coherence')
+        .with_entities(func.count(DmCoherenceFeedback.feedback_id))
+        .scalar()
+        or 0
+    )
+    avg_feedback = (
+        feedback_query.filter(DmCoherenceFeedback.feedback_type == 'coherence')
+        .with_entities(func.avg(DmCoherenceFeedback.coherence_score))
+        .scalar()
+    )
+    bad_turn_reports = (
+        feedback_query.filter(DmCoherenceFeedback.feedback_type == 'bad_turn')
+        .with_entities(func.count(DmCoherenceFeedback.feedback_id))
+        .scalar()
+        or 0
+    )
+
+    state_mutation_query = SessionStateMutationAudit.query.filter_by(
+        session_id=session_id,
+        campaign_id=session_obj.campaign_id,
+    )
+    operator_action_query = OperatorActionAudit.query.filter_by(workspace_id=workspace_id, session_id=session_id)
+    state_mutation_count = state_mutation_query.with_entities(
+        func.count(SessionStateMutationAudit.mutation_audit_id),
+    ).scalar() or 0
+    operator_action_count = operator_action_query.with_entities(
+        func.count(OperatorActionAudit.operator_audit_id),
+    ).scalar() or 0
+
+    recent_state_mutations = (
+        state_mutation_query.order_by(
+            SessionStateMutationAudit.created_at.desc(),
+            SessionStateMutationAudit.mutation_audit_id.desc(),
+        )
+        .limit(limit)
+        .all()
+    )
+    recent_operator_actions = (
+        operator_action_query.order_by(OperatorActionAudit.created_at.desc(), OperatorActionAudit.operator_audit_id.desc())
+        .limit(limit)
+        .all()
+    )
+    review_needed = bool(failed_turns or failed_canon_jobs or bad_turn_reports or awaiting_clarification_turns)
+
+    summary = {
+        'quality_status': 'review' if review_needed else 'clean',
+        'total_turn_count': total_turns,
+        'completed_turn_count': completed_turns,
+        'failed_turn_count': failed_turns,
+        'awaiting_clarification_turn_count': awaiting_clarification_turns,
+        'turn_failure_rate': _rate(failed_turns, total_turns),
+        'dm_response_latency_ms_avg': (sum(latency_values) / len(latency_values)) if latency_values else None,
+        'dm_response_latency_ms_p95': _percentile(latency_values, 95),
+        'dm_response_latency_sample_count': len(latency_values),
+        'latest_turn_id': latest_turn.turn_id if latest_turn else None,
+        'latest_turn_status': latest_turn.status if latest_turn else None,
+        'latest_turn_at': _isoformat(latest_turn.created_at) if latest_turn else None,
+        'canon_job_count': canon_job_count,
+        'canon_job_failed_count': failed_canon_jobs,
+        'canon_job_failure_rate': _rate(failed_canon_jobs, canon_job_count),
+        'bad_turn_report_count': bad_turn_reports,
+        'coherence_feedback_avg': float(avg_feedback) if avg_feedback is not None else None,
+        'coherence_feedback_count': feedback_count,
+        'state_mutation_count': state_mutation_count,
+        'operator_action_count': operator_action_count,
+    }
+    provider_model_turn_counts = [
+        {
+            'provider': provider or 'unknown',
+            'model': model or 'unknown',
+            'turn_count': count,
+        }
+        for provider, model, count in provider_model_rows
+    ]
+
+    return {
+        'session': _support_bundle_session_payload(session_obj),
+        'summary': summary,
+        'operator_summary': _beta_session_operator_summary(summary, provider_model_turn_counts),
+        'provider_model_turn_counts': provider_model_turn_counts,
+        'recent_state_mutations': [_state_mutation_audit_payload(row) for row in recent_state_mutations],
+        'recent_operator_actions': [_operator_action_audit_payload(row) for row in recent_operator_actions],
+        'limit': limit,
+    }
+
+
+@system_bp.route('/beta/session-quality', methods=['GET'])
+def beta_session_quality():
+    forbidden = capability_forbidden_response('debug_read', 'Only workspace admins can inspect beta session quality.')
+    if forbidden:
+        return forbidden
+
+    telemetry_metric('system.beta_session_quality.requests_total', 1)
+    limit = _bounded_limit(request.args.get('limit'), default=5, maximum=25)
+    session_id, session_error = _optional_positive_int(request.args.get('session_id'), field='session_id')
+    if session_error:
+        return error_response('validation_error', session_error, 400)
+    if session_id is None:
+        return error_response('validation_error', 'session_id is required.', 400)
+    session_obj = workspace_session(session_id)
+    if not session_obj:
+        return error_response('session_not_found', 'Session not found.', 404)
+    return jsonify(_beta_session_quality_payload(session_obj, limit=limit))
+
+
+@system_bp.route('/beta/audits', methods=['GET'])
+def beta_audits():
+    forbidden = capability_forbidden_response('debug_read', 'Only workspace admins can inspect beta audit logs.')
+    if forbidden:
+        return forbidden
+
+    telemetry_metric('system.beta_audits.requests_total', 1)
+    limit = _bounded_limit(request.args.get('limit'), default=25, maximum=100)
+    session_id, session_error = _optional_positive_int(request.args.get('session_id'), field='session_id')
+    if session_error:
+        return error_response('validation_error', session_error, 400)
+    if session_id is not None and not workspace_session(session_id):
+        return error_response('session_not_found', 'Session not found.', 404)
+    return jsonify(_beta_audits_payload(limit, session_id=session_id))
+
+
+def _turn_payload(turn: DmTurn) -> dict:
+    return {
+        'turn_id': turn.turn_id,
+        'session_id': turn.session_id,
+        'campaign_id': turn.campaign_id,
+        'player_id': turn.player_id,
+        'status': turn.status,
+        'outcome_status': turn.outcome_status,
+        'requires_roll': bool(turn.requires_roll),
+        'rule_type': turn.rule_type,
+        'confidence': turn.confidence,
+        'latency_ms': turn.latency_ms,
+        'provider': turn.llm_provider,
+        'model': turn.llm_model,
+        'player_input': turn.player_input,
+        'dm_output_preview': (turn.dm_output or '')[:1200],
+        'metadata': safe_json_loads(turn.metadata_json, {}),
+        'created_at': _isoformat(turn.created_at),
+        'completed_at': _isoformat(turn.completed_at),
+    }
+
+
+def _canon_job_payload(job: CanonJob) -> dict:
+    return {
+        'job_id': job.job_id,
+        'turn_id': job.turn_id,
+        'session_id': job.session_id,
+        'campaign_id': job.campaign_id,
+        'status': job.status,
+        'attempts': job.attempts,
+        'error_text': job.error_text,
+        'locked_at': _isoformat(job.locked_at),
+        'next_run_at': _isoformat(job.next_run_at),
+        'completed_at': _isoformat(job.completed_at),
+        'created_at': _isoformat(job.created_at),
+        'updated_at': _isoformat(job.updated_at),
+    }
+
+
+def _session_log_entry_payload(entry: SessionLogEntry) -> dict:
+    return {
+        'id': entry.id,
+        'session_id': entry.session_id,
+        'entry_type': entry.entry_type,
+        'message': entry.message,
+        'metadata': safe_json_loads(entry.metadata_json, {}),
+        'timestamp': _isoformat(entry.timestamp),
+    }
+
+
+def _turn_event_payload(event: TurnEvent) -> dict:
+    return {
+        'event_id': event.event_id,
+        'session_id': event.session_id,
+        'campaign_id': event.campaign_id,
+        'turn_id': event.turn_id,
+        'player_id': event.player_id,
+        'event_type': event.event_type,
+        'payload': safe_json_loads(event.payload_json, {}),
+        'created_at': _isoformat(event.created_at),
+    }
+
+
+def _support_bundle_turns(workspace_id: str, *, limit: int, session_id: int | None = None) -> list[dict]:
+    query = db.session.query(DmTurn).join(Campaign, DmTurn.campaign_id == Campaign.campaign_id).filter(
+        Campaign.workspace_id == workspace_id,
+    )
+    if session_id is not None:
+        query = query.filter(DmTurn.session_id == session_id)
+    turns = query.order_by(DmTurn.created_at.desc(), DmTurn.turn_id.desc()).limit(limit).all()
+    return [_turn_payload(turn) for turn in turns]
+
+
+def _support_bundle_canon_jobs(workspace_id: str, *, limit: int, session_id: int | None = None) -> list[dict]:
+    query = db.session.query(CanonJob).join(Campaign, CanonJob.campaign_id == Campaign.campaign_id).filter(
+        Campaign.workspace_id == workspace_id,
+    )
+    if session_id is not None:
+        query = query.filter(CanonJob.session_id == session_id)
+    jobs = query.order_by(CanonJob.updated_at.desc(), CanonJob.job_id.desc()).limit(limit).all()
+    return [_canon_job_payload(job) for job in jobs]
+
+
+def _support_bundle_session_log(session_id: int | None, *, limit: int) -> list[dict]:
+    if session_id is None:
+        return []
+    entries = (
+        SessionLogEntry.query.filter_by(session_id=session_id)
+        .order_by(SessionLogEntry.timestamp.desc(), SessionLogEntry.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_session_log_entry_payload(entry) for entry in reversed(entries)]
+
+
+def _support_bundle_turn_events(session_id: int | None, *, limit: int) -> list[dict]:
+    if session_id is None:
+        return []
+    events = (
+        TurnEvent.query.filter_by(session_id=session_id)
+        .order_by(TurnEvent.created_at.desc(), TurnEvent.event_id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_turn_event_payload(event) for event in reversed(events)]
+
+
+def _support_bundle_session_payload(session_obj: Session | None) -> dict | None:
+    if session_obj is None:
+        return None
+    state_snapshot = safe_json_loads(session_obj.state_snapshot, {})
+    state_snapshot_keys = sorted(state_snapshot.keys()) if isinstance(state_snapshot, dict) else []
+    return {
+        'session_id': session_obj.session_id,
+        'campaign_id': session_obj.campaign_id,
+        'name': session_obj.name,
+        'status': session_obj.status,
+        'created_at': _isoformat(session_obj.created_at),
+        'updated_at': _isoformat(session_obj.updated_at),
+        'deleted_at': _isoformat(session_obj.deleted_at),
+        'state_snapshot_keys': state_snapshot_keys,
+    }
+
+
+@system_bp.route('/beta/support-bundle', methods=['GET'])
+def beta_support_bundle():
+    forbidden = capability_forbidden_response('debug_read', 'Only workspace admins can export beta support bundles.')
+    if forbidden:
+        return forbidden
+
+    telemetry_metric('system.beta_support_bundle.requests_total', 1)
+    limit = _bounded_limit(request.args.get('limit'), default=25, maximum=100)
+    session_id, session_error = _optional_positive_int(request.args.get('session_id'), field='session_id')
+    if session_error:
+        return error_response('validation_error', session_error, 400)
+    session_obj = workspace_session(session_id) if session_id is not None else None
+    if session_id is not None and not session_obj:
+        return error_response('session_not_found', 'Session not found.', 404)
+
+    workspace_id = current_workspace_id()
+    telemetry_client = get_telemetry()
+    telemetry_snapshot = telemetry_client.snapshot() if telemetry_client else {'counters': {}, 'timings': {}}
+    telemetry_counters = telemetry_snapshot.get('counters') if isinstance(telemetry_snapshot.get('counters'), dict) else {}
+    telemetry_timings = telemetry_snapshot.get('timings') if isinstance(telemetry_snapshot.get('timings'), dict) else {}
+    incident_counters = {
+        key: value
+        for key, value in telemetry_counters.items()
+        if str(key).startswith('event.socket.') or str(key).startswith('event.system.feedback.bad_turn')
+    }
+    queue_timings = {
+        key: value
+        for key, value in telemetry_timings.items()
+        if str(key).startswith('socket.turn_queue_wait_ms')
+    }
+
     return jsonify(
         {
-            'state_mutations': [_state_mutation_audit_payload(row) for row in state_mutations],
-            'operator_actions': [_operator_action_audit_payload(row) for row in operator_actions],
-            'summary': {
-                'state_mutation_count': state_mutation_query.count(),
-                'operator_action_count': operator_action_query.count(),
+            'generated_at': _isoformat(utc_now()),
+            'workspace_id': workspace_id,
+            'filters': {'session_id': session_id, 'limit': limit},
+            'runtime': {
+                'env': current_app.config.get('AIDM_ENV', 'unknown'),
+                'auth_required': bool(current_app.config.get('AIDM_AUTH_REQUIRED', False)),
+                'llm': current_llm_payload(),
             },
-            'limit': limit,
+            'session': _support_bundle_session_payload(session_obj),
+            'beta_summary': _beta_summary(),
+            'beta_slo': _beta_slo_summary(),
+            'session_quality': _beta_session_quality_payload(session_obj, limit=limit) if session_obj else None,
+            'incidents': _beta_incidents_payload(limit, session_id=session_id),
+            'audits': _beta_audits_payload(limit, session_id=session_id),
+            'recent_turns': _support_bundle_turns(workspace_id, limit=limit, session_id=session_id),
+            'canon_jobs': _support_bundle_canon_jobs(workspace_id, limit=limit, session_id=session_id),
+            'session_log_entries': _support_bundle_session_log(session_id, limit=limit),
+            'turn_events': _support_bundle_turn_events(session_id, limit=limit),
+            'telemetry': {
+                'incident_counters': incident_counters,
+                'queue_timings': queue_timings,
+            },
         }
     )

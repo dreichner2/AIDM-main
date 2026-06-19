@@ -10,6 +10,7 @@ from aidm_server.database import db
 from aidm_server.errors import error_response
 from aidm_server.llm import query_gpt
 from aidm_server.models import (
+    Player,
     Session,
     SessionLogEntry,
     SessionState,
@@ -18,7 +19,14 @@ from aidm_server.models import (
     safe_json_dumps,
     safe_json_loads,
 )
-from aidm_server.response_dtos import isoformat, session_payload, session_state_payload, turn_event_payload
+from aidm_server.response_dtos import (
+    campaign_payload,
+    isoformat,
+    player_detail_payload,
+    session_payload,
+    session_state_payload,
+    turn_event_payload,
+)
 from aidm_server.services.session_lifecycle import (
     archive_session_record,
     delete_session_record,
@@ -52,6 +60,8 @@ sessions_bp = Blueprint('sessions', __name__)
 RECAP_RECENT_ENTRY_LIMIT = 80
 RECAP_SOURCE_CHAR_BUDGET = 12_000
 SESSION_IDEMPOTENCY_KEY_MAX_LENGTH = 80
+SESSION_EXPORT_MAX_LOG_ENTRIES = 1000
+SESSION_EXPORT_MAX_TURN_EVENTS = 1000
 
 
 def _state_snapshot_dict(raw_snapshot) -> dict:
@@ -126,6 +136,81 @@ def _campaign_pack_progress_actor() -> str:
         return 'operator'
     role = 'admin' if current_account_is_workspace_admin() else 'player'
     return f'account:{account_id}:{role}'
+
+
+def _session_export_log_entries(session_id: int) -> tuple[list[dict], bool]:
+    rows = (
+        SessionLogEntry.query.filter_by(session_id=session_id)
+        .order_by(SessionLogEntry.timestamp.asc(), SessionLogEntry.id.asc())
+        .limit(SESSION_EXPORT_MAX_LOG_ENTRIES + 1)
+        .all()
+    )
+    truncated = len(rows) > SESSION_EXPORT_MAX_LOG_ENTRIES
+    if truncated:
+        rows = rows[:SESSION_EXPORT_MAX_LOG_ENTRIES]
+    return (
+        [
+            {
+                'id': entry.id,
+                'message': entry.message,
+                'entry_type': entry.entry_type,
+                'metadata': safe_json_loads(entry.metadata_json, {}),
+                'timestamp': isoformat(entry.timestamp),
+            }
+            for entry in rows
+        ],
+        truncated,
+    )
+
+
+def _session_export_turn_events(session_id: int) -> tuple[list[dict], bool]:
+    query = TurnEvent.query.filter_by(session_id=session_id)
+    if not _campaign_pack_operator_view():
+        query = query.filter(TurnEvent.event_type != PROGRESS_CHANGED_EVENT)
+    rows = query.order_by(TurnEvent.created_at.asc(), TurnEvent.event_id.asc()).limit(SESSION_EXPORT_MAX_TURN_EVENTS + 1).all()
+    truncated = len(rows) > SESSION_EXPORT_MAX_TURN_EVENTS
+    if truncated:
+        rows = rows[:SESSION_EXPORT_MAX_TURN_EVENTS]
+    return [turn_event_payload(event) for event in rows], truncated
+
+
+def _session_export_payload(session_obj: Session, *, selected_player_id: int | None = None) -> dict:
+    include_hidden_state = _campaign_pack_operator_view()
+    campaign = session_obj.campaign
+    players = (
+        Player.query.filter_by(campaign_id=campaign.campaign_id)
+        .order_by(Player.player_id.asc())
+        .all()
+    )
+    selected_player = None
+    if selected_player_id is not None:
+        selected_player = next((player for player in players if player.player_id == selected_player_id), None)
+    if selected_player is None and players:
+        selected_player = players[0]
+    session_state = SessionState.query.filter_by(session_id=session_obj.session_id).first()
+    log_entries, log_truncated = _session_export_log_entries(session_obj.session_id)
+    turn_events, turn_events_truncated = _session_export_turn_events(session_obj.session_id)
+    warnings = []
+    if log_truncated:
+        warnings.append(f'log entries truncated to {SESSION_EXPORT_MAX_LOG_ENTRIES}')
+    if turn_events_truncated:
+        warnings.append(f'turn events truncated to {SESSION_EXPORT_MAX_TURN_EVENTS}')
+    return {
+        'exportedAt': utc_now().isoformat(),
+        'selectedIds': {
+            'campaignId': campaign.campaign_id,
+            'sessionId': session_obj.session_id,
+            'playerId': selected_player.player_id if selected_player else None,
+        },
+        'campaign': campaign_payload(campaign),
+        'selectedSession': session_payload(session_obj, include_hidden_state=include_hidden_state),
+        'players': [player_detail_payload(player) for player in players],
+        'selectedPlayer': player_detail_payload(selected_player) if selected_player else None,
+        'sessionState': session_state_payload(session_obj, session_state, include_hidden_state=include_hidden_state),
+        'logEntries': log_entries,
+        'turnEvents': turn_events,
+        'warnings': warnings,
+    }
 
 
 def _bounded_session_recap_source(session_id: int, session_state: SessionState | None) -> str:
@@ -360,6 +445,20 @@ def import_session():
         logger.error('Failed to import session: %s', str(exc))
         telemetry_event('sessions.import.failed', payload={'error': str(exc)}, severity='error')
         return error_response('session_import_failed', 'Failed to import session.', 400)
+
+
+@sessions_bp.route('/<int:session_id>/export', methods=['GET'])
+def export_session(session_id):
+    telemetry_metric('sessions.export.requests_total', 1)
+    session_obj = workspace_session(session_id)
+    if not session_obj:
+        telemetry_event('sessions.export.session_not_found', payload={'session_id': session_id}, severity='warning')
+        return error_response('session_not_found', 'Session not found.', 404)
+
+    selected_player_id = coerce_int(request.args.get('player_id'))
+    payload = _session_export_payload(session_obj, selected_player_id=selected_player_id)
+    telemetry_metric('sessions.export.success_total', 1)
+    return jsonify(payload)
 
 
 @sessions_bp.route('/<int:session_id>', methods=['PATCH'])

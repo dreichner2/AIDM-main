@@ -1,3 +1,626 @@
+# Daily AIDM Codebase Improvement Audit - 2026-06-19 16:03 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: afternoon safe-improvement follow-up across the already-dirty checkout, automation memory, same-day report history, request JSON parsing guard, state snapshot writer inventory guard, RC/dev-check wiring, hosted beta evidence tooling, generated API contracts, and lightweight security/frontend scan surfaces. The worktree was already broadly dirty at the start of this run, including the 2026-06-19 06:04 MDT optional JSON parsing work plus untracked release-readiness scripts/docs/tests. Those changes were preserved. This run only tightened the state snapshot writer checker, added focused coverage for that checker, prepended this report, and updated automation memory.
+
+## What Was Inspected
+
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`, including the 2026-06-18 and 2026-06-19 morning audit entries.
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` and `git status --short`; the worktree remains a large mixed dirty tree with many modified and untracked backend, frontend, docs, scripts, workflow, requirements, and tests files.
+- The existing 2026-06-19 06:04 MDT top report, especially the optional JSON parsing helper work and the updated priority assessment that hosted/staging evidence is now the main release blocker.
+- Request JSON parsing guard work:
+  - `scripts/check_request_json_parsing.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `Makefile` `request-json-parsing` and `dev-check` wiring
+  - `scripts/closed_beta_rc_check.py` RC command plan wiring
+- State snapshot writer inventory work:
+  - `scripts/check_state_snapshot_writers.py`
+  - `docs/state_snapshot_writer_inventory.md`
+  - `tests/test_state_snapshot_writers.py`
+  - `Makefile` `state-writers` and `dev-check` wiring
+  - `scripts/closed_beta_rc_check.py` RC command plan wiring
+- Hosted/release evidence surfaces:
+  - `scripts/deployment_readiness_check.py`
+  - `scripts/hosted_cookie_auth_smoke.py`
+  - `scripts/security_forbidden_smoke.py`
+  - `scripts/hosted_rc_evidence_check.py`
+  - `scripts/render_release_evidence_packet.py`
+  - `docs/production-readiness.md`
+  - `docs/release_checklist.md`
+  - `.github/workflows/closed-beta-rc.yml`
+- Frontend/security scan targets using source searches for dangerous DOM APIs, token storage, cookies, CSRF markers, ARIA roles, keyboard handlers, and button usage.
+- Generated API contract drift with `scripts/generate_api_types.py --check`.
+
+## Small Safe Fix Made
+
+### Detect destructured `Session.state_snapshot` assignments in the inventory guard
+
+Affected files:
+- `scripts/check_state_snapshot_writers.py`
+- `tests/test_state_snapshot_writers.py`
+- `improvements_suggestions.md`
+
+Problem:
+The state snapshot writer inventory checker now provides useful release safety, but its assignment target detector only recognized direct assignment targets such as:
+
+```python
+session.state_snapshot = safe_json_dumps(snapshot, {})
+```
+
+It did not recursively inspect tuple, list, or starred assignment targets. That meant a future write shaped like either of these could bypass the inventory even though it still writes `Session.state_snapshot`:
+
+```python
+session.state_snapshot, marker = value, True
+[prefix, session.state_snapshot] = [None, value]
+```
+
+Change:
+- Updated `_is_state_snapshot_target` to recursively inspect `ast.Tuple`, `ast.List`, and `ast.Starred` assignment targets.
+- Added `test_state_snapshot_writer_scan_detects_destructured_assignment_targets`, which uses a temporary repo root and proves both tuple and list destructuring writes are detected with the expected path, scope, and line.
+
+Rationale:
+This is a guard-script hardening change, not a runtime behavior change. It reduces the chance that future direct snapshot writes escape the documented inventory, while avoiding any changes to gameplay state mutation, persistence, campaign-pack progress, frontend code, live runtime configuration, or deployment behavior.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_state_snapshot_writers.py -q`
+  - Passed: 4 tests.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py --print-current`
+  - Passed and printed the current 22 detected writer locations for inspection.
+- `./.venv/bin/python -m py_compile scripts/check_state_snapshot_writers.py tests/test_state_snapshot_writers.py`
+  - Passed.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Hosted beta proof remains the main release blocker
+
+Current evidence:
+- Local/source gates are now much stronger: request JSON parsing guard, state writer inventory guard, hosted cookie-auth smoke, security forbidden smoke, deployment-readiness evidence generation, hosted RC evidence orchestration, visual-smoke review, Socket.IO worker-model decision checks, and release packet rendering are all present in the dirty tree.
+- This run still did not have a hosted/staging target URL, target env file, account credentials/token, workspace ID, or deployment output to prove the actual hosted environment.
+
+Risk:
+The source tree is approaching a better RC gate story, but it still cannot prove hosted CORS, cookie flags, CSRF behavior, account-token suppression, metrics exposure, Socket.IO worker behavior, provider configuration, observability receipt, or beta SLOs until those checks run against the real target.
+
+Recommended next step:
+Run the hosted target evidence suite against the real beta/staging deployment:
+
+```bash
+make hosted-rc-evidence HOSTED_RC_EVIDENCE_ARGS="--target-url <target-url> --auth-token <operator-token> --workspace-id <workspace-id> --non-admin-token <token> --campaign-id <campaign-id> --session-id <session-id> --player-id <player-id> --env-file <target-env>"
+```
+
+### Medium-High: The dirty worktree is now the practical review risk
+
+Current evidence:
+- The checkout remains broadly dirty across backend, frontend, docs, scripts, tests, workflow configuration, requirements, and new release tooling.
+- This run preserved all pre-existing dirty changes and only touched the state writer checker, its test, this report, and automation memory.
+
+Risk:
+A large mixed diff can hide small regressions and make it hard to decide what is actually ready to publish. The current tree appears to contain several coherent topics, but they should not be reviewed as one undifferentiated change set without a careful final pass.
+
+Recommended next step:
+Review or split the dirty tree by topic before commit/PR:
+
+- request parsing and validation guards;
+- state snapshot writer inventory and RC gates;
+- hosted auth/deployment readiness evidence tooling;
+- campaign-pack progress/import/linter changes;
+- frontend beta runtime notes, support-bundle UI, and responsive CSS;
+- dependency/workflow updates.
+
+### Medium: Rendered UX/accessibility proof is still missing for dirty frontend changes
+
+Current evidence:
+- The morning run reported `cd aidm_frontend && npm run typecheck` passed.
+- Static searches did not show dangerous DOM APIs in frontend source.
+- The dirty tree includes substantial frontend and responsive CSS changes.
+- This run did not start the dev server or run browser/visual smoke.
+
+Risk:
+TypeScript and source scans do not prove modal focus, keyboard reachability, mobile layout, visual overlap, button sizing, or console cleanliness.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+## Larger Suggested Improvements
+
+- Keep `make request-json-parsing` and `make state-writers` in `dev-check` and the RC gate; both are now useful low-cost drift guards.
+- Consider adding the request JSON parsing guard and state writer guard to any lightweight pre-PR checklist if the full RC gate is too expensive for daily work.
+- Avoid a bulk migration of direct `Session.state_snapshot` writers. The inventory shows the current 22 writes are categorized; migrate only one ownership category at a time when the helper boundary is obvious.
+- Generate a release evidence packet only after hosted/staging deployment-readiness, hosted cookie auth, security-forbidden smoke, export/import smoke, beta SLO evidence, and visual-smoke review are available.
+
+## Recommended Next Run Focus
+
+1. If hosted/staging credentials are available, run `make hosted-rc-evidence` against the real target and inspect the evidence report.
+2. If no hosted target is available, run frontend browser/visual smoke and `make visual-smoke-review` for the dirty UI changes.
+3. Review the broad dirty worktree by topic and decide what should be split before publish.
+4. Keep audits focused on one small guard or regression at a time until the release-readiness worktree is stabilized.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-19 06:04 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the already-dirty checkout, automation memory, recent report history, shared request-body validation helpers, optional campaign-pack import request parsing, campaign-pack import endpoint coverage, direct `Session.state_snapshot` writer ownership checks, hosted cookie-auth and deployment-readiness workflow surfaces, frontend storage/security/accessibility scan targets, generated API contracts, and lightweight backend/frontend developer gates. The worktree was already broadly dirty at the start of this run with prior validation-helper work, state-writer inventory work, hosted readiness scripts/docs, frontend runtime panels, and many tests in progress. Those changes were preserved. This run only made a small validation/helper refactor, wired two campaign-pack import routes through it, added focused tests, prepended this report, and updated automation memory.
+
+## What Was Inspected
+
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`, including the 2026-06-18 06:05 MDT and 16:05 MDT runs.
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` and `git status --short`; the working tree already contained many modified and untracked files before this run.
+- Prior top-of-file report history in `improvements_suggestions.md`, especially the carried-forward concerns around direct session snapshot writers, hosted auth proof, deployment readiness, and generated resolver contracts.
+- `aidm_server/validation.py` and direct validation helper tests in `tests/test_validation_helpers.py`.
+- The only backend direct `request.get_json(silent=True)` callers outside the validation helper:
+  - `aidm_server/blueprints/campaigns.py::import_example_campaign_pack`
+  - `aidm_server/blueprints/campaigns.py::import_installed_campaign_pack`
+- Campaign-pack import coverage in `tests/test_campaigns_endpoints.py`, including example-pack imports, installed-pack reimports, malformed request handling, dry-run behavior, and linter authoring-report assertions already present in the dirty tree.
+- Newly present direct state snapshot writer guard:
+  - `scripts/check_state_snapshot_writers.py`
+  - `docs/state_snapshot_writer_inventory.md`
+  - `tests/test_state_snapshot_writers.py`
+  - `Makefile` and `scripts/closed_beta_rc_check.py` integration.
+- Hosted auth and release-readiness workflow surfaces:
+  - `scripts/hosted_cookie_auth_smoke.py`
+  - `scripts/deployment_readiness_check.py`
+  - `scripts/security_forbidden_smoke.py`
+  - `scripts/render_release_evidence_packet.py`
+  - `docs/auth_modes.md`
+  - `docs/production-readiness.md`
+  - `docs/release_checklist.md`
+  - `.github/workflows/closed-beta-rc.yml`
+- Frontend token, storage, CSRF, and accessibility-related surfaces with searches for `dangerouslySetInnerHTML`, `innerHTML`, `eval`, `new Function`, `localStorage`, `sessionStorage`, `document.cookie`, `authToken`, `csrf`, ARIA attributes, roles, keyboard handlers, and button usage.
+- Generated API contract consistency via `scripts/generate_api_types.py --check`.
+- Developer workflow gates in `Makefile`, `aidm_frontend/package.json`, and the closed-beta/deployment readiness tests.
+
+## Small Safe Fix Made
+
+### Centralize optional JSON-object request parsing
+
+Affected files:
+- `aidm_server/validation.py`
+- `aidm_server/blueprints/campaigns.py`
+- `tests/test_validation_helpers.py`
+- `tests/test_campaigns_endpoints.py`
+- `improvements_suggestions.md`
+
+Problem:
+Required JSON endpoints now use `parse_json_body`, but the two optional-body campaign-pack import routes still duplicated the lower-level Flask parsing expression `request.get_json(silent=True) if request.is_json else {}`. The duplicated code was small, but it carried a subtle contract that matters for imports:
+
+- no JSON body is allowed and should behave like `{}`;
+- malformed JSON with `Content-Type: application/json` must still return a validation error;
+- JSON arrays, scalars, and `null` must not flow into route code as object payloads.
+
+Change:
+- Added `parse_optional_json_body(request)` to `aidm_server/validation.py`.
+- Kept `parse_json_body(request)` as the required-body parser.
+- Replaced the duplicated optional parser in:
+  - `import_example_campaign_pack`
+  - `import_installed_campaign_pack`
+- Added direct helper tests proving the difference between required and optional parsing:
+  - required parser returns `None` for absent, malformed, or non-object bodies;
+  - optional parser returns `{}` for omitted/non-JSON optional bodies;
+  - optional parser returns `None` for malformed or non-object JSON bodies.
+- Added an endpoint regression proving malformed optional JSON is rejected for example campaign-pack import.
+
+Rationale:
+This is a small maintainability and correctness guard. It removes the last direct route-level `request.get_json(silent=True)` callers from backend blueprints, centralizes the optional-body contract, and preserves campaign-pack import behavior. It does not change campaign-pack import semantics, persistence, auth, state mutation, generated API contracts, frontend behavior, provider behavior, live runtime configuration, or deployment workflow behavior.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_validation_helpers.py tests/test_campaigns_endpoints.py::test_import_example_campaign_pack_rejects_malformed_optional_json tests/test_campaigns_endpoints.py::test_import_example_campaign_pack_creates_playable_campaign tests/test_campaigns_endpoints.py::test_import_road_of_unremembered_kings_example_pack_dry_run tests/test_campaigns_endpoints.py::test_installed_campaign_pack_library_lists_details_and_imports -q`
+  - Passed: 8 tests.
+- `./.venv/bin/python -m py_compile aidm_server/validation.py aidm_server/blueprints/campaigns.py tests/test_validation_helpers.py tests/test_campaigns_endpoints.py`
+  - Passed.
+- `rg -n "request\\.get_json\\(silent=True\\)|get_json\\(silent=True\\) if request\\.is_json" aidm_server`
+  - Passed inspection: only the shared validation helper now calls `request.get_json(silent=True)`.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 19 direct writes across 17 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `git diff --check -- aidm_server/validation.py aidm_server/blueprints/campaigns.py tests/test_validation_helpers.py tests/test_campaigns_endpoints.py improvements_suggestions.md`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `cd aidm_frontend && npm run typecheck`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_state_snapshot_writers.py tests/test_closed_beta_rc_check.py tests/test_deployment_readiness_check.py -q`
+  - Passed: 21 tests.
+
+## High-Priority Findings
+
+### High: Hosted beta proof is now the main release blocker
+
+Current evidence:
+- Source-level hosted readiness work is now much stronger than the previous reports indicated:
+  - `make deployment-readiness` exists.
+  - `make hosted-cookie-auth-smoke` exists.
+  - `make local-beta-slo-baseline` and `make beta-slo-baseline` exist.
+  - `scripts/render_release_evidence_packet.py` and `.github/workflows/closed-beta-rc.yml` can collect evidence artifacts.
+  - docs now describe cookie-only hosted auth, CSRF, Socket.IO worker-model proof, migration-chain drills, state-writer inventory, support bundles, SLO baselines, and RC evidence packets.
+- This automation run did not have a hosted target URL, hosted env file, account credentials/token, workspace ID, or deployment output to prove the live target.
+
+Risk:
+The local source gates are meaningful, but they still cannot prove the actual hosted/staging deployment's CORS, cookie flags, CSRF behavior, account-token response suppression, metrics exposure, Socket.IO worker behavior, provider configuration, or beta SLO state.
+
+Recommended next step:
+Run the hosted target evidence commands against the real beta/staging URL and attach the generated reports:
+
+```bash
+make deployment-readiness DEPLOYMENT_READINESS_ARGS="--env-file <target-env> --target-url <target-url> --auth-token <token> --evidence-report tmp/release/deployment-readiness-evidence.md"
+make hosted-cookie-auth-smoke HOSTED_COOKIE_AUTH_SMOKE_ARGS="--target-url <target-url> --account-intent signup --evidence-report tmp/release/hosted-cookie-auth-evidence.md"
+make beta-slo-baseline BETA_SLO_BASELINE_ARGS="--target-url <target-url> --auth-token <token> --workspace-id <workspace-id> --release RC1 --environment staging"
+```
+
+### Medium-High: State snapshot writers are inventoried, but direct-write categories still need disciplined migration
+
+Current evidence:
+- The previous high-priority gap is no longer "no inventory": `scripts/check_state_snapshot_writers.py` passes and `docs/state_snapshot_writer_inventory.md` classifies every detected direct write.
+- The inventory currently documents 19 direct writes across 17 scopes.
+- Categories include central runtime persistence, serialized turn pipeline writes, campaign-pack serialized writes, initialization/import, lifecycle metadata, projection refresh, runtime control, and regression fixtures.
+
+Risk:
+The inventory is a major safety improvement, but direct write categories still need continued discipline. Some categories are intentionally direct today, especially turn-pipeline no-change persistence, campaign-pack progress mirroring, and turn-control persistence. If future edits add writes without the checker or expand a category beyond its intended ownership boundary, state revision/audit semantics could drift again.
+
+Recommended next step:
+Keep the checker in RC/dev gates and migrate one live-runtime category at a time only when there is a clear helper boundary. Start with the narrowest candidate: a named helper for turn-control or no-change turn-pipeline persistence, not a broad rewrite.
+
+### Medium-High: The dirty worktree is now a release-management risk
+
+Current evidence:
+- The checkout started this run with roughly 50 modified tracked files and many untracked files across backend, frontend, docs, scripts, tests, requirements, and GitHub workflow configuration.
+- The dirty tree includes important release machinery such as hosted auth smoke, deployment readiness, migration drills, SLO rendering, RC evidence packet rendering, state-writer inventory, Socket.IO worker-model checks, frontend runtime notes, and campaign-pack import UX/tests.
+- This run preserved all pre-existing dirty changes and only added a narrow validation helper change.
+
+Risk:
+The changes may be internally coherent, but the current worktree is too broad to reason about as one release unit without a final pass. A small unrelated regression could hide inside the large mixed diff, and review will be harder if release workflow, docs, backend behavior, frontend UI, dependency pins, and tests are all shipped together without staging.
+
+Recommended next step:
+Before publishing, split or at least review the dirty tree by topic:
+
+- state-writer inventory and RC workflow gates;
+- hosted auth/deployment readiness evidence tooling;
+- campaign-pack progress/import/linter changes;
+- frontend beta runtime and support-bundle UI;
+- dependency/workflow updates.
+
+### Medium: Frontend source checks passed, but rendered UX/accessibility proof is still missing for the dirty UI changes
+
+Current evidence:
+- `cd aidm_frontend && npm run typecheck` passed.
+- Static searches found no `dangerouslySetInnerHTML`, no direct `innerHTML`, and no `eval`/`new Function` usage in frontend source.
+- The dirty tree includes substantial frontend changes in `App.tsx`, `SessionBoard.tsx`, `InspectorPanel.tsx`, `BetaIncidentPanel.tsx`, `CampaignPackImportDialog.tsx`, `BetaRuntimeNotesPanel.tsx`, and responsive/style files.
+- This run did not start the dev server or run browser/visual smoke.
+
+Risk:
+TypeScript can prove structure, but not mobile layout, keyboard reachability, focus order, visual overlap, modal behavior, or live browser console cleanliness.
+
+Recommended next step:
+Run the frontend browser and visual smoke gates after the dirty UI set is ready:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+```
+
+## Larger Suggested Improvements
+
+- Treat hosted/staging evidence as the next release-critical milestone; the local checks are now strong enough that live target proof is the bigger unknown.
+- Keep `parse_json_body` and `parse_optional_json_body` as the only low-level request JSON parsing entry points for backend blueprints.
+- Continue using the state snapshot writer inventory as a guardrail, but do not migrate direct writers in bulk. Move one ownership category only when the helper name and audit semantics are obvious.
+- Add a small CI or dev-check assertion for direct route-level `request.get_json(silent=True)` if the project wants to prevent blueprints from bypassing validation helpers again.
+- Run browser/visual smoke before treating the frontend runtime notes, support bundle, campaign-pack import UI, and responsive CSS changes as release-ready.
+- Use the release evidence packet as the handoff artifact once hosted deployment-readiness, hosted cookie auth, security-forbidden smoke, export/import smoke, and beta SLO evidence are available.
+
+## Recommended Next Run Focus
+
+1. Run or inspect hosted/staging deployment-readiness evidence if a target URL and credentials are available.
+2. Run frontend browser/visual smoke for the current dirty UI changes.
+3. Review the dirty tree by topic and identify whether it should be split before commit/PR.
+4. Consider adding a tiny guard against direct route-level `request.get_json(silent=True)` usage outside `aidm_server/validation.py`.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-18 16:02 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: follow-up safe-improvement pass across the current dirty checkout, automation memory, recent report history, player/admin creature resolver response boundaries, response DTO tests, shared validation helper work already present from the prior run, direct session snapshot writers, hosted auth/session storage surfaces, deployment-readiness workflow, frontend security/accessibility scan targets, generated API contracts, and lightweight developer workflow checks. The worktree was already dirty at the start of this run with the 2026-06-18 06:05 MDT validation-helper/report changes in progress; those changes were preserved. This run only changed the creature resolver response helper, response DTO tests, this report, and automation memory.
+
+## What Was Inspected
+
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`; the shell had `CODEX_HOME` unset, so the concrete Codex home path was used directly.
+- Current git status and diffs to avoid overwriting unrelated or prior-run work:
+  - `aidm_server/validation.py`
+  - `tests/test_validation_helpers.py`
+  - `improvements_suggestions.md`
+- The 2026-06-18 06:05 MDT report section, including its direct `parse_json_body` regression coverage and carried-forward findings.
+- `aidm_server/blueprints/creatures.py`, especially `_creature_resolution_response`, `/api/creatures/resolve`, `debug_read` capability checks, and bestiary authoring permission gates.
+- `aidm_server/capabilities.py` to confirm non-admin account requests only receive player capabilities while workspace admins receive `debug_read`.
+- Existing player/admin bestiary route coverage in `tests/test_auth.py::test_bestiary_authoring_endpoints_require_workspace_admin_account`.
+- Existing response DTO tests in `tests/test_response_dtos.py`.
+- Generated resolver result contract definitions in `aidm_server/api_type_contract.py` and `aidm_frontend/src/apiContract.generated.ts`, which still model the full admin-capable `CreatureResolutionResult` shape with optional `debug`.
+- Direct session snapshot persistence via `rg -n "\.state_snapshot\s*=|mutate_session_state\(" aidm_server tests`, confirming the writer-inventory work remains unresolved.
+- Frontend/backend security and accessibility scan targets with searches for `dangerouslySetInnerHTML`, `innerHTML`, `eval`, `new Function`, `localStorage`, `sessionStorage`, CSRF, account token transport, listbox roles, and button types.
+- Hosted auth/session-storage documentation and checks in `docs/beta_runbook.md`, `docs/production-readiness.md`, `docs/release_checklist.md`, `aidm_frontend/src/useRuntimeSettings.ts`, and `scripts/deployment_readiness_check.py`.
+- Developer workflow gates: focused pytest, Python compilation, generated API type check, diff whitespace check, and committed-secret scan.
+
+## Small Safe Fix Made
+
+### Default-deny player creature resolver response fields
+
+Affected files:
+- `aidm_server/blueprints/creatures.py`
+- `tests/test_response_dtos.py`
+- `improvements_suggestions.md`
+
+Problem:
+The player-facing creature resolver preview previously returned a shallow copy of the resolver result with only `debug` removed. That fixed the known debug leakage, but it was not a durable boundary: any future operator-only field added to `resolve_creature_for_encounter` would become player-visible by default unless each new field remembered to update the response scrubber.
+
+Change:
+- Added `_PUBLIC_CREATURE_RESOLUTION_FIELDS` in `aidm_server/blueprints/creatures.py` for the explicit player-visible resolver response keys:
+  - `creature`
+  - `source`
+  - `resolutionMethod`
+  - `matchScore`
+  - `generated`
+  - `savedToBestiary`
+  - `notes`
+- Updated `_creature_resolution_response` so actors without `debug_read` receive only those fields.
+- Preserved admin/debug behavior: actors with `debug_read` still receive the full resolver result, including `debug` and any operator-only diagnostics.
+- Added `tests/test_response_dtos.py::test_player_creature_resolution_response_is_public_allowlist`, proving an unexpected `operatorOnly` field is removed from player responses and retained for debug-capable actors.
+
+Rationale:
+This is a narrow response-boundary hardening fix. It does not change resolver selection, generation, persistence, bestiary writes, auth decisions, combat state, frontend code, or generated contracts. It turns the existing "remove known sensitive field" behavior into a safer allowlist for non-debug actors.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_response_dtos.py::test_player_creature_resolution_response_is_public_allowlist tests/test_auth.py::test_bestiary_authoring_endpoints_require_workspace_admin_account -q`
+  - Passed: 2 tests.
+- `./.venv/bin/python -m pytest tests/test_response_dtos.py tests/test_validation_helpers.py -q`
+  - Passed: 5 tests.
+- `./.venv/bin/python -m py_compile aidm_server/blueprints/creatures.py aidm_server/validation.py tests/test_response_dtos.py tests/test_validation_helpers.py`
+  - Passed.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `git diff --check -- aidm_server/blueprints/creatures.py aidm_server/validation.py tests/test_response_dtos.py tests/test_validation_helpers.py improvements_suggestions.md`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py aidm_server/blueprints/creatures.py aidm_server/validation.py tests/test_response_dtos.py tests/test_validation_helpers.py improvements_suggestions.md`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+
+## High-Priority Findings
+
+### High: Direct session snapshot writers still need explicit ownership categories
+
+Current evidence:
+- The central mutation path remains `aidm_server/services/session_state_mutation.py::mutate_session_state`.
+- Fresh scan still found direct runtime/service assignments in:
+  - `aidm_server/blueprints/sessions.py`
+  - `aidm_server/canon_projection.py`
+  - `aidm_server/game_state/application/applier.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+  - `aidm_server/services/campaign_pack.py`
+  - `aidm_server/services/campaign_pack_progress.py`
+  - `aidm_server/services/campaign_pack_storage.py`
+  - `aidm_server/services/session_import.py`
+  - `aidm_server/services/session_lifecycle.py`
+  - `aidm_server/turn_control.py`
+
+Risk:
+Initialization, import, cleanup, projection refresh, campaign-pack progress, and live gameplay mutation still appear as similar direct JSON-column writes at the persistence boundary. That keeps revision semantics, audit coverage, lock ordering, and conflict behavior hard to audit.
+
+Recommended next step:
+Create a checked writer inventory and classify each direct assignment as initialization, import, cleanup, projection, campaign-pack progression, live gameplay mutation, repair, or derived persistence. Migrate one clearly live mutation/repair category at a time through `mutate_session_state` or an intentionally named internal variant.
+
+### Medium-High: Hosted account/session storage still needs browser-flow proof
+
+Current evidence:
+- Docs and readiness checks describe hosted same-origin cookie auth, `AIDM_ACCOUNT_COOKIE_AUTH_ENABLED=true`, `AIDM_ACCOUNT_TOKEN_RESPONSE_ENABLED=false`, and CSRF via `X-AIDM-CSRF-Token`.
+- The frontend still has local/session storage paths for local/private operator workflows and account/workspace remembered state.
+- This run did not have a hosted target, env file, or auth token to prove the browser flow end to end.
+
+Risk:
+The source-level controls look intentional, but hosted beta still needs proof that browser-readable account tokens are disabled, unsafe cookie-authenticated writes include CSRF, logout clears account/capability state, workspace switching refreshes roles, and stale admin UI cannot survive a downgrade.
+
+Recommended next step:
+Add or run a hosted-mode Playwright/browser regression around login, `/api/accounts/session`, `/api/accounts/me`, logout, workspace switch/select, CSRF on unsafe writes, and stale `isWorkspaceAdmin` display.
+
+### Medium-High: Deployment-readiness checks still need live beta/staging evidence
+
+Current evidence:
+- `scripts/deployment_readiness_check.py`, `Makefile`, `docs/production-readiness.md`, and `docs/release_checklist.md` define the live-target readiness workflow.
+- This automation run only performed local source/test checks and did not have beta/staging deployment inputs.
+
+Risk:
+Local checks cannot prove hosted CORS, cookie flags, security headers, metrics exposure, Socket.IO worker behavior, live auth exceptions, or actual provider configuration.
+
+Recommended next step:
+Run `make deployment-readiness DEPLOYMENT_READINESS_ARGS="--env-file <target-env> --target-url <target-url> --auth-token <token>"` against the real beta target and record the output in the release checklist or beta runbook.
+
+### Medium: Player resolver contract is safer, but generated types still describe the admin-capable shape
+
+Current evidence:
+- This run added a non-debug allowlist at the route response boundary.
+- `CreatureResolutionResult` in the generated API contract still includes optional `debug` because admins can still receive the full resolver result.
+
+Risk:
+The main player leakage risk is now reduced at the route boundary. The remaining maintainability risk is documentation/type clarity: frontend or future route code may not immediately distinguish admin-capable resolver payloads from player-visible resolver previews.
+
+Recommended next step:
+Consider adding a named `PublicCreatureResolutionResult` contract or endpoint-specific response type if the generated contract machinery can express role-specific payloads without a large refactor.
+
+## Larger Suggested Improvements
+
+- Build the direct `state_snapshot` writer inventory as a small checked artifact, then migrate one ownership category per pass.
+- Add hosted-mode browser coverage for cookie-only account auth, CSRF, logout cleanup, workspace switching, and role downgrade behavior.
+- Attach the next real deployment-readiness output to `docs/release_checklist.md` or `docs/beta_runbook.md`.
+- If generated contracts can support it cleanly, split admin-capable resolver results from player resolver previews.
+- Revisit the custom listbox-style campaign-pack picker for full keyboard semantics or simplify it to a native/select-like pattern.
+- Keep optional cleanup of ignored `.DS_Store`, `.pytest_cache`, and `__pycache__` artifacts as local maintenance, not as source churn.
+
+## Recommended Next Run Focus
+
+1. Create the direct `state_snapshot` writer inventory and classify each writer by ownership category.
+2. Add hosted auth browser-flow proof for cookie auth, CSRF, logout, workspace switching, and stale role clearing.
+3. Run deployment readiness against the real beta/staging target when target URL, env file, and token are available.
+4. Evaluate whether a role-specific generated resolver preview type is worth the contract churn.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-18 06:05 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the clean checkout, prior audit memory, current report history, request validation helpers, endpoint JSON parsing, session snapshot mutation ownership, hosted account/session storage, deployment-readiness workflow, frontend forms/accessibility surfaces, generated contracts, ignored local artifacts, and lightweight developer workflow checks. The worktree was clean at the start of this run. This run only changed shared validation helper documentation, added direct helper regression coverage, and prepended this report.
+
+## What Was Inspected
+
+- Automation memory path `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`; it did not exist for this automation ID, so this run created the first memory note after completion.
+- Current git status and branch state to avoid overwriting unrelated work: `main...origin/main` with no dirty tracked files at start.
+- Top-of-file report history in `improvements_suggestions.md`, especially the 2026-06-17 16:02 MDT shared request-body hardening and the 2026-06-17 06:02 MDT LLM stream fallback telemetry fix.
+- Shared validation helpers in `aidm_server/validation.py`, including `parse_json_body`, `missing_fields`, `coerce_bool`, `positive_int`, and `json_object`.
+- Route request-body parsing across backend blueprints:
+  - Most mutating routes now use `parse_json_body(request)`.
+  - The two remaining direct `request.get_json(silent=True)` callers are campaign-pack import endpoints that intentionally allow an omitted body while rejecting malformed or non-object JSON.
+- Existing route-level validation tests in `tests/test_worlds_endpoints.py`, `tests/test_maps_endpoints.py`, `tests/test_rules_and_segments.py`, and `tests/test_tts_endpoints.py`.
+- Direct session snapshot persistence via `rg "\.state_snapshot\s*=" aidm_server`, which still finds runtime/service writers in session routes, canon projection, the state applier, the turn pipeline, campaign-pack services, session import/lifecycle, and turn control.
+- The centralized mutation path in `aidm_server/services/session_state_mutation.py`, including audit stamping, revision handling, and lock coordination.
+- Hosted auth/session storage in `aidm_frontend/src/useRuntimeSettings.ts` and its tests, including `sessionStorage`, `localStorage`, `accountTokenTransport`, HTTP-only-cookie mode, workspace switching, logout cleanup, and remembered-account refresh.
+- Frontend form and accessibility surfaces in `App.tsx`, `WorldDialogs.tsx`, `CreateCampaignDialog.tsx`, `PlayerEditDialog.tsx`, `CampaignPackImportDialog.tsx`, `InspectorPanel.tsx`, `SessionBoard.tsx`, and `ActionComposer.tsx`, with special attention to modal semantics, button types inside forms, tab roles, labels, and custom picker controls.
+- Security-sensitive frontend/backend sinks and token surfaces with searches for `dangerouslySetInnerHTML`, `innerHTML`, `eval`, `new Function`, cookies, bearer tokens, API keys, and secret-like strings.
+- Generated API contract sources in `aidm_server/api_type_contract.py` and `aidm_frontend/src/apiContract.generated.ts`.
+- Developer workflow gates in `Makefile`, `scripts/closed_beta_rc_check.py`, `scripts/deployment_readiness_check.py`, `scripts/generate_api_types.py`, `scripts/scan_secrets.py`, frontend `package.json`, `docs/production-readiness.md`, and `docs/release_checklist.md`.
+- Ignored local artifacts such as `.DS_Store`, `.pytest_cache`, and `__pycache__`; `.gitignore` already covers them, so this run did not delete local machine artifacts.
+
+## Small Safe Fix Made
+
+### Add direct regression coverage for object-only JSON body parsing
+
+Affected files:
+- `aidm_server/validation.py`
+- `tests/test_validation_helpers.py`
+- `improvements_suggestions.md`
+
+Problem:
+The shared `parse_json_body` helper now has an important object-only contract after the previous validation hardening, but that behavior was only protected indirectly through endpoint tests. A later edit could accidentally allow arrays, scalars, malformed JSON, or `null` through the helper and reintroduce route-level `.get(...)` crashes.
+
+Change:
+- Added a concise docstring to `parse_json_body` documenting that it returns only JSON object bodies.
+- Added direct helper tests covering:
+  - valid JSON object payloads,
+  - non-JSON request bodies,
+  - malformed JSON,
+  - JSON `null`,
+  - JSON arrays,
+  - JSON string scalars.
+
+Rationale:
+This is a low-risk maintainability and correctness guard. It does not change runtime behavior, route behavior, provider behavior, persistence, auth, state mutation, frontend behavior, or generated contracts. It makes the helper contract explicit and easy to verify independently of any single endpoint.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_validation_helpers.py -q`
+  - Passed: 2 tests.
+- `./.venv/bin/python -m pytest tests/test_validation_helpers.py tests/test_worlds_endpoints.py::test_create_world_validates_request_body_and_fields tests/test_maps_endpoints.py::test_create_map_validates_request_body_and_fields tests/test_tts_endpoints.py::test_llm_config_rejects_ambiguous_persist_boolean -q`
+  - Passed: 5 tests.
+- `./.venv/bin/python -m py_compile aidm_server/validation.py tests/test_validation_helpers.py`
+  - Passed.
+- `./.venv/bin/python -m py_compile scripts/deployment_readiness_check.py`
+  - Passed.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `git diff --check -- aidm_server/validation.py tests/test_validation_helpers.py improvements_suggestions.md`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py aidm_server/validation.py tests/test_validation_helpers.py improvements_suggestions.md`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+
+## High-Priority Findings
+
+### High: Direct session snapshot writers still need explicit ownership categories
+
+Current evidence:
+- `aidm_server/services/session_state_mutation.py` provides the central locked, revision-aware, audit-stamped mutation path.
+- Fresh scan still found direct runtime/service assignments in:
+  - `aidm_server/blueprints/sessions.py`
+  - `aidm_server/canon_projection.py`
+  - `aidm_server/game_state/application/applier.py`
+  - `aidm_server/game_state/orchestration/turn_pipeline.py`
+  - `aidm_server/services/campaign_pack.py`
+  - `aidm_server/services/campaign_pack_progress.py`
+  - `aidm_server/services/campaign_pack_storage.py`
+  - `aidm_server/services/session_import.py`
+  - `aidm_server/services/session_lifecycle.py`
+  - `aidm_server/turn_control.py`
+
+Risk:
+Some direct writes are legitimate initialization, import, cleanup, projection, or server-owned application paths. The unresolved risk is that live gameplay mutation, repair, campaign-pack progression, projection refresh, and lifecycle cleanup still look identical at the persistence boundary. That makes lock ordering, state revision semantics, audit visibility, and conflict handling harder to reason about.
+
+Recommended next step:
+Create a checked writer inventory with one row per direct assignment and classify each writer as initialization, import, cleanup, projection, live gameplay mutation, repair, or derived persistence. Then migrate one clearly live mutation or repair path at a time through `mutate_session_state` or a named server-internal equivalent.
+
+### Medium-High: Hosted account/session storage still needs browser-flow proof
+
+Current evidence:
+- `aidm_frontend/src/useRuntimeSettings.ts` still stores account/workspace state in browser storage while also supporting HTTP-only-cookie account transport.
+- `aidm_frontend/src/useRuntimeSettings.test.tsx` coverage is strong for remembered accounts, HTTP-only-cookie mode, saved workspace selection, workspace deletion/removal, logout cleanup, and role refresh.
+- `scripts/deployment_readiness_check.py` expects hosted browser auth to disable account-token responses unless an explicit storage exception is documented.
+
+Risk:
+The local/private operator mode remains useful, but hosted beta still needs browser-flow evidence that browser-readable account tokens are disabled, CSRF is used for cookie-authenticated writes, logout clears account/capability state, workspace switching refreshes role state, and stale admin UI cannot persist after a downgrade.
+
+Recommended next step:
+Add or run a hosted-mode Playwright/browser regression around login, `/api/accounts/session`, `/api/accounts/me`, logout, workspace switch/select, and stale `isWorkspaceAdmin` display. Keep local unauthenticated operator mode separate from hosted beta expectations.
+
+### Medium-High: Deployment-readiness checks still need live beta/staging evidence
+
+Current evidence:
+- `scripts/deployment_readiness_check.py` validates production env choices, auth requirements, CORS, secure cookie settings, account-token response policy, Socket.IO staging proof, `/api/health`, metrics, Prometheus output, security headers, and fallback-provider status.
+- `Makefile` exposes `deployment-readiness`.
+- `docs/production-readiness.md` and `docs/release_checklist.md` point to the live target command, but this automation run did not have a real beta/staging URL, env file, or auth token.
+
+Risk:
+Local source checks cannot prove hosted cookie flags, CORS, security headers, metrics exposure, Socket.IO worker behavior, auth exceptions, or provider configuration in the actual deployment target.
+
+Recommended next step:
+Run `make deployment-readiness DEPLOYMENT_READINESS_ARGS="--env-file <target-env> --target-url <target-url> --auth-token <token>"` against the real beta target and save the result in `docs/release_checklist.md` or `docs/beta_runbook.md`.
+
+### Medium: Player resolver preview should still move to an explicit player DTO
+
+Current evidence:
+- Prior work removed resolver `debug` from non-`debug_read` responses.
+- The shared `CreatureResolutionResult` contract still includes optional `debug`, and there is not yet a dedicated player-facing resolver response type.
+
+Risk:
+The known debug leakage is closed, but a later operator-only resolver field could be added to the shared result and become player-visible unless the player preview response is allowlisted by design.
+
+Recommended next step:
+Define a dedicated player preview DTO or reusable allowlist sanitizer. Add a regression that compares player/admin resolver payload keys and fails if debug rankings, model names, normalized request metadata, hidden candidate identifiers, or other operator-only fields reappear in player responses.
+
+## Larger Suggested Improvements
+
+- Build the direct `state_snapshot` writer inventory as a small markdown or checked JSON artifact, then migrate one ownership category at a time.
+- Add hosted-mode browser coverage for cookie-only account auth, CSRF, logout cleanup, workspace switching, and role downgrade behavior.
+- Attach the next real deployment-readiness output to the release checklist or beta runbook so hosted readiness is evidence-backed.
+- Add a player-specific resolver DTO/allowlist and generated-contract coverage so operator-only resolver fields cannot drift into player previews.
+- Consider a small shared helper for optional JSON object bodies if campaign-pack import keeps accepting omitted request bodies. The current direct callers are guarded, but a named helper would make the distinction between "required JSON object" and "optional JSON object" harder to miss.
+- Improve custom picker keyboard behavior where controls use rich `role="listbox"`/`role="option"` markup. Either implement arrow-key roving focus and active-descendant semantics, or use a simpler native/select-like pattern for fully predictable accessibility.
+- Keep ignored local `.DS_Store`, `.pytest_cache`, and `__pycache__` cleanup as an optional local-maintenance task rather than a source change. The files are already ignored and were not tracked.
+
+## Recommended Next Run Focus
+
+1. Create the direct `state_snapshot` writer inventory and classify each writer by ownership category.
+2. Add the player resolver preview DTO/allowlist on top of the existing debug stripping.
+3. Add or run hosted auth browser proof for logout, workspace switch, CSRF, and stale admin capability clearing.
+4. Run deployment readiness against the actual beta/staging target when target URL, env file, and token are available.
+
 # Daily AIDM Codebase Improvement Audit - 2026-06-17 16:02 MDT
 
 Automation ID: `daily-aidm-codebase-improvement-audit`

@@ -7,6 +7,21 @@ from typing import Any
 
 from aidm_server.services.campaign_pack import CampaignPackImportError, import_campaign_pack
 
+AUTHORING_COLLECTIONS = (
+    'locations',
+    'npcs',
+    'quests',
+    'segments',
+    'checkpoints',
+    'encounters',
+    'enemies',
+    'clues',
+    'factions',
+    'maps',
+    'handouts',
+    'lore',
+)
+
 
 @dataclass(frozen=True)
 class CampaignPackLintIssue:
@@ -60,12 +75,14 @@ def lint_campaign_pack_manifest(pack: dict[str, Any], *, workspace_id: str = 'li
     issues.extend(_static_lint_issues(manifest if isinstance(manifest, dict) else {}))
     graph = _checkpoint_graph(manifest if isinstance(manifest, dict) else {})
     summary = _lint_summary(manifest if isinstance(manifest, dict) else {})
+    authoring_report = _authoring_report(manifest if isinstance(manifest, dict) else {}, graph=graph)
     return {
         'ok': not any(issue.severity == 'error' for issue in issues),
         'issues': [issue.payload() for issue in issues],
         'preview': preview,
         'graph': graph,
         'summary': summary,
+        'authoring_report': authoring_report,
     }
 
 
@@ -144,29 +161,152 @@ def _static_lint_issues(pack: dict[str, Any]) -> list[CampaignPackLintIssue]:
 
 
 def _lint_summary(pack: dict[str, Any]) -> dict[str, Any]:
-    collections = (
-        'locations',
-        'npcs',
-        'quests',
-        'enemies',
-        'encounters',
-        'segments',
-        'checkpoints',
-        'clues',
-        'factions',
-        'maps',
-        'handouts',
-        'lore',
-    )
     return {
         'packId': _text(pack.get('packId') or pack.get('pack_id')),
         'title': _text(pack.get('title') or pack.get('name')),
         'version': _text(pack.get('version')) or '1.0.0',
         'schemaVersion': _text(pack.get('schemaVersion') or pack.get('schema_version')) or '1',
-        'counts': {collection: len(_records(pack.get(collection))) for collection in collections},
+        'counts': {collection: len(_records(pack.get(collection))) for collection in AUTHORING_COLLECTIONS},
         'dependencies': len(_records(pack.get('dependencies'))),
         'mods': len(_records(pack.get('mods'))),
     }
+
+
+def _authoring_report(pack: dict[str, Any], *, graph: dict[str, Any]) -> dict[str, Any]:
+    checkpoints = _records(pack.get('checkpoints'))
+    checkpoint_reachable = set(_string_list(graph.get('reachable')))
+    encounters = _records(pack.get('encounters'))
+    collections = [_collection_report(pack, collection_name) for collection_name in AUTHORING_COLLECTIONS]
+    checkpoint_items = [_checkpoint_report_item(checkpoint, checkpoint_reachable) for checkpoint in checkpoints]
+    encounter_items = [_encounter_report_item(encounter) for encounter in encounters]
+    unlinked_encounter_ids = [
+        item['id']
+        for item in encounter_items
+        if item['id'] and not item['checkpointIds']
+    ]
+    unreachable_ids = sorted(
+        set(_record_id(checkpoint) for checkpoint in checkpoints if _record_id(checkpoint)) - checkpoint_reachable
+    )
+    return {
+        'starting': _starting_report(pack),
+        'collections': collections,
+        'visibility': {
+            'visibleAtStart': {
+                item['collection']: item['visibleAtStartIds']
+                for item in collections
+                if item['visibleAtStartIds']
+            },
+            'hiddenToPlayers': {
+                item['collection']: item['hiddenToPlayersIds']
+                for item in collections
+                if item['hiddenToPlayersIds']
+            },
+        },
+        'checkpoints': {
+            'total': len(checkpoints),
+            'reachable': len(checkpoint_reachable),
+            'unreachableIds': unreachable_ids,
+            'optionalIds': [item['id'] for item in checkpoint_items if item['optional']],
+            'terminalIds': [item['id'] for item in checkpoint_items if item['terminal']],
+            'items': checkpoint_items,
+        },
+        'encounters': {
+            'total': len(encounters),
+            'linkedToCheckpoint': len(encounters) - len(unlinked_encounter_ids),
+            'unlinkedIds': unlinked_encounter_ids,
+            'items': encounter_items,
+        },
+    }
+
+
+def _starting_report(pack: dict[str, Any]) -> dict[str, str]:
+    starting_state_value = _first(pack, 'startingState', 'starting_state')
+    starting_state = starting_state_value if isinstance(starting_state_value, dict) else {}
+    return {
+        'locationId': _text(_first(starting_state, 'locationId', 'location_id')),
+        'questId': _text(_first(starting_state, 'questId', 'quest_id')),
+        'checkpointId': _text(
+            _first(starting_state, 'checkpointId', 'checkpoint_id')
+            or _first(pack, 'startingCheckpointId', 'starting_checkpoint_id')
+        ),
+    }
+
+
+def _collection_report(pack: dict[str, Any], collection_name: str) -> dict[str, Any]:
+    records = _records(pack.get(collection_name))
+    visible_ids = [_record_id(record) for record in records if _visible_at_start(record) and _record_id(record)]
+    hidden_ids = [_record_id(record) for record in records if _hidden_to_players(record) and _record_id(record)]
+    return {
+        'collection': collection_name,
+        'count': len(records),
+        'visibleAtStartCount': len(visible_ids),
+        'hiddenToPlayersCount': len(hidden_ids),
+        'visibleAtStartIds': visible_ids,
+        'hiddenToPlayersIds': hidden_ids,
+    }
+
+
+def _checkpoint_report_item(checkpoint: dict[str, Any], reachable_ids: set[str]) -> dict[str, Any]:
+    checkpoint_id = _record_id(checkpoint)
+    next_ids = _string_list(_first(checkpoint, 'nextCheckpointIds', 'next_checkpoint_ids'))
+    alternate_ids = _string_list(_first(checkpoint, 'alternateCheckpointIds', 'alternate_checkpoint_ids'))
+    failure_ids = _string_list(_first(checkpoint, 'failureCheckpointIds', 'failure_checkpoint_ids'))
+    encounter_ids = _string_list(_first(checkpoint, 'encounterIds', 'encounter_ids'))
+    return {
+        'id': checkpoint_id,
+        'title': _record_title(checkpoint),
+        'reachable': checkpoint_id in reachable_ids,
+        'optional': _truthy(_first(checkpoint, 'optional', 'isOptional', 'is_optional')),
+        'terminal': _terminal(checkpoint),
+        'nextCheckpointIds': next_ids,
+        'alternateCheckpointIds': alternate_ids,
+        'failureCheckpointIds': failure_ids,
+        'encounterIds': encounter_ids,
+        'completionCues': _completion_cues(checkpoint),
+        'branchCount': len(next_ids) + len(alternate_ids) + len(failure_ids),
+    }
+
+
+def _encounter_report_item(encounter: dict[str, Any]) -> dict[str, Any]:
+    enemy_ids = _string_list(_first(encounter, 'enemyIds', 'enemy_ids'))
+    enemy_groups = _records(_first(encounter, 'enemyGroups', 'enemy_groups'))
+    completion_value = _first(encounter, 'completion')
+    completion = completion_value if isinstance(completion_value, dict) else {}
+    return {
+        'id': _record_id(encounter),
+        'title': _record_title(encounter),
+        'checkpointIds': _string_list(_first(encounter, 'checkpointIds', 'checkpoint_ids')),
+        'enemyIds': enemy_ids,
+        'enemyGroupCount': len(enemy_groups),
+        'enemyCount': len(enemy_ids) + sum(max(1, _int(_first(group, 'count'), default=1)) for group in enemy_groups),
+        'completionOutcomes': _completion_outcomes(completion),
+    }
+
+
+def _completion_cues(checkpoint: dict[str, Any]) -> list[str]:
+    cues = []
+    for field in (
+        'completeWhen',
+        'locationIds',
+        'questIds',
+        'objectiveIds',
+        'segmentIds',
+        'encounterIds',
+        'clueIds',
+        'failWhen',
+    ):
+        if _first(checkpoint, field, _snake_alias(field)) not in (None, '', [], {}):
+            cues.append(field)
+    return cues
+
+
+def _completion_outcomes(completion: dict[str, Any]) -> list[str]:
+    outcomes: list[str] = []
+    for item in _records(_first(completion, 'anyOf', 'any_of')):
+        outcome = _text(_first(item, 'outcome', 'type', 'status'))
+        if outcome and outcome not in outcomes:
+            outcomes.append(outcome)
+    return outcomes
 
 
 def _pack_budget_issues(pack: dict[str, Any]) -> list[CampaignPackLintIssue]:
@@ -249,7 +389,7 @@ def _checkpoint_graph(pack: dict[str, Any]) -> dict[str, Any]:
             ('alternateCheckpointIds', 'alternate'),
             ('failureCheckpointIds', 'failure'),
         ):
-            for target in _string_list(checkpoint.get(field)):
+            for target in _string_list(_first(checkpoint, field, _snake_alias(field))):
                 edges.append({'from': source, 'to': target, 'type': kind})
     return {
         'nodes': nodes,
@@ -262,9 +402,11 @@ def _reachable_checkpoint_ids(pack: dict[str, Any], checkpoints: list[dict[str, 
     by_id = {_record_id(checkpoint): checkpoint for checkpoint in checkpoints if _record_id(checkpoint)}
     if not by_id:
         return set()
+    starting_state_value = _first(pack, 'startingState', 'starting_state')
+    starting_state = starting_state_value if isinstance(starting_state_value, dict) else {}
     start_id = _text(
-        (pack.get('startingState') if isinstance(pack.get('startingState'), dict) else {}).get('checkpointId')
-        or pack.get('startingCheckpointId')
+        _first(starting_state, 'checkpointId', 'checkpoint_id')
+        or _first(pack, 'startingCheckpointId', 'starting_checkpoint_id')
     )
     start_id = start_id if start_id in by_id else next(iter(by_id))
     reachable: set[str] = set()
@@ -275,15 +417,15 @@ def _reachable_checkpoint_ids(pack: dict[str, Any], checkpoints: list[dict[str, 
             continue
         reachable.add(checkpoint_id)
         checkpoint = by_id[checkpoint_id]
-        stack.extend(_string_list(checkpoint.get('nextCheckpointIds')))
-        stack.extend(_string_list(checkpoint.get('alternateCheckpointIds')))
-        stack.extend(_string_list(checkpoint.get('failureCheckpointIds')))
+        stack.extend(_string_list(_first(checkpoint, 'nextCheckpointIds', 'next_checkpoint_ids')))
+        stack.extend(_string_list(_first(checkpoint, 'alternateCheckpointIds', 'alternate_checkpoint_ids')))
+        stack.extend(_string_list(_first(checkpoint, 'failureCheckpointIds', 'failure_checkpoint_ids')))
     return reachable
 
 
 def _has_completion_cue(checkpoint: dict[str, Any]) -> bool:
     if any(
-        checkpoint.get(key)
+        _first(checkpoint, key, _snake_alias(key))
         for key in (
             'completeWhen',
             'locationIds',
@@ -295,7 +437,10 @@ def _has_completion_cue(checkpoint: dict[str, Any]) -> bool:
         )
     ):
         return True
-    return bool(_string_list(checkpoint.get('nextCheckpointIds')) or _string_list(checkpoint.get('alternateCheckpointIds')))
+    return bool(
+        _string_list(_first(checkpoint, 'nextCheckpointIds', 'next_checkpoint_ids'))
+        or _string_list(_first(checkpoint, 'alternateCheckpointIds', 'alternate_checkpoint_ids'))
+    )
 
 
 def _pack_only(pack: dict[str, Any]) -> bool:
@@ -311,6 +456,10 @@ def _record_id(record: dict[str, Any]) -> str:
     return _text(record.get('id') or record.get('checkpointId') or record.get('checkpoint_id'))
 
 
+def _record_title(record: dict[str, Any]) -> str:
+    return _text(_first(record, 'title', 'name', 'playerTitle', 'player_title', 'publicTitle', 'public_title'))
+
+
 def _terminal(checkpoint: dict[str, Any]) -> bool:
     kind = _text(checkpoint.get('type') or checkpoint.get('kind') or checkpoint.get('checkpointType'))
     return _truthy(checkpoint.get('terminal') or checkpoint.get('isTerminal') or checkpoint.get('end')) or kind in {
@@ -318,6 +467,34 @@ def _terminal(checkpoint: dict[str, Any]) -> bool:
         'end',
         'finale',
     }
+
+
+def _visible_at_start(record: dict[str, Any]) -> bool:
+    return _truthy(_first(record, 'visibleAtStart', 'visible_at_start'))
+
+
+def _hidden_to_players(record: dict[str, Any]) -> bool:
+    explicit = _first(record, 'hiddenToPlayers', 'hidden_to_players')
+    visibility = _text(_first(record, 'visibility', 'playerVisibility', 'player_visibility')).lower()
+    return _truthy(explicit) or visibility in {'hidden', 'secret', 'gm', 'gm_only', 'dm_only'}
+
+
+def _first(record: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if isinstance(record, dict) and key in record:
+            return record[key]
+    return None
+
+
+def _snake_alias(field: str) -> str:
+    return field[0].lower() + ''.join(f'_{char.lower()}' if char.isupper() else char for char in field[1:])
+
+
+def _int(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _string_list(value: Any) -> list[str]:

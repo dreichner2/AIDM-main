@@ -1,0 +1,104 @@
+{
+  "commit": "<signed-off-commit-sha>",
+  "items": {
+    "clean_signed_off_worktree": {
+      "evidence": "",
+      "notes": "RC evidence report generated from the final signed-off commit with a clean worktree.",
+      "status": "pending"
+    },
+    "frontend_npm_ci": {
+      "evidence": "",
+      "notes": "Command output or workflow evidence that frontend dependencies installed from package-lock.json.",
+      "status": "pending"
+    },
+    "github_actions_aidm_ci": {
+      "evidence": "",
+      "notes": "Successful AIDM CI run URL for the signed-off commit.",
+      "status": "pending"
+    },
+    "github_actions_closed_beta_rc": {
+      "evidence": "",
+      "notes": "Successful manual Closed Beta RC workflow run URL for the signed-off commit.",
+      "status": "pending"
+    },
+    "github_actions_rc_artifact": {
+      "evidence": "",
+      "notes": "Artifact URL or run artifact reference containing the RC report, issue snippets, release packet, source archive, security/export-import evidence, GitHub Actions evidence, and visual-smoke artifacts.",
+      "status": "pending"
+    },
+    "hosted_backup_restore": {
+      "evidence": "",
+      "notes": "Provider-specific hosted/staging backup and restore drill evidence.",
+      "status": "pending"
+    },
+    "hosted_beta_slo_baseline": {
+      "evidence": "",
+      "notes": "Target-environment beta SLO baseline generated before tester expansion.",
+      "status": "pending"
+    },
+    "hosted_cookie_auth": {
+      "evidence": "",
+      "notes": "Passing hosted browser cookie-auth, CSRF, logout, role refresh, and Socket.IO auth smoke evidence.",
+      "status": "pending"
+    },
+    "hosted_deployment_readiness": {
+      "evidence": "",
+      "notes": "Passing hosted/staging deployment-readiness report for health, metrics, headers, auth, CORS, and provider checks.",
+      "status": "pending"
+    },
+    "hosted_env_config": {
+      "evidence": "",
+      "notes": "Evidence for auth-required mode, strong token, explicit CORS, cookie settings, worker model, observability provider, and alert owner.",
+      "status": "pending"
+    },
+    "hosted_export_import": {
+      "evidence": "",
+      "notes": "Passing target-environment session export/import smoke evidence.",
+      "status": "pending"
+    },
+    "hosted_external_telemetry": {
+      "evidence": "",
+      "notes": "Proof that the configured external telemetry endpoint receives events when enabled.",
+      "status": "pending"
+    },
+    "hosted_non_admin_forbidden": {
+      "evidence": "",
+      "notes": "Passing hosted non-admin forbidden-response evidence for combat, bestiary, and beta operator endpoints.",
+      "status": "pending"
+    },
+    "hosted_socketio_worker_process": {
+      "evidence": "",
+      "notes": "Platform process/config evidence showing the documented RC worker model and worker count.",
+      "status": "pending"
+    },
+    "make_clean": {
+      "evidence": "",
+      "notes": "Evidence that make clean was run or reviewed before source packaging.",
+      "status": "pending"
+    },
+    "make_clean_deps": {
+      "evidence": "",
+      "notes": "Evidence that dependency folders were removed or intentionally excluded before source handoff.",
+      "status": "pending"
+    },
+    "multi_worker_socketio_staging": {
+      "evidence": "",
+      "notes": "Keep not_applicable only when hosted_socketio_worker_process proves RC1 single-worker mode. Set to provided with sticky/message-queue proof otherwise.",
+      "status": "not_applicable"
+    },
+    "rc_issue_closure_review": {
+      "evidence": "",
+      "notes": "Evidence that RC gate issues were closed with generated issue snippets or template entries.",
+      "status": "pending"
+    },
+    "source_archive_attachment": {
+      "evidence": "",
+      "notes": "Link/path showing the generated source archive and checksum were attached for reviewer download.",
+      "status": "pending"
+    }
+  },
+  "release": "RC1",
+  "signed_at": "<iso-8601-timestamp>",
+  "signed_by": "<operator-name>",
+  "target_url": "https://<hosted-staging-target>"
+}

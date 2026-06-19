@@ -52,10 +52,56 @@ type CampaignPackLintIssue = {
   message: string
 }
 
+type CampaignPackAuthoringCollection = {
+  collection?: string
+  count?: number
+  visibleAtStartCount?: number
+  hiddenToPlayersCount?: number
+  visibleAtStartIds?: string[]
+  hiddenToPlayersIds?: string[]
+}
+
 type CampaignPackLintResponse = {
   ok: boolean
   issues: CampaignPackLintIssue[]
   preview?: CampaignPackImportResponse | null
+  authoring_report?: {
+    starting?: {
+      locationId?: string
+      questId?: string
+      checkpointId?: string
+    }
+    collections?: CampaignPackAuthoringCollection[]
+    checkpoints?: {
+      total?: number
+      reachable?: number
+      unreachableIds?: string[]
+      optionalIds?: string[]
+      terminalIds?: string[]
+      items?: Array<{
+        id?: string
+        title?: string
+        reachable?: boolean
+        optional?: boolean
+        terminal?: boolean
+        branchCount?: number
+        encounterIds?: string[]
+        completionCues?: string[]
+      }>
+    }
+    encounters?: {
+      total?: number
+      linkedToCheckpoint?: number
+      unlinkedIds?: string[]
+      items?: Array<{
+        id?: string
+        title?: string
+        checkpointIds?: string[]
+        enemyCount?: number
+        completionOutcomes?: string[]
+      }>
+    }
+  }
   graph?: {
     nodes?: string[]
     edges?: Array<{ from?: string; to?: string; type?: string }>
@@ -102,6 +148,10 @@ function formatVisibleIds(values: string[] | undefined) {
   return values.slice(0, 4).join(', ') + (values.length > 4 ? ` +${values.length - 4}` : '')
 }
 
+function reportCollections(collections: CampaignPackAuthoringCollection[] | undefined) {
+  return Array.isArray(collections) ? collections.filter((item) => item.count) : []
+}
+
 export function CampaignPackImportDialog({
   auth,
   baseUrl,
@@ -121,6 +171,10 @@ export function CampaignPackImportDialog({
   const hasLintErrors = Boolean(lintResult?.issues.some((issue) => issue.severity === 'error'))
   const canImport = Boolean(preview && packPayload && !previewPending && !importPending && !hasLintErrors)
   const pending = previewPending || importPending
+  const authoringReport = lintResult?.authoring_report
+  const reportCollectionRows = reportCollections(authoringReport?.collections)
+  const checkpointReport = authoringReport?.checkpoints
+  const encounterReport = authoringReport?.encounters
   const worldLabel = useMemo(() => {
     const world = preview?.preview?.world
     if (!world) return 'Not resolved'
@@ -325,6 +379,50 @@ export function CampaignPackImportDialog({
               <span>{lintResult.graph.nodes?.length ?? 0} nodes</span>
               <span>{lintResult.graph.edges?.length ?? 0} edges</span>
               <span>{lintResult.graph.reachable?.length ?? 0} reachable</span>
+            </div>
+          ) : null}
+          {authoringReport ? (
+            <div className="campaign-pack-authoring-report" aria-label="Campaign pack authoring report">
+              <div className="campaign-pack-authoring-report-grid">
+                <div>
+                  <span>Checkpoint Spine</span>
+                  <strong>
+                    {checkpointReport?.reachable ?? 0} / {checkpointReport?.total ?? 0} reachable
+                  </strong>
+                  <small>
+                    {(checkpointReport?.optionalIds?.length ?? 0)} optional /{' '}
+                    {(checkpointReport?.terminalIds?.length ?? 0)} terminal
+                  </small>
+                </div>
+                <div>
+                  <span>Encounters</span>
+                  <strong>
+                    {encounterReport?.linkedToCheckpoint ?? 0} / {encounterReport?.total ?? 0} linked
+                  </strong>
+                  <small>{formatVisibleIds(encounterReport?.unlinkedIds)}</small>
+                </div>
+                <div>
+                  <span>Authored Records</span>
+                  <strong>{reportCollectionRows.reduce((total, row) => total + (row.count ?? 0), 0)}</strong>
+                  <small>{reportCollectionRows.length} populated groups</small>
+                </div>
+              </div>
+              {reportCollectionRows.length ? (
+                <div className="campaign-pack-authoring-collections">
+                  {reportCollectionRows.slice(0, 8).map((row) => (
+                    <span key={row.collection}>
+                      {row.collection}: {row.count}
+                      {row.visibleAtStartCount ? ` / ${row.visibleAtStartCount} visible` : ''}
+                      {row.hiddenToPlayersCount ? ` / ${row.hiddenToPlayersCount} hidden` : ''}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {checkpointReport?.unreachableIds?.length ? (
+                <div className="campaign-pack-authoring-warning">
+                  Unreachable checkpoints: {formatVisibleIds(checkpointReport.unreachableIds)}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>

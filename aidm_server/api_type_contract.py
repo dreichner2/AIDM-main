@@ -144,13 +144,22 @@ API_TYPE_CONTRACTS: tuple[TypeContract, ...] = (
         ),
     ),
     TypeContract('BadTurnFeedbackResponse', alias='{ feedback: TurnFeedbackReport }'),
+    TypeContract('CoherenceFeedbackResponse', alias='{ feedback_id: number; feedback: TurnFeedbackReport }'),
     TypeContract(
         'BetaIncidentsResponse',
-        alias='{ incidents: JsonRecord[]; summary: { failed_turn_count: number; failed_canon_job_count: number; bad_turn_report_count: number; telemetry_incident_count: number }; limit: number }',
+        alias='{ incidents: JsonRecord[]; summary: { failed_turn_count: number; failed_canon_job_count: number; bad_turn_report_count: number; telemetry_incident_count: number }; limit: number; session_id?: number }',
     ),
     TypeContract(
         'BetaAuditsResponse',
-        alias='{ state_mutations: JsonRecord[]; operator_actions: JsonRecord[]; summary: { state_mutation_count: number; operator_action_count: number }; limit: number }',
+        alias='{ state_mutations: JsonRecord[]; operator_actions: JsonRecord[]; summary: { state_mutation_count: number; operator_action_count: number }; limit: number; session_id?: number }',
+    ),
+    TypeContract(
+        'BetaSessionQualityResponse',
+        alias='{ session: JsonRecord; summary: JsonRecord; operator_summary: JsonRecord; provider_model_turn_counts: JsonRecord[]; recent_state_mutations: JsonRecord[]; recent_operator_actions: JsonRecord[]; limit: number }',
+    ),
+    TypeContract(
+        'BetaSupportBundleResponse',
+        alias='{ generated_at: string | null; workspace_id: string; filters: JsonRecord; runtime: JsonRecord; session: JsonRecord | null; beta_summary: JsonRecord; beta_slo: JsonRecord; session_quality: BetaSessionQualityResponse | null; incidents: BetaIncidentsResponse; audits: BetaAuditsResponse; recent_turns: JsonRecord[]; canon_jobs: JsonRecord[]; session_log_entries: JsonRecord[]; turn_events: JsonRecord[]; telemetry: JsonRecord }',
     ),
     TypeContract(
         'World',
@@ -207,6 +216,21 @@ API_TYPE_CONTRACTS: tuple[TypeContract, ...] = (
                 'counts',
                 '{ turn_events: number; projected_log_entries: number; log_entries: number; session_state: number }',
             ),
+        ),
+    ),
+    TypeContract(
+        'SessionExportResponse',
+        fields=(
+            field('exportedAt', 'string'),
+            field('selectedIds', '{ campaignId: number; sessionId: number; playerId: number | null }'),
+            field('campaign', 'Campaign'),
+            field('selectedSession', 'SessionSummary'),
+            field('players', 'PlayerDetail[]'),
+            field('selectedPlayer', 'PlayerDetail | null'),
+            field('sessionState', 'SessionState'),
+            field('logEntries', 'SessionLogEntry[]'),
+            field('turnEvents', 'TurnEventPayload[]'),
+            field('warnings', 'string[]'),
         ),
     ),
     TypeContract(

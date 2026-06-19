@@ -24,6 +24,7 @@ from aidm_server.models import (
 from aidm_server.services.campaign_pack_progress import PROGRESS_CHANGED_EVENT
 from aidm_server.services.campaign_pack_progress import control_campaign_pack_progress, update_campaign_pack_progress
 from aidm_server.services.campaign_pack_storage import sync_campaign_pack_progress
+from aidm_server.services.campaign_pack_storage import campaign_pack_progress_lock_session_ids
 
 
 def _build_auth_app(tmp_path, monkeypatch):
@@ -295,6 +296,11 @@ def test_pack_progress_propagates_across_shared_multi_session_group(app):
         db.session.commit()
         second_snapshot = safe_json_loads(db.session.get(Session, second_ids['session_id']).state_snapshot, {})
         second_progress = CampaignPackSession.query.filter_by(session_id=second_ids['session_id']).one()
+        second_audit = SessionStateMutationAudit.query.filter_by(
+            session_id=second_ids['session_id'],
+            source='system.campaign_pack.shared_progress',
+        ).one()
+        second_audit_metadata = safe_json_loads(second_audit.metadata_json, {})
 
     assert result.changed is True
     assert result.active_checkpoint_id == 'cp_watchtower'
@@ -303,6 +309,136 @@ def test_pack_progress_propagates_across_shared_multi_session_group(app):
     assert second_snapshot['flags']['campaignPackSharedProgressSourceSessionId'] == first_ids['session_id']
     assert second_progress.active_checkpoint_id == 'cp_watchtower'
     assert second_progress.progress_revision == 1
+    assert second_audit.actor == 'test-operator'
+    assert second_audit.previous_revision == 0
+    assert second_audit.state_revision == 1
+    assert second_audit_metadata['sourceSessionId'] == first_ids['session_id']
+
+
+def test_pack_progress_lock_ids_include_shared_sibling_sessions(app):
+    checkpoints = [
+        {'id': 'cp_old_road', 'title': 'Reach the old road', 'nextCheckpointIds': ['cp_watchtower']},
+        {'id': 'cp_watchtower', 'title': 'Reach the watchtower', 'terminal': True},
+    ]
+    first_ids = _seed_pack_session(
+        app,
+        _pack_snapshot(
+            location_id='bleakmoor_gate',
+            flags={'campaignPackActiveCheckpointId': 'cp_old_road'},
+            checkpoints=checkpoints,
+            pack_extra={'multiSessionGroupKey': 'shared-west-marches'},
+        ),
+    )
+    second_ids = _seed_pack_session(
+        app,
+        _pack_snapshot(
+            location_id='bleakmoor_gate',
+            flags={'campaignPackActiveCheckpointId': 'cp_old_road'},
+            checkpoints=checkpoints,
+            pack_extra={'multiSessionGroupKey': 'shared-west-marches'},
+        ),
+    )
+
+    with app.app_context():
+        for session_id in (first_ids['session_id'], second_ids['session_id']):
+            session_obj = db.session.get(Session, session_id)
+            snapshot = safe_json_loads(session_obj.state_snapshot, {})
+            pack = snapshot['campaignPack']
+            sync_campaign_pack_progress(
+                session=session_obj,
+                pack=pack,
+                checkpoints=pack['checkpoints'],
+                active_checkpoint_id='cp_old_road',
+                completed_ids=[],
+                skipped_ids=[],
+                failed_ids=[],
+                progress_revision=0,
+            )
+        db.session.commit()
+
+        lock_ids = campaign_pack_progress_lock_session_ids(first_ids['session_id'])
+
+    assert lock_ids == sorted([first_ids['session_id'], second_ids['session_id']])
+
+
+def test_pack_progress_shared_propagation_does_not_overwrite_newer_sibling_revision(app):
+    checkpoints = [
+        {'id': 'cp_old_road', 'title': 'Reach the old road', 'nextCheckpointIds': ['cp_watchtower']},
+        {'id': 'cp_watchtower', 'title': 'Reach the watchtower', 'terminal': True},
+    ]
+    first_ids = _seed_pack_session(
+        app,
+        _pack_snapshot(
+            location_id='bleakmoor_gate',
+            flags={'campaignPackActiveCheckpointId': 'cp_old_road'},
+            checkpoints=checkpoints,
+            pack_extra={'multiSessionGroupKey': 'shared-west-marches'},
+        ),
+    )
+    second_ids = _seed_pack_session(
+        app,
+        _pack_snapshot(
+            location_id='bleakmoor_gate',
+            flags={
+                'campaignPackActiveCheckpointId': 'cp_watchtower',
+                'campaignPackCompletedCheckpointIds': ['cp_old_road'],
+                'campaignPackProgressRevision': 2,
+            },
+            checkpoints=checkpoints,
+            pack_extra={
+                'multiSessionGroupKey': 'shared-west-marches',
+                'activeCheckpointId': 'cp_watchtower',
+                'completedCheckpointIds': ['cp_old_road'],
+                'progressRevision': 2,
+            },
+        ),
+    )
+
+    with app.app_context():
+        first_session = db.session.get(Session, first_ids['session_id'])
+        first_snapshot = safe_json_loads(first_session.state_snapshot, {})
+        sync_campaign_pack_progress(
+            session=first_session,
+            pack=first_snapshot['campaignPack'],
+            checkpoints=first_snapshot['campaignPack']['checkpoints'],
+            active_checkpoint_id='cp_old_road',
+            completed_ids=[],
+            skipped_ids=[],
+            failed_ids=[],
+            progress_revision=0,
+        )
+        second_session = db.session.get(Session, second_ids['session_id'])
+        second_snapshot = safe_json_loads(second_session.state_snapshot, {})
+        sync_campaign_pack_progress(
+            session=second_session,
+            pack=second_snapshot['campaignPack'],
+            checkpoints=second_snapshot['campaignPack']['checkpoints'],
+            active_checkpoint_id='cp_watchtower',
+            completed_ids=['cp_old_road'],
+            skipped_ids=[],
+            failed_ids=[],
+            progress_revision=2,
+        )
+        db.session.commit()
+
+        result = control_campaign_pack_progress(
+            session_id=first_ids['session_id'],
+            action='advance',
+            actor='test-operator',
+        )
+        db.session.commit()
+        second_snapshot = safe_json_loads(db.session.get(Session, second_ids['session_id']).state_snapshot, {})
+        second_progress = CampaignPackSession.query.filter_by(session_id=second_ids['session_id']).one()
+        shared_audit_count = SessionStateMutationAudit.query.filter_by(
+            session_id=second_ids['session_id'],
+            source='system.campaign_pack.shared_progress',
+        ).count()
+
+    assert result.progress_revision == 1
+    assert second_snapshot['campaignPack']['activeCheckpointId'] == 'cp_watchtower'
+    assert second_snapshot['campaignPack']['progressRevision'] == 2
+    assert second_progress.progress_revision == 2
+    assert shared_audit_count == 0
 
 
 def test_pack_progress_explicit_complete_when_does_not_fall_back_to_context_fields(app):

@@ -6,8 +6,17 @@ from flask import Request
 
 
 def parse_json_body(request: Request) -> dict | None:
+    """Return a JSON object body, or None for absent, malformed, or non-object JSON."""
     if not request.is_json:
         return None
+    payload = request.get_json(silent=True)
+    return payload if isinstance(payload, dict) else None
+
+
+def parse_optional_json_body(request: Request) -> dict | None:
+    """Return a JSON object body, {} for omitted bodies, or None for invalid JSON."""
+    if not request.is_json:
+        return {}
     payload = request.get_json(silent=True)
     return payload if isinstance(payload, dict) else None
 

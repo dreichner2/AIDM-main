@@ -15,6 +15,27 @@ const CHROMIUM_CHANNEL = process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || ''
 const SMOKE_TIMEOUT_MS = Number(process.env.AIDM_BROWSER_SMOKE_TIMEOUT_MS || 90_000)
 const SMOKE_TOTAL_TIMEOUT_MS = Number(process.env.AIDM_BROWSER_SMOKE_TOTAL_TIMEOUT_MS || 480_000)
 const SHUTDOWN_GRACE_MS = Number(process.env.AIDM_BROWSER_SMOKE_SHUTDOWN_GRACE_MS || 2_000)
+const SINGLE_ORIGIN_BUILD = process.env.AIDM_BROWSER_SMOKE_SINGLE_ORIGIN === 'true'
+const FRONTEND_DIST_DIR = path.join(FRONTEND_ROOT, 'dist')
+const FRONTEND_DIST_INDEX = path.join(FRONTEND_DIST_DIR, 'index.html')
+const REQUIRED_SECURITY_HEADERS = [
+  'Content-Security-Policy',
+  'X-Frame-Options',
+  'X-Content-Type-Options',
+  'Referrer-Policy',
+  'Permissions-Policy',
+]
+const REQUIRED_UI_CSP = {
+  'default-src': ["'self'"],
+  'script-src': ["'self'"],
+  'style-src': ["'self'", 'https://fonts.googleapis.com'],
+  'img-src': ["'self'"],
+  'font-src': ["'self'", 'https://fonts.gstatic.com'],
+  'connect-src': ["'self'", 'ws:'],
+  'object-src': ["'none'"],
+  'base-uri': ["'self'"],
+  'frame-ancestors': ["'none'"],
+}
 
 const children = new Set()
 let smokeTempDir = null
@@ -131,6 +152,44 @@ async function waitForHttp(url, label) {
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   throw new Error(`Timed out waiting for ${label}: ${lastError}`)
+}
+
+function parseCsp(csp) {
+  const directives = new Map()
+  for (const rawDirective of csp.split(';')) {
+    const tokens = rawDirective.trim().split(/\s+/).filter(Boolean)
+    const [directive, ...values] = tokens
+    if (!directive) continue
+    directives.set(directive.toLowerCase(), values)
+  }
+  return directives
+}
+
+function assertCspDirectives(response, label) {
+  const csp = response.headers.get('Content-Security-Policy') || ''
+  const directives = parseCsp(csp)
+  const missing = []
+  for (const [directive, requiredValues] of Object.entries(REQUIRED_UI_CSP)) {
+    const values = directives.get(directive) || []
+    for (const requiredValue of requiredValues) {
+      if (!values.includes(requiredValue)) {
+        missing.push(`${directive} ${requiredValue}`)
+      }
+    }
+  }
+  if (missing.length) {
+    throw new Error(`${label} Content-Security-Policy is missing directives: ${missing.join(', ')}`)
+  }
+}
+
+function assertSecurityHeaders(response, label, options = {}) {
+  const missing = REQUIRED_SECURITY_HEADERS.filter((header) => !response.headers.get(header))
+  if (missing.length) {
+    throw new Error(`${label} missing security headers: ${missing.join(', ')}`)
+  }
+  if (options.requireUiCsp) {
+    assertCspDirectives(response, label)
+  }
 }
 
 async function waitForSessionLog(baseUrl, sessionId, predicate) {
@@ -391,9 +450,14 @@ async function main() {
   const frontendPort = await getFreePort()
   const backendUrl = `http://127.0.0.1:${backendPort}`
   const frontendUrl = `http://127.0.0.1:${frontendPort}`
+  const appUrl = SINGLE_ORIGIN_BUILD ? backendUrl : frontendUrl
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aidm-browser-smoke-'))
   smokeTempDir = tempDir
   const dbPath = path.join(tempDir, 'browser-smoke.sqlite')
+
+  if (SINGLE_ORIGIN_BUILD && !fs.existsSync(FRONTEND_DIST_INDEX)) {
+    throw new Error(`Single-origin browser smoke requires a built frontend at ${FRONTEND_DIST_INDEX}. Run npm run build first.`)
+  }
 
   log(`starting isolated backend on ${backendUrl}`)
   const backend = spawnManaged(
@@ -413,30 +477,40 @@ async function main() {
         AIDM_LLM_FALLBACK_MODELS: '',
         AIDM_AUTH_REQUIRED: 'false',
         AIDM_TELEMETRY_ENABLED: 'false',
+        AIDM_SECURITY_HEADERS_ENABLED: 'true',
+        AIDM_SERVE_FRONTEND: SINGLE_ORIGIN_BUILD ? 'true' : 'false',
+        AIDM_FRONTEND_DIST_DIR: FRONTEND_DIST_DIR,
         AIDM_SOCKETIO_ASYNC_MODE: 'threading',
-        AIDM_CORS_ALLOWLIST: '*',
-        AIDM_SOCKET_CORS_ALLOWLIST: '*',
+        AIDM_CORS_ALLOWLIST: SINGLE_ORIGIN_BUILD ? backendUrl : frontendUrl,
+        AIDM_SOCKET_CORS_ALLOWLIST: SINGLE_ORIGIN_BUILD ? backendUrl : frontendUrl,
       },
     },
   )
-  await waitForHttp(`${backendUrl}/api/health`, 'backend health')
+  const healthResponse = await waitForHttp(`${backendUrl}/api/health`, 'backend health')
+  assertSecurityHeaders(healthResponse, 'backend health')
 
-  log(`starting frontend on ${frontendUrl}`)
-  const frontend = spawnManaged(
-    'npm',
-    ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(frontendPort), '--strictPort'],
-    {
-      cwd: FRONTEND_ROOT,
-      env: {
-        ...process.env,
-        VITE_AIDM_API_BASE_URL: backendUrl,
+  if (SINGLE_ORIGIN_BUILD) {
+    const frontendResponse = await waitForHttp(`${backendUrl}/`, 'single-origin frontend')
+    assertSecurityHeaders(frontendResponse, 'single-origin frontend', { requireUiCsp: true })
+    log(`using built single-origin frontend from ${FRONTEND_DIST_DIR}`)
+  } else {
+    log(`starting frontend on ${frontendUrl}`)
+    spawnManaged(
+      'npm',
+      ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(frontendPort), '--strictPort'],
+      {
+        cwd: FRONTEND_ROOT,
+        env: {
+          ...process.env,
+          VITE_AIDM_API_BASE_URL: backendUrl,
+        },
       },
-    },
-  )
-  await waitForHttp(frontendUrl, 'frontend dev server')
+    )
+    await waitForHttp(frontendUrl, 'frontend dev server')
+  }
 
   log('running browser flow')
-  await runBrowserFlow(frontendUrl, backendUrl)
+  await runBrowserFlow(appUrl, backendUrl)
 
   await stopAllManaged()
   cleanupTempDir()

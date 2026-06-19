@@ -50,6 +50,7 @@ from aidm_server.validation import (
     missing_fields,
     optional_text as _optional_text,
     parse_json_body,
+    parse_optional_json_body,
     required_text as _required_text,
 )
 from aidm_server.workspace_access import (
@@ -376,8 +377,8 @@ def import_example_campaign_pack(pack_id):
     if not example_pack:
         return error_response('example_campaign_pack_not_found', 'Example campaign pack not found.', 404)
 
-    payload = request.get_json(silent=True) if request.is_json else {}
-    if payload is None or not isinstance(payload, dict):
+    payload = parse_optional_json_body(request)
+    if payload is None:
         return error_response('validation_error', 'Expected JSON request body.', 400)
 
     import_payload = {
@@ -448,10 +449,8 @@ def import_installed_campaign_pack(installed_pack_id):
     if not installed_pack:
         return error_response('installed_campaign_pack_not_found', 'Installed campaign pack not found.', 404)
 
-    payload = request.get_json(silent=True) if request.is_json else {}
+    payload = parse_optional_json_body(request)
     if payload is None:
-        return error_response('validation_error', 'Expected JSON request body.', 400)
-    if not isinstance(payload, dict):
         return error_response('validation_error', 'Expected JSON request body.', 400)
     manifest = safe_json_loads(installed_pack.manifest_json, {})
     if not isinstance(manifest, dict):

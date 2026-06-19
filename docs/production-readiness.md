@@ -6,7 +6,8 @@ useful for development, but it is not the production boundary.
 ## Required Configuration
 
 Use `.env.production.example` as the placeholder template for deployment
-secret/env managers.
+secret/env managers. Choose the matching exposure mode in
+`docs/auth_modes.md` before finalizing auth, cookie, and CORS settings.
 
 - `AIDM_ENV=production`
 - `FLASK_SECRET_KEY=<strong explicit secret>`
@@ -36,12 +37,26 @@ secret/env managers.
 3. Run `python scripts/deploy_bootstrap.py --check-only`.
 4. Run deployment readiness against the target environment and, when available,
    the deployed target URL:
-   `make deployment-readiness DEPLOYMENT_READINESS_ARGS="--env-file /path/to/env --target-url https://aidm.example.com --auth-token <token>"`.
+   `make deployment-readiness DEPLOYMENT_READINESS_ARGS="--env-file /path/to/env --target-url https://aidm.example.com --auth-token <token> --evidence-report tmp/release/deployment-readiness-evidence.md"`.
    Add `--same-origin-deployment`, `--auth-storage-exception`, or
    `--socketio-staging-proof` only when those deployment choices are
-   intentionally documented.
+   intentionally documented. Use `.json` as the evidence report suffix when a
+   structured artifact is better for CI or release automation.
 5. Start AIDM with a production Socket.IO-capable server. Do not use
-   `deploy_bootstrap.py` as the production server process.
+   `deploy_bootstrap.py` as the production server process. For the first
+   closed-beta single-worker deployment, use the decision in
+   `docs/socketio_worker_model.md`:
+
+   ```bash
+   AIDM_SOCKETIO_WORKER_MODEL=single \
+   AIDM_SOCKETIO_ASYNC_MODE=eventlet \
+   WEB_CONCURRENCY=1 \
+   PORT=5050 \
+   scripts/run_production_server.sh
+   ```
+
+   To inspect the exact Gunicorn command without starting a server, run
+   `scripts/run_production_server.sh --print`.
 
 ## CI Gates
 
@@ -51,15 +66,37 @@ secret/env managers.
 - Backend tests: `python -m pytest`
 - Backup/restore drill for local/private SQLite beta data:
   `python scripts/backup_restore_drill.py --database-uri sqlite:////absolute/path/to/dnd_ai_dm.db`
+- Migration chain drill:
+  `python scripts/migration_chain_drill.py`
+- Hosted cookie-only account auth smoke:
+  `python scripts/hosted_cookie_auth_smoke.py --evidence-report tmp/release/hosted-cookie-auth-evidence.md`
+- Hosted cookie-only account auth smoke against the deployed target:
+  `make hosted-cookie-auth-smoke HOSTED_COOKIE_AUTH_SMOKE_ARGS="--target-url https://aidm.example.com --account-intent signup --evidence-report tmp/release/hosted-cookie-auth-evidence.md"`
+- Non-admin forbidden-response smoke:
+  `python scripts/security_forbidden_smoke.py --evidence-report tmp/release/security-forbidden-evidence.md`
+- Non-admin forbidden-response smoke against the deployed target:
+  `make security-forbidden-smoke SECURITY_FORBIDDEN_SMOKE_ARGS="--target-url https://aidm.example.com --account-token <non-admin-token> --workspace-id <workspace-id> --campaign-id <campaign-id> --session-id <session-id> --evidence-report tmp/release/security-forbidden-evidence.md"`
+- Session export/import smoke:
+  `python scripts/session_export_import_smoke.py --evidence-report tmp/release/export-import-evidence.md`
+- Session export/import smoke against the deployed target:
+  `make session-export-import-smoke SESSION_EXPORT_IMPORT_SMOKE_ARGS="--target-url https://aidm.example.com --auth-token <operator-token> --workspace-id <workspace-id> --session-id <session-id> --player-id <player-id> --evidence-report tmp/release/export-import-evidence.md"`
 - API type drift: `python scripts/generate_api_types.py` plus a clean
   `git diff --exit-code aidm_frontend/src/apiContract.generated.ts`
-- Frontend tests, build, bundle budget, and browser smoke
+- Frontend tests, build, bundle budget, single-origin browser smoke against the built frontend, visual smoke screenshots, and visual-smoke review evidence
+- Hosted RC evidence via `make hosted-rc-evidence` against the target URL, including deployment readiness, hosted cookie auth, non-admin forbidden responses, session export/import, beta SLO baseline, and the manual backup/restore, worker-process, and source-archive attachment proof flags needed to avoid `manual-evidence-required`
+- Final operator sign-off via `make operator-signoff-status OPERATOR_SIGNOFF_STATUS_ARGS="--require-complete"` after filling `tmp/release/operator-signoff.json` from `docs/rc_operator_signoff_manifest.example.json` with GitHub Actions URLs, hosted proof links, target env evidence, backup/restore proof, worker-process proof, telemetry receipt, source-archive attachment, issue-closure review, and packaging command evidence
+- Socket.IO worker-model decision:
+  `python scripts/check_socketio_worker_model_decision.py`
 - Observability bundle:
   `python scripts/check_observability_bundle.py`, plus
   `python scripts/check_observability_bundle.py --check-docker-compose --require-docker`
   on machines that should prove Docker Compose config
+- Local beta SLO renderer proof:
+  `make local-beta-slo-baseline`
 - Deployment readiness:
-  `python scripts/deployment_readiness_check.py --env-file /path/to/env`
+  `python scripts/deployment_readiness_check.py --env-file /path/to/env --evidence-report tmp/release/deployment-readiness-evidence.md`
+- Beta SLO baseline:
+  `make beta-slo-baseline BETA_SLO_BASELINE_ARGS="--target-url https://aidm.example.com --auth-token <token> --workspace-id <workspace-id> --release RC1 --environment staging --output tmp/release/beta-slo-baseline.md"`
 
 ## Beta SLOs
 

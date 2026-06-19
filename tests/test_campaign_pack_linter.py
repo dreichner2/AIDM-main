@@ -54,10 +54,16 @@ def test_campaign_pack_linter_reports_graph_and_dependency_warnings(app):
     pack = {
         **_valid_pack(),
         'checkpoints': [
-            {'id': 'cp_start', 'title': 'Start', 'nextCheckpointIds': ['cp_end']},
+            {'id': 'cp_start', 'title': 'Start', 'next_checkpoint_ids': ['cp_end'], 'encounter_ids': ['enc_bandits']},
             {'id': 'cp_end', 'title': 'End', 'terminal': True},
             {'id': 'cp_orphan', 'title': 'Orphan', 'terminal': True},
         ],
+        'encounters': [
+            {'id': 'enc_bandits', 'title': 'Bandit Toll', 'checkpointIds': ['cp_start'], 'enemyIds': ['enemy_bandit']},
+            {'id': 'enc_unlinked', 'title': 'Unplaced Trouble', 'enemyGroups': [{'enemyId': 'enemy_bandit', 'count': 2}]},
+        ],
+        'npcs': [{'id': 'npc_guide', 'name': 'Guide', 'visibleAtStart': True}],
+        'lore': [{'id': 'lore_secret', 'title': 'Secret Lore', 'visibility': 'hidden'}],
         'dependencies': [{'packId': 'shared_rules', 'versionRange': '^1'}],
     }
 
@@ -68,6 +74,17 @@ def test_campaign_pack_linter_reports_graph_and_dependency_warnings(app):
     assert result['graph']['reachable'] == ['cp_end', 'cp_start']
     assert any(issue['code'] == 'unreachable_checkpoint' for issue in result['issues'])
     assert any(issue['code'] == 'pack_dependencies_require_library_resolution' for issue in result['issues'])
+    report = result['authoring_report']
+    assert report['starting']['locationId'] == 'start'
+    assert report['checkpoints']['total'] == 3
+    assert report['checkpoints']['reachable'] == 2
+    assert report['checkpoints']['unreachableIds'] == ['cp_orphan']
+    assert report['checkpoints']['items'][0]['encounterIds'] == ['enc_bandits']
+    assert report['encounters']['total'] == 2
+    assert report['encounters']['linkedToCheckpoint'] == 1
+    assert report['encounters']['unlinkedIds'] == ['enc_unlinked']
+    assert report['visibility']['visibleAtStart']['npcs'] == ['npc_guide']
+    assert report['visibility']['hiddenToPlayers']['lore'] == ['lore_secret']
 
 
 def test_campaign_pack_linter_cli_prints_json(tmp_path, app):
@@ -92,6 +109,38 @@ def test_campaign_pack_linter_cli_prints_json(tmp_path, app):
     payload = json.loads(result.stdout)
     assert payload['ok'] is True
     assert payload['summary']['packId'] == 'lint_pack'
+
+
+def test_campaign_pack_report_cli_prints_authoring_report_json(tmp_path, app):
+    pack_path = tmp_path / 'lint-pack.json'
+    pack_path.write_text(json.dumps(_valid_pack()), encoding='utf-8')
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            'scripts/aidm_pack.py',
+            'report',
+            str(pack_path),
+            '--json',
+        ],
+        check=False,
+        cwd=str(TEST_REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload['starting']['locationId'] == 'start'
+    assert payload['checkpoints']['reachable'] == 1
+    assert payload['collections'][0] == {
+        'collection': 'locations',
+        'count': 1,
+        'visibleAtStartCount': 0,
+        'hiddenToPlayersCount': 0,
+        'visibleAtStartIds': [],
+        'hiddenToPlayersIds': [],
+    }
 
 
 def test_example_campaign_packs_lint_and_have_reachable_checkpoints(app):

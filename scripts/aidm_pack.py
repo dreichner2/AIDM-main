@@ -43,6 +43,46 @@ def _print_issues(result: dict[str, Any]) -> None:
         print(f'{severity} {code} at {path}: {message}')
 
 
+def _print_authoring_report(result: dict[str, Any]) -> None:
+    report = result.get('authoring_report') if isinstance(result.get('authoring_report'), dict) else {}
+    summary = result.get('summary') if isinstance(result.get('summary'), dict) else {}
+    print(f"Campaign Pack: {summary.get('title') or summary.get('packId') or 'Untitled'}")
+    print(f"Pack ID: {summary.get('packId') or 'unknown'}")
+    starting = report.get('starting') if isinstance(report.get('starting'), dict) else {}
+    print(
+        'Starting: '
+        f"location={starting.get('locationId') or 'unset'} "
+        f"quest={starting.get('questId') or 'unset'} "
+        f"checkpoint={starting.get('checkpointId') or 'unset'}"
+    )
+    print('\nCollections:')
+    for item in report.get('collections') or []:
+        if not isinstance(item, dict) or not item.get('count'):
+            continue
+        print(
+            f"- {item.get('collection')}: {item.get('count')} "
+            f"(visible at start {item.get('visibleAtStartCount', 0)}, hidden {item.get('hiddenToPlayersCount', 0)})"
+        )
+    checkpoints = report.get('checkpoints') if isinstance(report.get('checkpoints'), dict) else {}
+    print(
+        '\nCheckpoints: '
+        f"{checkpoints.get('reachable', 0)}/{checkpoints.get('total', 0)} reachable, "
+        f"{len(checkpoints.get('optionalIds') or [])} optional, "
+        f"{len(checkpoints.get('terminalIds') or [])} terminal"
+    )
+    if checkpoints.get('unreachableIds'):
+        print('Unreachable checkpoints: ' + ', '.join(checkpoints['unreachableIds']))
+    encounters = report.get('encounters') if isinstance(report.get('encounters'), dict) else {}
+    print(
+        'Encounters: '
+        f"{encounters.get('linkedToCheckpoint', 0)}/{encounters.get('total', 0)} linked to checkpoints"
+    )
+    if encounters.get('unlinkedIds'):
+        print('Unlinked encounters: ' + ', '.join(encounters['unlinkedIds']))
+    print('\nIssues:')
+    _print_issues(result)
+
+
 def _load_result(args) -> dict[str, Any]:
     return _with_app_context(lambda: lint_campaign_pack_file(args.path, workspace_id=args.workspace_id))
 
@@ -85,6 +125,15 @@ def cmd_test_checkpoints(args) -> int:
     return 0 if result.get('ok') and (not nodes or reachable) else 1
 
 
+def cmd_report(args) -> int:
+    result = _load_result(args)
+    if args.json:
+        _dump(result.get('authoring_report') or {})
+    else:
+        _print_authoring_report(result)
+    return 0 if result.get('ok') else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='aidm pack', description='Campaign pack authoring tools.')
     parser.add_argument('--workspace-id', default='owner', help='Workspace to use for dry-run world references.')
@@ -106,6 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint_parser = subparsers.add_parser('test-checkpoints', help='Check checkpoint reachability.')
     checkpoint_parser.add_argument('path', type=Path)
     checkpoint_parser.set_defaults(func=cmd_test_checkpoints)
+
+    report_parser = subparsers.add_parser('report', help='Print an authoring validation report for a pack.')
+    report_parser.add_argument('path', type=Path)
+    report_parser.add_argument('--json', action='store_true', help='Print the authoring report as JSON.')
+    report_parser.set_defaults(func=cmd_report)
 
     return parser
 

@@ -49,6 +49,18 @@ from aidm_server.workspace_access import (
 
 creatures_bp = Blueprint('creatures', __name__)
 
+_PUBLIC_CREATURE_RESOLUTION_FIELDS = frozenset(
+    {
+        'creature',
+        'source',
+        'resolutionMethod',
+        'matchScore',
+        'generated',
+        'savedToBestiary',
+        'notes',
+    }
+)
+
 
 def _combat_operator_forbidden_response():
     return capability_forbidden_response(
@@ -73,9 +85,7 @@ def _save_generated_enabled(payload: dict[str, Any]) -> bool:
 def _creature_resolution_response(result: dict[str, Any]) -> dict[str, Any]:
     if current_actor_has_capability('debug_read'):
         return result
-    public_result = dict(result)
-    public_result.pop('debug', None)
-    return public_result
+    return {key: value for key, value in result.items() if key in _PUBLIC_CREATURE_RESOLUTION_FIELDS}
 
 
 def _campaign_players(campaign: Campaign) -> list[Player]:

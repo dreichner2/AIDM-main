@@ -12,6 +12,10 @@ on:
         required: false
         default: 'false'
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   closed-beta-rc:
     runs-on: ubuntu-latest
@@ -55,4 +59,82 @@ jobs:
           if [ "${{ github.event.inputs.skip_dependency_audits }}" = "true" ]; then
             args+=(--skip-dependency-audits)
           fi
-          python scripts/closed_beta_rc_check.py --python "$PYTHON" "${args[@]}"
+          python scripts/closed_beta_rc_check.py --python "$PYTHON" --evidence-report tmp/release/rc-evidence.md "${args[@]}"
+      - name: Record GitHub Actions evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p tmp/release
+          closed_beta_rc_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          python scripts/render_github_actions_evidence.py \
+            --auto-gh \
+            --include-gh-details \
+            --closed-beta-rc-run-url "$closed_beta_rc_url" \
+            --evidence-report tmp/release/github-actions-evidence.md \
+            --json-output tmp/release/github-actions-evidence.json
+      - name: Build RC handoff artifacts
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f tmp/release/rc-evidence.md ]; then
+            echo "No RC evidence report found; skipping handoff artifact rendering."
+            exit 0
+          fi
+          make rc-handoff-artifacts PYTHON=python
+      - name: Upload RC evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: closed-beta-rc-evidence
+          path: |
+            tmp/release/rc-evidence.md
+            tmp/release/hosted-cookie-auth-evidence.md
+            tmp/release/security-forbidden-evidence.md
+            tmp/release/export-import-evidence.md
+            tmp/release/visual-smoke-review.md
+            tmp/release/visual-smoke-review.json
+            tmp/release/frontend-npm-ci-evidence.md
+            tmp/release/frontend-npm-ci-evidence.json
+            tmp/release/packaging-cleanup-evidence.md
+            tmp/release/packaging-cleanup-evidence.json
+            tmp/release/github-actions-rc-run-plan.md
+            tmp/release/github-actions-rc-run-plan.json
+            tmp/release/github-actions-evidence.md
+            tmp/release/github-actions-evidence.json
+            tmp/release/hosted-rc-evidence.md
+            tmp/release/hosted-rc-evidence.json
+            tmp/release/operator-signoff-status.md
+            tmp/release/operator-signoff-status.json
+            tmp/release/operator-signoff.draft.json
+            tmp/release/operator-signoff-action-plan.md
+            tmp/release/operator-signoff-action-plan.json
+            tmp/release/operator-signoff.json
+            tmp/release/deployment-readiness-evidence.md
+            tmp/release/beta-slo-baseline.md
+            tmp/release/beta-slo.json
+            tmp/release/beta-incidents.json
+            tmp/release/release-evidence-packet.md
+            tmp/release/release-evidence-packet.json
+            tmp/release/release-checklist-status.md
+            tmp/release/release-checklist-status.json
+            tmp/release/rc-recommendation-matrix.md
+            tmp/release/rc-recommendation-matrix.json
+            tmp/release/rc-issue-closure-evidence.md
+            tmp/release/rc-issue-closure-evidence.json
+            tmp/release/external-proof-inputs.md
+            tmp/release/external-proof-inputs.json
+            tmp/release/external-proof-execution-plan.md
+            tmp/release/external-proof-execution-plan.json
+            tmp/release/external-proof-values.example.json
+            tmp/release/external-proof-values.hosted-rc.json
+            tmp/release/operator-signoff.from-inputs.json
+            tmp/release/operator-signoff.from-inputs-status.md
+            tmp/release/operator-signoff.from-inputs-status.json
+            tmp/release/issue-evidence/
+            tmp/release/aidm-source-*.tar.gz
+            tmp/release/aidm-source-*.tar.gz.sha256
+            tmp/verification_artifacts/visual-smoke/
+          if-no-files-found: ignore
+          retention-days: 30
