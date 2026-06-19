@@ -582,6 +582,17 @@ def _github_actions_rc_artifact_reference(section: dict[str, Any]) -> str:
     return ''
 
 
+def _source_archive_artifact_attachment_evidence(packet: dict[str, Any], artifact_url: str) -> str:
+    if not artifact_url:
+        return ''
+    source_archive = _section(packet, 'source_archive')
+    path = _real_text(source_archive.get('path'))
+    sha256 = _real_text(source_archive.get('sha256')).lower()
+    if not path or not SHA256_RE.fullmatch(sha256):
+        return ''
+    return f'{artifact_url} includes {_relative_or_absolute(path)} sha256:{sha256}'
+
+
 def _local_artifact_passed(section: dict[str, Any]) -> bool:
     return section.get('status') == 'passed' and section.get('freshness') != 'stale'
 
@@ -1088,7 +1099,19 @@ def draft_manifest_from_packet(
     manual_evidence = _manual_evidence_lookup(hosted_rc)
     backup_restore = manual_evidence.get('hosted database backup/restore proof', '')
     worker_process = manual_evidence.get('hosted socket.io worker process proof', '')
-    source_archive_attachment = manual_evidence.get('source archive attached to rc issue or release', '')
+    manual_source_archive_attachment = manual_evidence.get(
+        'source archive attached to rc issue or release',
+        '',
+    )
+    source_archive_attachment = manual_source_archive_attachment or _source_archive_artifact_attachment_evidence(
+        packet,
+        closed_beta_rc_artifact,
+    )
+    source_archive_attachment_notes = (
+        'Seeded from hosted RC manual evidence.'
+        if manual_source_archive_attachment
+        else 'Seeded from verified Closed Beta RC artifact containing the source archive and checksum.'
+    )
 
     _set_provided(
         manifest,
@@ -1106,7 +1129,7 @@ def draft_manifest_from_packet(
         manifest,
         'source_archive_attachment',
         evidence=source_archive_attachment,
-        notes='Seeded from hosted RC manual evidence.',
+        notes=source_archive_attachment_notes,
     )
 
     worker_model = _real_text(hosted_rc_metadata.get('socket_io_worker_model') or hosted_rc.get('socketio_worker_model'))

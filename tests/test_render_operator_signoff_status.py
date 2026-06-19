@@ -614,6 +614,10 @@ def test_draft_manifest_seeds_live_hosted_and_manual_evidence():
     target_url = 'https://aidm.closedbeta.dev'
     packet = {
         'rc_evidence': {'commit': 'abc123'},
+        'source_archive': {
+            'path': '/tmp/aidm-source.tar.gz',
+            'sha256': 'a' * 64,
+        },
         'github_actions': {
             'status': 'passed',
             'freshness': 'current',
@@ -698,6 +702,56 @@ def test_draft_manifest_seeds_live_hosted_and_manual_evidence():
     )
     assert items['hosted_external_telemetry']['status'] == 'pending'
     assert items['rc_issue_closure_review']['status'] == 'pending'
+
+
+def test_draft_manifest_seeds_source_archive_attachment_from_verified_rc_artifact():
+    packet = {
+        'rc_evidence': {'commit': 'abc123'},
+        'signed_off_worktree': {'commit': 'abc123', 'status': 'passed', 'worktree': 'clean'},
+        'source_archive': {
+            'path': '/tmp/aidm-source.tar.gz',
+            'sha256': 'a' * 64,
+        },
+        'github_actions': {
+            'status': 'passed',
+            'freshness': 'current',
+            'closed_beta_rc_artifact_status': 'passed',
+            'closed_beta_rc_artifact_content_status': 'passed',
+            'closed_beta_rc_artifact_url': 'https://api.github.com/repos/dreichner2/AIDM-main/actions/artifacts/333',
+        },
+    }
+
+    draft = draft_manifest_from_packet(packet, generated_at='2026-06-19T00:00:00+00:00')
+    item = draft['items']['source_archive_attachment']
+
+    assert item['status'] == 'provided'
+    assert item['evidence'] == (
+        'https://api.github.com/repos/dreichner2/AIDM-main/actions/artifacts/333 '
+        'includes /tmp/aidm-source.tar.gz sha256:' + 'a' * 64
+    )
+    assert 'verified Closed Beta RC artifact' in item['notes']
+
+
+def test_draft_manifest_does_not_seed_source_archive_attachment_without_current_sha():
+    packet = {
+        'rc_evidence': {'commit': 'abc123'},
+        'signed_off_worktree': {'commit': 'abc123', 'status': 'passed', 'worktree': 'clean'},
+        'source_archive': {
+            'path': '/tmp/aidm-source.tar.gz',
+            'sha256': 'not-a-sha',
+        },
+        'github_actions': {
+            'status': 'passed',
+            'freshness': 'current',
+            'closed_beta_rc_artifact_status': 'passed',
+            'closed_beta_rc_artifact_content_status': 'passed',
+            'closed_beta_rc_artifact_url': 'https://api.github.com/repos/dreichner2/AIDM-main/actions/artifacts/333',
+        },
+    }
+
+    draft = draft_manifest_from_packet(packet, generated_at='2026-06-19T00:00:00+00:00')
+
+    assert draft['items']['source_archive_attachment']['status'] == 'pending'
 
 
 def test_draft_manifest_does_not_seed_unverified_rc_artifact():

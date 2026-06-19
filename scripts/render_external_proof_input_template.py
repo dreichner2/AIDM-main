@@ -417,6 +417,16 @@ def _github_actions_rc_artifact_reference(github_actions: dict[str, Any], signed
     return ''
 
 
+def _source_archive_artifact_attachment_evidence(source_archive: dict[str, Any], artifact_url: str) -> str:
+    if not artifact_url:
+        return ''
+    path = _real_text(source_archive.get('path'))
+    sha256 = _real_text(source_archive.get('sha256')).lower()
+    if not path or not re.fullmatch(r'[a-f0-9]{64}', sha256):
+        return ''
+    return f'{artifact_url} includes {_relative_or_absolute(path)} sha256:{sha256}'
+
+
 def _field_current_value(key: str, packet: dict[str, Any], action_plan: dict[str, Any]) -> str:
     github_actions = _section(packet, 'github_actions')
     hosted_rc = _section(packet, 'hosted_rc_evidence')
@@ -443,10 +453,11 @@ def _field_current_value(key: str, packet: dict[str, Any], action_plan: dict[str
         or export_import.get('target_url')
         or slo.get('target_url')
     )
+    closed_beta_rc_artifact_reference = _github_actions_rc_artifact_reference(github_actions, signed_off)
     values = {
         'aidm_ci_run_url': _github_actions_url(github_actions, signed_off, 'aidm_ci_run_url'),
         'closed_beta_rc_run_url': _github_actions_url(github_actions, signed_off, 'closed_beta_rc_run_url'),
-        'closed_beta_rc_artifact_reference': _github_actions_rc_artifact_reference(github_actions, signed_off),
+        'closed_beta_rc_artifact_reference': closed_beta_rc_artifact_reference,
         'deployment_readiness_evidence': _evidence_path_if_hosted(readiness)
         or _hosted_rc_check_evidence(hosted_rc, 'Hosted deployment readiness'),
         'target_url': target_url if _is_hosted_target(target_url) else '',
@@ -456,7 +467,8 @@ def _field_current_value(key: str, packet: dict[str, Any], action_plan: dict[str
         or _hosted_rc_check_evidence(hosted_rc, 'Hosted non-admin forbidden smoke'),
         'hosted_export_import_evidence': _evidence_path_if_hosted(export_import, require_live_mode=True)
         or _hosted_rc_check_evidence(hosted_rc, 'Hosted session export/import smoke'),
-        'source_archive_attachment_evidence': manual.get('source archive attached to rc issue or release'),
+        'source_archive_attachment_evidence': manual.get('source archive attached to rc issue or release')
+        or _source_archive_artifact_attachment_evidence(source_archive, closed_beta_rc_artifact_reference),
         'hosted_backup_restore_evidence': manual.get('hosted database backup/restore proof'),
         'hosted_worker_process_evidence': manual.get('hosted socket.io worker process proof'),
         'external_telemetry_receipt': manual.get('external telemetry receipt proof'),

@@ -283,6 +283,12 @@ def test_build_template_uses_current_passed_github_actions_context():
         'worktree': 'clean',
         'commit': 'abc123',
     }
+    packet['source_archive'] = {
+        'status': 'passed',
+        'path': '/tmp/aidm-source.tar.gz',
+        'sha256': 'a' * 64,
+        'bytes': 123,
+    }
     packet['github_actions'] = {
         'status': 'passed',
         'freshness': 'current',
@@ -309,6 +315,11 @@ def test_build_template_uses_current_passed_github_actions_context():
     assert (
         fields['closed_beta_rc_artifact_reference']['current_value']
         == 'https://api.github.com/repos/dreichner2/AIDM-main/actions/artifacts/333'
+    )
+    assert fields['source_archive_attachment_evidence']['status'] == 'provided-context'
+    assert fields['source_archive_attachment_evidence']['current_value'] == (
+        'https://api.github.com/repos/dreichner2/AIDM-main/actions/artifacts/333 '
+        'includes /tmp/aidm-source.tar.gz sha256:' + 'a' * 64
     )
 
 
@@ -365,6 +376,44 @@ def test_build_template_ignores_unverified_github_actions_artifact_context():
 
     assert fields['closed_beta_rc_artifact_reference']['status'] == 'required'
     assert fields['closed_beta_rc_artifact_reference']['current_value'] == ''
+
+
+def test_build_template_does_not_use_source_archive_artifact_context_without_valid_sha():
+    packet = _packet()
+    packet['signed_off_worktree'] = {
+        'status': 'passed',
+        'worktree': 'clean',
+        'commit': 'abc123',
+    }
+    packet['source_archive'] = {
+        'status': 'passed',
+        'path': '/tmp/aidm-source.tar.gz',
+        'sha256': 'not-a-sha',
+        'bytes': 123,
+    }
+    packet['github_actions'] = {
+        'status': 'passed',
+        'freshness': 'current',
+        'closed_beta_rc_artifact_status': 'passed',
+        'closed_beta_rc_artifact_content_status': 'passed',
+        'closed_beta_rc_artifact_url': 'https://api.github.com/repos/dreichner2/AIDM-main/actions/artifacts/333',
+    }
+    action_plan = {
+        **_action_plan(),
+        'actions': [{'key': 'source_archive_attachment'}],
+        'complete_items': [],
+    }
+
+    template = build_template(
+        packet=packet,
+        action_plan=action_plan,
+        recommendation_matrix={'status': 'local-ready-with-external-exceptions', 'recommendations': []},
+        generated_at='2026-06-19T00:00:00+00:00',
+    )
+    fields = {field['key']: field for field in template['fields']}
+
+    assert fields['source_archive_attachment_evidence']['status'] == 'required'
+    assert fields['source_archive_attachment_evidence']['current_value'] == ''
 
 
 def test_build_template_uses_partial_current_github_actions_context_after_signed_off():
