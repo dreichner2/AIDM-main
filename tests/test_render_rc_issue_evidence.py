@@ -329,10 +329,12 @@ def test_render_issue_evidence_writes_issue_ready_markdown(tmp_path):
     visual_smoke_dir = tmp_path / 'visual-smoke-run'
     visual_smoke_review_path = tmp_path / 'visual-smoke-review.md'
     github_actions_evidence_path = tmp_path / 'github-actions-evidence.md'
+    hosted_rc_path = tmp_path / 'hosted-rc-evidence.md'
     security_report_path = tmp_path / 'security-forbidden-evidence.md'
     export_import_report_path = tmp_path / 'export-import-evidence.md'
     output_dir = tmp_path / 'issue-evidence'
     _write_tar(archive_path, ['AIDM-main/README.md'])
+    _write_hosted_rc_evidence(hosted_rc_path)
     visual_smoke_dir.mkdir()
     for name in ('desktop-shell.png', 'mobile-full.png', 'short-height-composer.png'):
         (visual_smoke_dir / name).write_bytes(b'png')
@@ -423,6 +425,7 @@ def test_render_issue_evidence_writes_issue_ready_markdown(tmp_path):
         visual_smoke_dir=visual_smoke_dir,
         visual_smoke_review_path=visual_smoke_review_path,
         github_actions_evidence_path=github_actions_evidence_path,
+        hosted_rc_evidence_path=hosted_rc_path,
         security_forbidden_evidence_path=security_report_path,
         export_import_evidence_path=export_import_report_path,
     )
