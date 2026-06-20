@@ -402,14 +402,22 @@ def test_main_validates_external_input_source_archive_against_packet_checksum(tm
 
 def test_main_missing_values_file_writes_incomplete_preview(tmp_path):
     values = tmp_path / 'missing-external-proof-values.json'
+    packet = tmp_path / 'release-evidence-packet.json'
+    draft = tmp_path / 'operator-signoff.draft.json'
     output = tmp_path / 'operator-signoff.from-inputs.json'
     status_output = tmp_path / 'operator-signoff.from-inputs-status.md'
     status_json = tmp_path / 'operator-signoff.from-inputs-status.json'
+    packet.write_text('{}', encoding='utf-8')
+    draft.write_text(json.dumps(example_manifest()), encoding='utf-8')
 
     exit_code = main(
         [
             '--values',
             str(values),
+            '--packet-json',
+            str(packet),
+            '--draft',
+            str(draft),
             '--output',
             str(output),
             '--status-output',
@@ -477,8 +485,10 @@ def test_main_uses_current_packet_context_for_default_draft(tmp_path):
 
 def test_main_existing_incomplete_values_file_stays_invalid(tmp_path):
     values = tmp_path / 'external-proof-values.json'
+    packet = tmp_path / 'release-evidence-packet.json'
     output = tmp_path / 'operator-signoff.from-inputs.json'
     status_json = tmp_path / 'operator-signoff.from-inputs-status.json'
+    packet.write_text('{}', encoding='utf-8')
     values.write_text(
         json.dumps({'values': {'aidm_ci_run_url': 'https://github.com/dreichner2/AIDM-main/actions/runs/111'}}),
         encoding='utf-8',
@@ -488,6 +498,8 @@ def test_main_existing_incomplete_values_file_stays_invalid(tmp_path):
         [
             '--values',
             str(values),
+            '--packet-json',
+            str(packet),
             '--output',
             str(output),
             '--status-json-output',

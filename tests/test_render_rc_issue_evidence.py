@@ -430,12 +430,13 @@ def test_render_issue_evidence_writes_issue_ready_markdown(tmp_path):
     assert len(written) == 7
     preflight = (output_dir / 'issue-03-preflight.md').read_text(encoding='utf-8')
     assert '# Closed Beta RC1: Preflight gates' in preflight
-    assert '- Result: passed with external exceptions' in preflight
+    assert '- Result: passed' in preflight
     assert '- Worktree: dirty (3 changed/untracked paths; 2 tracked, 1 untracked)' in preflight
     assert 'sha256:' in preflight
     assert '- GitHub Actions evidence:' in preflight
     assert 'Attach GitHub Actions `AIDM CI` and `Closed Beta RC` run URLs before closing.' not in preflight
-    assert 'Attach live hosted/staging `/api/health` evidence when this issue is used for hosted RC sign-off.' in preflight
+    assert 'Attach live hosted/staging `/api/health` evidence when this issue is used for hosted RC sign-off.' not in preflight
+    assert '- Remaining exceptions: None.' in preflight
     assert '| Backend tests pass | Backend tests | passed |' in preflight
 
     frontend = (output_dir / 'issue-04-frontend.md').read_text(encoding='utf-8')
