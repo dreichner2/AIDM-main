@@ -50,13 +50,13 @@ def metadata_cleaned_snapshot(raw_snapshot) -> dict:
 
 
 def archive_session_record(session_obj: Session, *, include_hidden_state: bool = True) -> dict:
+    session_turn_coordinator.discard_session(session_obj.session_id)
     now = utc_now()
     session_obj.status = ARCHIVED_STATUS
     session_obj.deleted_at = now
     session_obj.updated_at = now
     session_obj.archived_by_campaign_id = None
     session_obj.state_snapshot = safe_json_dumps(metadata_cleaned_snapshot(session_obj.state_snapshot), {})
-    session_turn_coordinator.discard_session(session_obj.session_id)
     record_operator_action(
         action='session.archive',
         resource_type='session',
@@ -207,6 +207,7 @@ def hard_delete_session_record(session_obj: Session) -> dict:
 def delete_session_record(session_obj: Session, *, hard_delete: bool, include_hidden_state: bool = True) -> SessionDeletionResult:
     session_id = session_obj.session_id
     if hard_delete:
+        session_turn_coordinator.discard_session(session_id)
         record_operator_action(
             action='session.delete_hard',
             resource_type='session',
@@ -215,7 +216,6 @@ def delete_session_record(session_obj: Session, *, hard_delete: bool, include_hi
             resource_id=session_id,
         )
         payload = hard_delete_session_record(session_obj)
-        session_turn_coordinator.discard_session(session_id)
         return SessionDeletionResult(hard_deleted=True, payload=payload)
 
     session_payload_data = archive_session_record(session_obj, include_hidden_state=include_hidden_state)
