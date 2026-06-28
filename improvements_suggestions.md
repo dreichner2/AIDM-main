@@ -1,3 +1,2638 @@
+# Daily AIDM Codebase Improvement Audit - 2026-06-28 06:04 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe recurring audit across backend correctness, creature endpoint numeric boundaries, tests, request parsing guardrails, secret scanning, state mutation inventory, observability evidence, release checklist status, and a light static scan of frontend/security/accessibility hotspots. Existing uncommitted audit-bundle work was preserved. This run made one small route-boundary robustness fix, refreshed release checklist status, prepended this report, and updated the fallback automation memory file.
+
+## What Was Inspected
+
+- Physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Automation memory:
+  - `$CODEX_HOME/automations/daily-aidm-codebase-improvement-audit/memory.md` was not available because `CODEX_HOME` was empty in this shell.
+  - Fallback memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md` was read before updating it.
+- Prior recurring-audit context from local Codex memory and the local `aidm-daily-audit` workflow note: preserve dirty work, choose one narrow safe fix, verify it with focused checks, and keep release blockers prominent.
+- Current dirty-tree boundary with `git status --short`; existing uncommitted files were treated as boundary state and not reverted:
+  - `aidm_frontend/scripts/visual-smoke.cjs`
+  - `aidm_frontend/src/App.test.tsx`
+  - `aidm_server/capabilities.py`
+  - `aidm_server/creatures/campaign_pack.py`
+  - `aidm_server/creatures/resolver.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/render_rc_issue_evidence.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_creatures_combat.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_render_rc_issue_evidence.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+- Existing top report in `improvements_suggestions.md`, especially the 2026-06-27 16:05 MDT campaign-pack numeric hint hardening entry and its carry-forward warning about adjacent creature endpoint numeric parsing.
+- Creature endpoint numeric coercion hotspots in `aidm_server/blueprints/creatures.py`, with focus on:
+  - `/api/creatures/variant`
+  - `/api/creatures/evolve`
+  - `/api/creatures/analyze-balance`
+  - manual `/api/sessions/<session_id>/combat/start`
+- Existing helper patterns in the same blueprint:
+  - `_positive_int`
+  - `coerce_int`
+  - `parse_json_body`
+- Existing creature/combat endpoint coverage in `tests/test_creatures_combat.py`.
+- Standard recurring audit guardrails:
+  - `scripts/scan_secrets.py`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/check_observability_bundle.py`
+  - `scripts/generate_api_types.py --check`
+  - `git diff --check`
+- Release checklist status:
+  - `make release-checklist-status`
+  - `tmp/release/release-checklist-status.md`
+  - `tmp/release/release-checklist-status.json`
+- Broad static hotspot scan with `rg` for direct numeric parsing, request parsing, JSON loading, subprocess/shell usage, dangerous frontend DOM patterns, storage usage, and accessibility markers. This was used to choose a narrow fix; it was not treated as a complete security or UX audit.
+
+## Small Safe Fix Made
+
+### Harden `/api/creatures/variant` numeric hints
+
+Affected files:
+- `aidm_server/blueprints/creatures.py`
+- `tests/test_creatures_combat.py`
+- `improvements_suggestions.md`
+
+Problem:
+`create_creature_variant_endpoint` directly called `int(...)` on optional `partyLevel` and `partySize` request hints. A malformed authoring request such as `{"partyLevel": "bogus"}` could raise `ValueError` and turn a nonessential hint into a server error. This was the same boundary class as the prior resolver and campaign-pack numeric hardening, but this run limited the change to one endpoint.
+
+Change:
+- Reused the existing blueprint-local `_positive_int` helper for variant endpoint `partyLevel` and `partySize`.
+- Preserved the existing fallback behavior:
+  - `partyLevel` defaults to `1`.
+  - `partySize` defaults to `4`.
+  - both are clamped to at least `1`.
+- Added endpoint regression coverage in `test_creature_api_endpoints` proving malformed variant numeric hints still return a generated variant.
+- Did not change evolution, analyze-balance, manual combat start, campaign-pack saving, auth/capability gates, frontend UI, database state, or prompt/runtime behavior.
+
+Rationale:
+This is a low-blast-radius correctness and maintainability fix at a route boundary. It removes one avoidable 500-class path, follows an existing local helper pattern, and leaves adjacent route contracts for separate focused passes.
+
+## Verification
+
+- `./.venv/bin/python -m py_compile aidm_server/blueprints/creatures.py`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_creatures_combat.py -k "test_creature_api_endpoints" -q`
+  - Passed: 1 test, 71 deselected.
+- `./.venv/bin/python -m pytest tests/test_creatures_combat.py -q`
+  - Passed: 72 tests.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/check_observability_bundle.py`
+  - Passed.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `make release-checklist-status`
+  - Passed and wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` generated `tmp/release/release-checklist-status.md` at `2026-06-28T12:03:57+00:00`.
+- Summary remains 104 passed, 2 external-required, 0 manual-review, 0 failed, and 0 unmapped.
+- Evidence packet status remains `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The source-local checks and evidence renderers continue to pass, but final release closure still depends on hosted/staging proof. Local tests cannot prove provider-specific backup/restore completion or real external telemetry receipt.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted database backup/restore evidence and hosted telemetry receipt evidence in the release venue.
+
+### Medium-High: Creature endpoint numeric coercion remains inconsistent outside this route
+
+Current evidence:
+- Prior runs hardened `normalize_creature_request` and campaign-pack bestiary generation.
+- This run hardened `/api/creatures/variant`.
+- Static inspection still shows direct `int(...)` conversions in adjacent creature routes:
+  - `/api/creatures/evolve`
+  - `/api/creatures/analyze-balance`
+  - manual `/api/sessions/<session_id>/combat/start` enemy count parsing
+  - selected generated/derived creature internals where values may already be shape-controlled.
+
+Risk:
+Some conversions are protected by callers, route converters, or generated data shape, but the behavior is still uneven. Malformed optional numeric hints can become exceptions in route paths that should probably fall back or return validation errors.
+
+Recommended next step:
+- In a separate pass, centralize creature-route numeric hint parsing with focused endpoint tests for evolve, analyze-balance, and manual combat start. Keep it separate from this variant endpoint fix so route contracts stay reviewable.
+
+### Medium-High: The recurring audit bundle remains broad
+
+Current evidence:
+- `git status --short` now includes 18 modified files across frontend tests, auth/capabilities, creature resolver/campaign-pack/blueprint helpers, request parsing guardrails, cleanup/evidence tooling, source-archive checks, secret scanning, and report updates.
+- This run added the new `aidm_server/blueprints/creatures.py` route fix and one focused assertion block in the already-dirty `tests/test_creatures_combat.py`.
+
+Risk:
+The individual fixes are small and verified, but the accumulated diff spans many concerns. That makes review, rollback, and release attribution harder than each patch deserves.
+
+Recommended next step:
+- Split or commit the accumulated recurring-audit bundle by concern before another source-level audit change: security scanner, request parsing guard, cleanup/evidence tooling, source archive evidence, auth/capability hardening, creature numeric coercion, frontend regression/visual-smoke, and reports.
+
+### Medium: Rendered UX and accessibility evidence was not recaptured
+
+Current evidence:
+- This run did not launch the app or capture screenshots.
+- The source change was backend route numeric coercion, so visual-smoke would not directly prove the fix.
+- The frontend/accessibility pass was limited to static hotspot scanning and existing guardrails.
+
+Risk:
+Static frontend scans and backend route tests are not a substitute for rendered UX evidence when frontend behavior or accessibility semantics are being reviewed.
+
+Recommended next step:
+
+```bash
+PLAYWRIGHT_CHROMIUM_CHANNEL=chrome make visual-smoke
+make visual-smoke-review
+```
+
+Run this after frontend runtime/UI changes or before release evidence refresh, not because of this backend route-only patch.
+
+## Larger Suggested Improvements
+
+- Create a shared creature route numeric hint helper for party level, party size, enemy count, generated pack count, and danger level so resolver, generator, variant, evolution, balance, and combat-start paths stop defining subtly different integer behavior.
+- Add focused endpoint regressions for malformed numeric hints on `/api/creatures/evolve`, `/api/creatures/analyze-balance`, and manual `/api/sessions/<id>/combat/start`.
+- Add a small `make audit-guardrails` target that wraps the cheap recurring checks used here: secret scan, request JSON guard, state snapshot writer guard, observability bundle check, API type drift check, creature/combat focused tests, and release checklist status.
+- Regenerate packaging/source-archive evidence after the current dirty bundle is split or committed; source archive evidence is less useful while it predates many uncommitted source changes.
+- Keep the two external-required release checklist rows visible until hosted database backup/restore proof and real external telemetry receipt evidence are attached.
+
+## Recommended Next Run Focus
+
+1. Prefer review/split/commit of the accumulated audit bundle before adding another source fix.
+2. If another code fix is still needed, continue the endpoint-level creature numeric coercion follow-up with tight tests.
+3. If release is near, refresh visual-smoke and source-archive packaging evidence after the dirty bundle is resolved.
+4. Close the two external-required release checklist rows with hosted/staging evidence when those environments are available.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-27 16:05 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe recurring audit across backend correctness, campaign-pack creature generation, creature/combat tests, request parsing guardrails, secret scanning, state mutation inventory, observability evidence, release checklist status, and the already-dirty recurring-audit bundle. Existing uncommitted auth/capability, resolver, request-JSON, cleanup/evidence, visual-smoke, scanner, frontend regression, test, and report edits were preserved. This run made one small campaign-pack robustness fix, refreshed release checklist status, prepended this report, and updated the fallback automation memory file.
+
+## What Was Inspected
+
+- Physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Automation memory lookup:
+  - `$CODEX_HOME/automations/daily-aidm-codebase-improvement-audit/memory.md` was not available in this shell.
+  - Fallback memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md` was read.
+- Prior recurring-audit context from local Codex memory and the local `aidm-daily-audit` workflow notes: preserve dirty work, choose a narrow safe fix, run focused checks, and keep release blockers prominent.
+- Current dirty-tree boundary with `git status --short`; existing uncommitted files were treated as boundary state and not reverted:
+  - `aidm_frontend/scripts/visual-smoke.cjs`
+  - `aidm_frontend/src/App.test.tsx`
+  - `aidm_server/capabilities.py`
+  - `aidm_server/creatures/resolver.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/render_rc_issue_evidence.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_creatures_combat.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_render_rc_issue_evidence.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+- Existing top report in `improvements_suggestions.md`, especially the 2026-06-27 06:02 MDT resolver numeric-coercion entry and its suggested follow-up around adjacent creature numeric parsing.
+- Campaign-pack bestiary generation:
+  - `aidm_server/creatures/campaign_pack.py`
+  - `generate_campaign_pack_bestiary`
+  - `DEFAULT_PACK_ROLES`
+  - existing campaign-pack creature/evolution tests in `tests/test_creatures_combat.py`
+- Adjacent creature endpoint numeric coercion hotspots, without widening this run into endpoint behavior changes:
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/creatures/generator.py`
+  - `aidm_server/creatures/resolver.py`
+- Standard recurring audit guardrails:
+  - `scripts/scan_secrets.py`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/check_observability_bundle.py`
+  - `scripts/generate_api_types.py --check`
+  - `git diff --check`
+- Release checklist status:
+  - `make release-checklist-status`
+  - `tmp/release/release-checklist-status.md`
+  - `tmp/release/release-checklist-status.json`
+
+## Small Safe Fix Made
+
+### Harden campaign-pack bestiary numeric hints
+
+Affected files:
+- `aidm_server/creatures/campaign_pack.py`
+- `tests/test_creatures_combat.py`
+- `improvements_suggestions.md`
+
+Problem:
+`generate_campaign_pack_bestiary` used direct `int(...)` conversions for optional `count`, `partyLevel`, and `partySize` hints. A malformed request body such as `{"count": "bogus"}` could raise `ValueError` before the generator reached its intended defaults. This was the same class of numeric-boundary issue found in the previous resolver-focused audit, but in a smaller campaign-pack helper surface.
+
+Change:
+- Added local `_bounded_int` and `_minimum_int` helpers in `aidm_server/creatures/campaign_pack.py`.
+- Preserved the existing count behavior: default `8`, minimum `3`, maximum `18`.
+- Preserved the existing party behavior: `partyLevel` defaults to `2`, `partySize` defaults to `4`, and both keep their existing minimum of `1` without adding a new upper cap.
+- Reused the coerced party values inside the generation loop instead of reparsing them for every creature.
+- Added `test_campaign_pack_generation_defaults_malformed_numeric_hints` to prove malformed numeric hints fall back and still generate the default eight campaign-pack creatures.
+- Did not change saved bestiary behavior, campaign import behavior, resolver routing, auth/capability gates, prompt templates, frontend UI, database state, or release policy.
+
+Rationale:
+This is a low-blast-radius correctness and maintainability fix at a deterministic helper boundary. It prevents malformed optional authoring hints from crashing campaign-pack bestiary generation, keeps the existing bounds intact, and avoids widening this audit into multiple route contracts.
+
+## Verification
+
+- `./.venv/bin/python -m py_compile aidm_server/creatures/campaign_pack.py`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_creatures_combat.py -k "campaign_pack_generation" -q`
+  - Passed: 2 tests, 70 deselected.
+- `./.venv/bin/python -m pytest tests/test_creatures_combat.py -q`
+  - Passed: 72 tests.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/check_observability_bundle.py`
+  - Passed.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `make release-checklist-status`
+  - Passed and wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` generated `tmp/release/release-checklist-status.md` at `2026-06-27T22:05:31+00:00`.
+- Summary remains 104 passed, 2 external-required, 0 manual-review, 0 failed, and 0 unmapped.
+- Evidence packet status remains `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The source-local checks and evidence renderers continue to pass, but final release closure still depends on hosted/staging proof. Local tests cannot prove provider-specific backup/restore completion or real external telemetry receipt.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted database backup/restore evidence and hosted telemetry receipt evidence in the release venue.
+
+### Medium-High: Creature numeric coercion remains inconsistent outside this helper
+
+Current evidence:
+- The previous run hardened `normalize_creature_request` for malformed `partyLevel` and `partySize`.
+- This run hardened campaign-pack bestiary generation for malformed `count`, `partyLevel`, and `partySize`.
+- Static inspection still shows direct `int(...)` conversions in adjacent creature generation/endpoint paths, especially:
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/creatures/generator.py`
+  - a few resolver internals where IDs and scene danger are converted after normalization.
+
+Risk:
+Some of those conversions are protected by route converters, caller assumptions, or generated data shape, but the behavior is not uniform. Malformed optional numeric hints can still become exceptions in paths that should probably return validation errors or fall back to safe defaults.
+
+Recommended next step:
+- In a separate pass, centralize creature numeric coercion across variant/evolve/analyze/generator routes with endpoint-level regression tests. Keep it separate from this campaign-pack helper fix to avoid mixing multiple contracts in one audit.
+
+### Medium-High: The recurring audit bundle is broad enough to slow review
+
+Current evidence:
+- `git status --short` now includes 17 modified files across frontend tests, auth/capabilities, creature resolver/generator helpers, request parsing guardrails, cleanup/evidence tooling, source-archive checks, secret scanning, and report updates.
+- This run added only `aidm_server/creatures/campaign_pack.py` plus one focused test in `tests/test_creatures_combat.py`, while preserving the existing dirty bundle.
+
+Risk:
+The individual fixes are still small and verified, but the accumulated diff is now a multi-topic review. That raises the chance of delaying or confusing review even when each patch is safe on its own.
+
+Recommended next step:
+- Split or commit the accumulated recurring-audit bundle by concern before another source-level audit change: security scanner, request parsing guard, cleanup/evidence tooling, source archive evidence, auth/capability hardening, creature numeric coercion, frontend regression/visual-smoke, and reports.
+
+### Medium: Rendered UX evidence was not recaptured
+
+Current evidence:
+- This run did not launch the app or capture screenshots.
+- The source change was backend campaign-pack helper logic, so visual-smoke would not directly prove the fix.
+
+Risk:
+Static frontend scans and backend tests are not a substitute for rendered UX evidence when frontend code changes are being reviewed.
+
+Recommended next step:
+
+```bash
+PLAYWRIGHT_CHROMIUM_CHANNEL=chrome make visual-smoke
+make visual-smoke-review
+```
+
+Run this after frontend runtime/UI changes or before release evidence refresh, not because of this backend helper-only patch.
+
+## Larger Suggested Improvements
+
+- Create a shared creature numeric normalization helper for party level, party size, enemy count, generated pack count, and danger level so resolver, generator, variant, evolution, balance, and campaign-pack paths stop each defining subtly different integer behavior.
+- Add focused endpoint regressions for malformed numeric hints on `/api/creatures/variant`, `/api/creatures/evolve`, `/api/creatures/analyze-balance`, and manual `/api/sessions/<id>/combat/start`.
+- Add a small `make audit-guardrails` target that wraps the cheap recurring checks used here: secret scan, request JSON guard, state snapshot writer guard, observability bundle check, API type drift check, creature/combat focused tests, and release checklist status.
+- Regenerate packaging/source-archive evidence after the current dirty bundle is split or committed; source archive evidence is less useful while it predates many uncommitted source changes.
+- Keep the two external-required release checklist rows visible until hosted database backup/restore proof and real external telemetry receipt evidence are attached.
+
+## Recommended Next Run Focus
+
+1. Prefer review/split/commit of the accumulated audit bundle before adding another source fix.
+2. If another code fix is still needed, make it the endpoint-level creature numeric coercion follow-up with tight tests.
+3. If release is near, refresh source archive and packaging evidence after the dirty bundle is resolved.
+4. Close the two external-required release checklist rows with hosted/staging evidence when those environments are available.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-27 06:02 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe recurring audit across backend correctness, creature/combat helpers, frontend accessibility/static hygiene, security guardrails, release evidence, developer workflow checks, and the already-dirty recurring-audit bundle. Existing uncommitted auth/capability, request-JSON, cleanup/evidence, visual-smoke, scanner, source-archive, frontend regression, test, and report edits were preserved. This run made one small backend robustness fix, refreshed the release checklist status, prepended this report, and updated the fallback automation memory file.
+
+## What Was Inspected
+
+- Physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Automation memory at `$CODEX_HOME/automations/daily-aidm-codebase-improvement-audit/memory.md`; `CODEX_HOME` is unset in this shell, so the standard fallback `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md` was read.
+- Prior recurring-audit context from local Codex memory: preserve dirty work, choose a narrow safe fix, verify it with focused checks, and keep release blockers prominent.
+- Current dirty-tree boundary with `git status --short`; existing uncommitted files were treated as boundary state and not reverted:
+  - `aidm_frontend/scripts/visual-smoke.cjs`
+  - `aidm_frontend/src/App.test.tsx`
+  - `aidm_server/capabilities.py`
+  - `aidm_server/creatures/resolver.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/render_rc_issue_evidence.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_creatures_combat.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_render_rc_issue_evidence.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+- Existing top report in `improvements_suggestions.md`, especially the 2026-06-26 16:04 MDT source-archive link-target hardening entry and its carry-forward release findings.
+- Backend request parsing and integer coercion hotspots:
+  - `aidm_server/validation.py`
+  - `aidm_server/blueprints/creatures.py`
+  - `aidm_server/creatures/resolver.py`
+  - `aidm_server/creatures/campaign_pack.py`
+  - `aidm_server/blueprints/sessions.py`
+  - `aidm_server/blueprints/maps.py`
+  - `aidm_server/blueprints/segments.py`
+- Creature/combat tests around resolver behavior and request normalization:
+  - `tests/test_creatures_combat.py`
+- Static frontend UX/accessibility hygiene by scanning `aidm_frontend/src` and `aidm_frontend/scripts` for obvious `href="#"`, `target="_blank"`, `debugger`, and console logging issues. No app-source issue was found that justified widening this run.
+- Security and developer workflow guardrails:
+  - `scripts/scan_secrets.py`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/check_observability_bundle.py`
+  - `scripts/generate_api_types.py --check`
+  - `git diff --check`
+- Release checklist status:
+  - `make release-checklist-status`
+  - `tmp/release/release-checklist-status.md`
+  - `tmp/release/release-checklist-status.json`
+
+## Small Safe Fix Made
+
+### Harden creature request party-level and party-size normalization
+
+Affected files:
+- `aidm_server/creatures/resolver.py`
+- `tests/test_creatures_combat.py`
+- `improvements_suggestions.md`
+
+Problem:
+`normalize_creature_request` already normalized booleans and bounded `enemyCount`, but it still used raw `int(...)` conversions for `partyLevel` and `partySize`. A malformed caller value such as `"bogus"` could raise `ValueError` before the resolver reached its intended defaults. This was inconsistent with the nearby safe integer handling and could turn a bad optional creature-resolution hint into a 500-style failure in resolver-backed flows.
+
+Change:
+- Added a tiny `_minimum_int` helper in `aidm_server/creatures/resolver.py`.
+- Switched `partyLevel` and `partySize` normalization to that helper, preserving the existing lower-bound behavior while defaulting malformed values to `1` and `4`.
+- Extended the existing `test_creature_request_normalizes_string_booleans_and_enemy_count_bounds` regression to cover malformed `partyLevel` and low `partySize`.
+- Did not change generation prompts, bestiary matching thresholds, save policy, database state, auth behavior, frontend UI, Socket.IO behavior, or release policy.
+
+Rationale:
+This is a low-blast-radius correctness fix at the request-normalization boundary. It makes resolver behavior consistent with the existing `enemyCount` guard, avoids one class of avoidable runtime exception, and is easy to verify with the existing creature/combat test module.
+
+## Verification
+
+- `./.venv/bin/python -m py_compile aidm_server/creatures/resolver.py`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_creatures_combat.py -k "creature_request_normalizes" -q`
+  - Passed: 1 test, 70 deselected.
+- `./.venv/bin/python -m pytest tests/test_creatures_combat.py -q`
+  - Passed: 71 tests.
+- `./.venv/bin/python -m pytest tests/test_render_rc_issue_evidence.py tests/test_render_packaging_cleanup_evidence.py tests/test_request_json_parsing_guard.py tests/test_secret_scan.py -q`
+  - Passed: 32 tests.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/check_observability_bundle.py`
+  - Passed.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `make release-checklist-status`
+  - Passed and wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` reports 104 passed, 2 external-required, 0 manual-review, 0 failed, and 0 unmapped.
+- Evidence packet status remains `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The local code and evidence guardrails are in good shape, but final release closure still depends on hosted/staging proof. Local tests cannot prove provider-specific hosted backup/restore or real external telemetry receipt.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted database backup/restore evidence and hosted telemetry receipt evidence in the release venue.
+
+### Medium-High: Creature numeric coercion still has follow-up cleanup outside this resolver path
+
+Current evidence:
+- This run fixed `partyLevel` and `partySize` inside `normalize_creature_request`.
+- Static inspection still found raw `int(...)` conversions in adjacent creature endpoints and helpers, including:
+  - `aidm_server/blueprints/creatures.py` for variant, evolve, analyze-balance, and manual combat-start values.
+  - `aidm_server/creatures/campaign_pack.py` for campaign-pack count, party level, and party size.
+  - `aidm_server/creatures/resolver.py` for direct `campaignId` and `sessionId` conversion after normalization.
+
+Risk:
+Not all of those are equally user-facing, and some may be protected by route or caller assumptions. They are still worth normalizing through shared validation helpers so malformed optional numeric hints degrade to validation errors or defaults instead of exceptions.
+
+Recommended next step:
+- In a separate small pass, add or reuse one creature numeric coercion helper and cover the affected endpoint contracts with focused tests. Keep that separate from today's resolver-only fix to avoid widening review scope.
+
+### Medium-High: The recurring audit bundle is still accumulating review scope
+
+Current evidence:
+- `git status --short` now includes a broad multi-area recurring-audit bundle across auth/capabilities, request JSON parsing, cleanup/evidence tooling, source-archive inspection, secret scanning, creature resolver normalization, frontend tests, visual-smoke tooling, and reports.
+- This run added only `aidm_server/creatures/resolver.py` and `tests/test_creatures_combat.py` as source/test changes, plus this report entry.
+
+Risk:
+Each individual change remains bounded and verified, but the combined diff is increasingly hard to review as one unit. Accumulated small fixes can become operationally risky if they are not split or committed by concern.
+
+Recommended next step:
+- Review and split or commit the accumulated hardening bundle before adding another source change in the next recurring audit.
+
+### Medium: Visual-smoke evidence was not recaptured
+
+Current evidence:
+- This run performed static frontend/UX hygiene scans but did not launch the app or capture fresh screenshots.
+- The code change was backend resolver-only, so recapturing visual smoke would have added runtime churn without directly proving the fix.
+
+Risk:
+The frontend scan did not find an obvious safe edit, but it is not a rendered UX proof for future UI changes.
+
+Recommended next step:
+
+```bash
+PLAYWRIGHT_CHROMIUM_CHANNEL=chrome make visual-smoke
+make visual-smoke-review
+```
+
+Run that after frontend runtime/UI changes, not for this resolver-only backend fix.
+
+## Larger Suggested Improvements
+
+- Centralize creature numeric coercion for party level, party size, enemy count, and generated-pack counts so resolver, variant, evolution, balance, and combat-start paths share the same malformed-input behavior.
+- Add a small `make audit-guardrails` target that wraps the recurring cheap checks used here: scanner, request JSON guard, state writer guard, observability check, API type check, focused release-tooling tests, and release checklist status.
+- Keep the release checklist's two external-required rows explicit until hosted database backup/restore and telemetry receipt evidence are attached.
+- Add a freshness warning to packaging cleanup evidence when the newest source archive predates the current working-tree changes. This remains useful because the latest source archive evidence can otherwise look stronger than it is for a dirty tree.
+- Split the current dirty bundle by concern before review: auth/capabilities, scanner/security, request parsing guard, cleanup/evidence tooling, source-archive evidence, creature resolver robustness, frontend regression coverage, visual-smoke workflow, and report updates.
+
+## Recommended Next Run Focus
+
+1. If publishing is near, regenerate the source archive and rerun packaging cleanup evidence so the archive matches the current source tree.
+2. If staying local-only, continue with small deterministic backend guardrails, especially the remaining creature numeric coercion follow-up.
+3. Close the two external-required release checklist rows with hosted/staging database backup proof and telemetry receipt proof when those environments are available.
+4. Split or commit the accumulated recurring-audit bundle before adding another source change.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-26 16:04 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe recurring audit across release packaging evidence, source-archive safety checks, security guardrails, frontend evidence review, static backend guardrails, and the already-dirty recurring-audit bundle. Existing uncommitted auth/capability, request-JSON, cleanup/evidence, visual-smoke, scanner, frontend regression, test, and report edits were preserved. This run made one small release-tooling hardening fix, refreshed non-destructive release evidence outputs, prepended this report, and recreated the missing fallback automation memory file.
+
+## What Was Inspected
+
+- Physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Automation memory at `$CODEX_HOME/automations/daily-aidm-codebase-improvement-audit/memory.md`; the shell did not expose an existing file, so the standard fallback `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md` was recreated before closeout.
+- Prior recurring-audit context from Codex memory and the local `aidm-daily-audit` workflow notes: preserve unrelated dirty work, choose one narrow safe fix, run focused verification, and keep release blockers prominent.
+- Existing top report in `improvements_suggestions.md`, especially the 2026-06-26 06:04 MDT scanner hardening entry and its carry-forward release checklist findings.
+- Dirty-tree boundary with `git status --short`; existing uncommitted files were treated as boundary state and not reverted:
+  - `aidm_frontend/scripts/visual-smoke.cjs`
+  - `aidm_frontend/src/App.test.tsx`
+  - `aidm_server/capabilities.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+- Release and packaging evidence helpers:
+  - `scripts/render_rc_issue_evidence.py`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/create_source_archive.sh`
+  - `tests/test_render_rc_issue_evidence.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_render_release_evidence_packet.py`
+  - `tests/test_render_release_checklist_status.py`
+- Standard guardrails:
+  - `scripts/scan_secrets.py`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/check_observability_bundle.py`
+  - `scripts/generate_api_types.py --check`
+  - `git diff --check`
+- Generated local evidence:
+  - `make packaging-cleanup-evidence`
+  - `make release-checklist-status`
+  - `make visual-smoke-review`
+
+## Small Safe Fix Made
+
+### Flag forbidden symlink and hard-link targets in source archives
+
+Affected files:
+- `scripts/render_rc_issue_evidence.py`
+- `tests/test_render_rc_issue_evidence.py`
+- `improvements_suggestions.md`
+
+Problem:
+The source-archive inspector checked tar member paths for forbidden generated/runtime artifacts such as `tmp`, `.env.local`, SQLite databases, logs, build outputs, and dependency folders. It did not inspect tar symlink or hard-link targets. A source archive could therefore contain a harmless-looking member name that pointed at an excluded path or file type, and the release evidence would still report the archive as clean.
+
+Change:
+- Added `_link_target_is_forbidden` to reject empty link targets, absolute link targets, parent-directory traversal, forbidden path parts/pairs, and forbidden suffixes.
+- Taught `inspect_source_archive` to append `member -> target` findings for unsafe symlink or hard-link targets.
+- Added a focused regression test using a synthetic tarball with `AIDM-main/docs/current-database -> ../tmp/dnd_ai_dm.db`.
+- Did not change app runtime behavior, database state, auth behavior, frontend UI, gameplay logic, provider calls, Socket.IO behavior, or release checklist policy.
+
+Rationale:
+This is a narrow packaging/evidence hardening change with low blast radius. It strengthens an existing release proof path and catches a class of archive hygiene issue that path-name checks alone miss.
+
+## Verification
+
+- `./.venv/bin/python -m py_compile scripts/render_rc_issue_evidence.py`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_render_rc_issue_evidence.py -q`
+  - Passed: 13 tests.
+- `./.venv/bin/python -m pytest tests/test_render_rc_issue_evidence.py tests/test_render_packaging_cleanup_evidence.py tests/test_render_release_evidence_packet.py tests/test_render_release_checklist_status.py -q`
+  - Passed: 57 tests.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/check_observability_bundle.py`
+  - Passed.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `make packaging-cleanup-evidence`
+  - Passed and wrote `tmp/release/packaging-cleanup-evidence.md` and `.json`.
+  - The latest existing source archive inspected was `tmp/release/aidm-source-20260619-220029.tar.gz`: status passed, forbidden paths 0, large files 1, large files not LFS-tracked 0.
+- `make release-checklist-status`
+  - Passed and wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+- `make visual-smoke-review`
+  - Passed against the latest existing screenshot set at `tmp/verification_artifacts/visual-smoke/2026-06-25T22-04-03-222Z`.
+  - `tmp/release/visual-smoke-review.md` reports screenshots 3/3, failures none:
+    - `desktop-shell.png`: 1440x900, 392853 bytes, 512+ unique colors, different-pixel ratio 0.9596.
+    - `short-height-composer.png`: 1280x620, 283368 bytes, 512+ unique colors, different-pixel ratio 0.9724.
+    - `mobile-full.png`: 390x844, 133162 bytes, 512+ unique colors, different-pixel ratio 0.9242.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` reports 104 passed, 2 external-required, 0 failed, and evidence packet status `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The local source tree and generated local evidence are strong, but final release closure still depends on hosted/staging proof. Local checks cannot prove provider-specific hosted backup/restore or real telemetry receipt by the configured external endpoint.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted database backup/restore evidence and hosted telemetry receipt evidence in the release venue.
+
+### Medium-High: Source archive evidence is clean but not freshly regenerated for this dirty tree
+
+Current evidence:
+- `make packaging-cleanup-evidence` passed, but it inspected the latest existing archive: `tmp/release/aidm-source-20260619-220029.tar.gz`.
+- This audit intentionally did not create another large source archive; it only hardened the inspector and rechecked the latest available archive.
+
+Risk:
+The archive hygiene policy now catches unsafe link targets, and the latest archive passes that policy. However, that archive predates the current dirty audit bundle, so it should not be treated as the publishable artifact for today's source tree.
+
+Recommended next step:
+
+```bash
+make source-archive
+make packaging-cleanup-evidence
+```
+
+Run those only when you are ready to publish or refresh release handoff artifacts, because they create another large archive under `tmp/release/`.
+
+### Medium-High: The recurring audit bundle is still accumulating review scope
+
+Current evidence:
+- `git status --short` now includes a multi-area uncommitted audit bundle across auth/capabilities, request JSON parsing, cleanup/evidence tooling, secret scanning, source-archive evidence, frontend tests, visual-smoke tooling, and reports.
+- This run added only `scripts/render_rc_issue_evidence.py` and `tests/test_render_rc_issue_evidence.py` as source/test changes, but it landed on top of an already broad dirty bundle.
+
+Risk:
+Each individual change remains bounded and verified, but the combined diff is increasingly hard to review as one unit. Accumulated small fixes can still become operationally risky if they are not split or committed by concern.
+
+Recommended next step:
+- Review and split or commit the accumulated hardening bundle before adding more source changes in the next recurring audit.
+
+### Medium: Visual-smoke screenshots were reviewed, not recaptured
+
+Current evidence:
+- `make visual-smoke-review` passed against the latest existing screenshot set from 2026-06-25.
+- This run did not launch the app or capture fresh screenshots because the code change was release-tooling only.
+
+Risk:
+The review artifact confirms the latest screenshot set is structurally valid, colorful, and nonblank. It does not prove today's unrelated future frontend edits render correctly in a live browser.
+
+Recommended next step:
+
+```bash
+PLAYWRIGHT_CHROMIUM_CHANNEL=chrome make visual-smoke
+make visual-smoke-review
+```
+
+Run that after frontend runtime/UI changes, not for packaging-only helper changes.
+
+## Larger Suggested Improvements
+
+- Add source-archive link-target checks to any future standalone packaging linter if the archive policy is split out of `render_rc_issue_evidence.py`.
+- Add a small `make audit-guardrails` target that wraps the recurring local checks used here: scanner, request JSON guard, state writer guard, observability check, API type check, relevant evidence-helper tests, release checklist status, and visual-smoke review.
+- Keep the release checklist's two external-required rows explicit until hosted database backup/restore and telemetry receipt evidence are attached.
+- Add a freshness note to packaging cleanup evidence when the latest source archive predates the current working-tree changes. That would make stale archive evidence harder to overread during release handoff.
+- Split the current dirty bundle by concern before review: auth/capabilities, scanner/security, request parsing guard, cleanup/evidence tooling, source-archive evidence, frontend regression coverage, visual-smoke workflow, and report updates.
+
+## Recommended Next Run Focus
+
+1. If publishing is near, regenerate the source archive and rerun packaging cleanup evidence so the archive matches the current source tree.
+2. If staying local-only, keep focusing on small deterministic guardrails and avoid broad runtime behavior changes.
+3. Close the two external-required release checklist rows with hosted/staging database backup proof and telemetry receipt proof when those environments are available.
+4. Split or commit the accumulated recurring-audit bundle before the next source change.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-26 06:04 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe recurring audit across security guardrails, developer workflow, release evidence, frontend static health, observability tooling, and the already-dirty recurring-audit bundle. Existing uncommitted auth/capability, request-JSON, cleanup/evidence, visual-smoke, frontend regression, test, and report edits were preserved. This run made one small security-tooling fix, refreshed the release checklist and visual-smoke review evidence, prepended this report, and updated the fallback automation memory file.
+
+## What Was Inspected
+
+- Physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Automation memory: the shell did not expose `CODEX_HOME`, so the standard fallback `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md` was used and updated before closeout.
+- Prior recurring-audit context from Codex memory, especially the 2026-06-25 visual-smoke Chrome fallback and the standing instruction to keep fixes tiny and release blockers prominent.
+- Dirty-tree boundary with `git status --short`; existing uncommitted files were treated as boundary state and not reverted:
+  - `aidm_frontend/scripts/visual-smoke.cjs`
+  - `aidm_frontend/src/App.test.tsx`
+  - `aidm_server/capabilities.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+- Existing top report in `improvements_suggestions.md`, including the carry-forward external-required release checklist rows and prior visual-smoke artifact path.
+- Security and guardrail tooling:
+  - `scripts/scan_secrets.py`
+  - `tests/test_secret_scan.py`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/check_observability_bundle.py`
+  - `scripts/generate_api_types.py`
+- Release evidence:
+  - `make release-checklist-status`
+  - `make visual-smoke-review`
+  - `tmp/release/release-checklist-status.md`
+  - `tmp/release/visual-smoke-review.md`
+- Frontend static health:
+  - `npm --prefix aidm_frontend run lint`
+  - `npm --prefix aidm_frontend run typecheck`
+  - `npm --prefix aidm_frontend audit --omit=dev`
+- Static source scans for direct request JSON parsing, secret/token patterns, generated-artifact cleanup, subprocess usage, accessibility markers, local/session storage use, and TODO/FIXME-style comments.
+
+## Small Safe Fix Made
+
+### Detect GitHub fine-grained personal access tokens in the repo secret scanner
+
+Affected files:
+- `scripts/scan_secrets.py`
+- `tests/test_secret_scan.py`
+- `improvements_suggestions.md`
+
+Problem:
+The repo secret scanner already covered classic GitHub token prefixes such as `ghp_`, `gho_`, `ghu_`, `ghs_`, and `ghr_`, but it did not cover modern fine-grained GitHub personal access tokens using the `github_pat_` prefix. That left a practical blind spot in a security guardrail that is run locally and in CI.
+
+Change:
+- Added a `GitHub fine-grained token` pattern for `github_pat_...` values.
+- Added a focused regression test proving such tokens are detected and redacted from scanner snippets.
+- Did not change application runtime behavior, auth semantics, database state, frontend UI, gameplay logic, provider calls, Socket.IO behavior, or release checklist policy.
+
+Rationale:
+This is a narrow security-tooling improvement with low blast radius. It strengthens a repeatedly used guardrail without changing production code paths. Redaction coverage matters because scanner output may be copied into reports, CI logs, or review threads.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_secret_scan.py -q`
+  - Passed: 9 tests.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python -m pytest tests/test_auth.py tests/test_secret_scan.py tests/test_request_json_parsing_guard.py tests/test_render_packaging_cleanup_evidence.py tests/test_visual_smoke_review.py tests/test_check_observability_bundle.py -q`
+  - Passed: 51 tests.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `./.venv/bin/python scripts/check_observability_bundle.py`
+  - Passed.
+- `make release-checklist-status`
+  - Passed and wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+- `git diff --check`
+  - Passed.
+- `npm --prefix aidm_frontend run lint`
+  - Passed.
+- `npm --prefix aidm_frontend run typecheck`
+  - Passed.
+- `npm --prefix aidm_frontend audit --omit=dev`
+  - Passed: 0 vulnerabilities.
+- `make visual-smoke-review`
+  - Passed against the latest existing screenshot set at `tmp/verification_artifacts/visual-smoke/2026-06-25T22-04-03-222Z`.
+  - `tmp/release/visual-smoke-review.md` reports screenshots 3/3, failures none:
+    - `desktop-shell.png`: 1440x900, 392853 bytes, 512+ unique colors, different-pixel ratio 0.9596.
+    - `short-height-composer.png`: 1280x620, 283368 bytes, 512+ unique colors, different-pixel ratio 0.9724.
+    - `mobile-full.png`: 390x844, 133162 bytes, 512+ unique colors, different-pixel ratio 0.9242.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` reports 104 passed, 2 external-required, 0 failed, and evidence packet status `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The local source tree and generated evidence are passing, but final release closure still depends on hosted/staging proof. Local tests cannot prove a provider-specific database backup/restore path or real telemetry receipt by the configured external endpoint.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted database backup/restore evidence and hosted telemetry receipt evidence in the release venue.
+
+### Medium-High: The recurring audit bundle is still accumulating review scope
+
+Current evidence:
+- `git status --short` still includes a multi-area uncommitted audit bundle across auth/capabilities, request JSON parsing, cleanup/evidence tooling, secret scanning, frontend tests, visual-smoke tooling, and reports.
+- This run added only the fine-grained GitHub token scanner coverage, but it necessarily landed in an already-dirty scanner/test pair.
+
+Risk:
+Each individual change remains bounded and verified, but the combined diff is becoming harder to review as one unit. Accumulated safe changes can still create operational drag if they wait too long before being split, reviewed, or committed.
+
+Recommended next step:
+- Review and commit or split the accumulated hardening bundle before adding additional source changes in the next recurring audit.
+
+### Medium: Visual-smoke screenshots were reviewed, not recaptured
+
+Current evidence:
+- `make visual-smoke-review` passed against the latest existing screenshot set from 2026-06-25.
+- This run did not launch the app or capture fresh screenshots because the only source change was scanner-only.
+
+Risk:
+The review artifact confirms the latest screenshot set is structurally valid, colorful, and nonblank. It does not prove that today's source tree renders identically in a live browser after unrelated future frontend edits.
+
+Recommended next step:
+- Recapture screenshots when frontend runtime/UI code changes, using the known local fallback:
+
+```bash
+PLAYWRIGHT_CHROMIUM_CHANNEL=chrome make visual-smoke
+make visual-smoke-review
+```
+
+## Larger Suggested Improvements
+
+- Add fine-grained scanner patterns for other token families only when the project actually uses those ecosystems, to avoid noisy overmatching.
+- Add a small `make audit-guardrails` target that wraps the checks repeatedly used by this automation: scanner, request JSON guard, state writer guard, API type check, observability bundle check, frontend lint/typecheck, release checklist status, and visual-smoke review.
+- Keep the release checklist's two external-required rows as explicit release-administration blockers until hosted database and telemetry evidence is attached.
+- Consider a CI step for `scripts/check_request_json_parsing.py` and `scripts/check_state_snapshot_writers.py` if CI time remains acceptable; these are cheap, deterministic guardrails that catch source drift.
+- Split the current dirty bundle by concern before review: auth/capabilities, scanner/security, request parsing guard, cleanup/evidence tooling, frontend regression coverage, visual-smoke workflow, and report updates.
+
+## Recommended Next Run Focus
+
+1. If credentials and hosted environment access are available, close the two external-required release checklist rows with real backup/restore and telemetry receipt proof.
+2. If staying local-only, avoid expanding scanner/request-cleanup scope unless a fresh, concrete defect is found.
+3. Split or commit the accumulated recurring-audit bundle before the next source change.
+4. Recapture visual-smoke screenshots only if frontend UI/runtime files changed since the last screenshot set.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-25 16:07 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe follow-up audit across developer workflow, frontend rendered UX evidence, release evidence status, security guardrails, and the already-dirty recurring-audit bundle. Existing uncommitted auth, request-JSON, cleanup/evidence, scanner, frontend modal regression, tests, and report edits were preserved. This run made one small developer-workflow hardening change to the visual smoke script, refreshed visual-smoke browser evidence with installed Chrome, refreshed release checklist status, prepended this dated report, and updated automation memory.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`; the shell still did not expose `CODEX_HOME`, so the standard `/Users/danny/.codex` fallback path was used.
+- Dirty-tree boundary with `git status --short`; existing uncommitted files were treated as boundary state and not reverted:
+  - `aidm_frontend/src/App.test.tsx`
+  - `aidm_server/capabilities.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+- Latest top report in `improvements_suggestions.md`, especially the 2026-06-25 06:05 MDT modal pending-state regression and carry-forward recommendation to refresh browser/visual UX evidence.
+- Frontend smoke and rendered evidence tooling:
+  - `aidm_frontend/scripts/visual-smoke.cjs`
+  - `aidm_frontend/scripts/browser-smoke.cjs`
+  - `aidm_frontend/package.json`
+  - `aidm_frontend/vite.config.ts`
+  - `scripts/review_visual_smoke_artifacts.py`
+  - `Makefile`
+- Release evidence and guardrails:
+  - `make visual-smoke`
+  - `make visual-smoke-review`
+  - `make release-checklist-status`
+  - `scripts/scan_secrets.py`
+  - `git diff --check`
+- Static source scans for smoke targets, Playwright/browser usage, accessibility markers, request JSON parsing, token storage, subprocess usage, dynamic HTML markers, and TODO/FIXME-style comments.
+
+## Small Safe Fix Made
+
+### Harden visual-smoke managed process shutdown
+
+Affected files:
+- `aidm_frontend/scripts/visual-smoke.cjs`
+- `improvements_suggestions.md`
+
+Problem:
+`visual-smoke.cjs` started an isolated backend and Vite frontend as managed child processes, but its shutdown path only sent termination signals and immediately continued. The neighboring `browser-smoke.cjs` script already waits for managed children to exit and escalates with `SIGKILL` after a grace period. The visual-smoke behavior was not a runtime app bug, but it left a developer-workflow gap: failed or interrupted visual smoke runs had weaker protection against leftover backend/frontend processes.
+
+Change:
+- Added `AIDM_VISUAL_SMOKE_SHUTDOWN_GRACE_MS`, defaulting to 2000 ms.
+- Let `stopManaged` accept a configurable signal.
+- Added `waitForChildExit` and `stopAllManaged`, matching the established browser-smoke pattern.
+- Updated normal and error shutdown paths to await graceful exit, then escalate remaining managed children to `SIGKILL`.
+- Did not change backend runtime behavior, database state, frontend production UI, gameplay logic, auth behavior, Socket.IO behavior, or release checklist rules.
+
+Rationale:
+This is a small developer-workflow and verification reliability fix. It keeps visual-smoke runs better contained when Playwright launch, browser interaction, backend startup, or screenshot capture fails. That matters because the recurring audit now uses visual smoke as release evidence and should not leave local processes behind.
+
+## Verification
+
+- `node --check aidm_frontend/scripts/visual-smoke.cjs`
+  - Passed.
+- `make visual-smoke`
+  - First attempt failed at browser launch because Playwright's bundled Chromium executable was not present in `/Users/danny/Library/Caches/ms-playwright/...`.
+  - Verified the failed run cleaned up managed backend/frontend processes and its temporary visual-smoke directory.
+- `PLAYWRIGHT_CHROMIUM_CHANNEL=chrome make visual-smoke`
+  - Passed using installed Google Chrome.
+  - Wrote 3 screenshots under `tmp/verification_artifacts/visual-smoke/2026-06-25T22-04-03-222Z`.
+- `make visual-smoke-review`
+  - Passed.
+  - `tmp/release/visual-smoke-review.md` reports screenshots 3/3, failures none:
+    - `desktop-shell.png`: 1440x900, 392853 bytes, 512+ unique colors, different-pixel ratio 0.9596.
+    - `short-height-composer.png`: 1280x620, 283368 bytes, 512+ unique colors, different-pixel ratio 0.9724.
+    - `mobile-full.png`: 390x844, 133162 bytes, 512+ unique colors, different-pixel ratio 0.9242.
+- `npm --prefix aidm_frontend run lint`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `make release-checklist-status`
+  - Passed and wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+- `git diff --check`
+  - Passed before this report prepend.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` reports 104 passed, 2 external-required, 0 failed, and evidence packet status `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The local source tree and generated release evidence are passing, and this run refreshed rendered visual evidence. Final release closure still depends on target-specific hosted/staging proof. Local tests cannot substitute for provider-specific database backup/restore evidence or proof that the configured external telemetry endpoint receives events.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted database backup/restore evidence and hosted telemetry receipt evidence in the release venue.
+
+### Medium: Playwright bundled Chromium is missing locally
+
+Current evidence:
+- Plain `make visual-smoke` failed because Playwright expected a missing cached Chromium executable.
+- `PLAYWRIGHT_CHROMIUM_CHANNEL=chrome make visual-smoke` passed with the installed system Chrome.
+
+Risk:
+Developers or automation runners that do not set `PLAYWRIGHT_CHROMIUM_CHANNEL=chrome` and have not installed Playwright browsers will fail visual smoke before exercising the app. This is not a product runtime issue, but it can make local evidence refreshes feel broken.
+
+Recommended next step:
+- Either install Playwright browsers for this checkout with the normal Playwright install flow, or document/export `PLAYWRIGHT_CHROMIUM_CHANNEL=chrome` for this Mac's local smoke workflow.
+
+### Medium: The recurring audit hardening bundle is still growing
+
+Current evidence:
+- `git status --short` now includes the prior recurring audit bundle plus this run's `aidm_frontend/scripts/visual-smoke.cjs` developer-workflow fix.
+
+Risk:
+The individual changes are bounded and verified, but the review surface is accumulating across unrelated areas: auth/capability behavior, request JSON parsing guardrails, cleanup/evidence tooling, secret scanning, frontend modal regression coverage, visual-smoke process cleanup, tests, and report-only updates.
+
+Recommended next step:
+- Review and commit or split the accumulated hardening bundle before the next recurring audit run adds more scope.
+
+## Larger Suggested Improvements
+
+- Add a documented local smoke prerequisite path: either `npx playwright install chromium` or `PLAYWRIGHT_CHROMIUM_CHANNEL=chrome`, so `make visual-smoke` failures are less surprising on this Mac.
+- Add a small regression test or CI probe for managed-process cleanup in smoke scripts if these scripts become shared release tooling across machines.
+- Add a `make audit-guardrails` target that collects the recurring lightweight checks now used repeatedly: frontend lint, request JSON guard, state writer guard, API type drift check, secret scan, visual-smoke-review, release-checklist-status, and focused pytest bundles.
+- Keep rendered browser evidence separate from source-only correctness checks in reports; it is useful evidence, but still not a replacement for hosted backup/telemetry proof.
+- Split the current dirty bundle by concern before review: auth/capabilities, scanner/security, request parsing guard, cleanup/evidence tooling, frontend tests, smoke workflow, and report updates.
+
+## Recommended Next Run Focus
+
+1. Close the two external-required release checklist rows with hosted database backup/restore and telemetry receipt evidence, if credentials/environment are available.
+2. If staying local-only, add the documented Playwright browser/channel prerequisite so visual smoke is one-command reliable on this Mac.
+3. Avoid adding more scanner/request-cleanup changes unless a fresh defect is found; those areas already have several uncommitted audit changes.
+4. Consider splitting or committing the accumulated recurring-audit bundle before adding another source fix.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-25 06:05 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe source, test, UX/accessibility, release-tooling, and guardrail pass across the already-dirty recurring-audit checkout. Existing uncommitted auth, scanner, request-JSON, cleanup/evidence, test, and report edits were preserved; this run added only a focused frontend regression test for pending destructive-dialog closure behavior, refreshed current release-checklist evidence, prepended this dated report, and updated automation memory.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; existing uncommitted edits were treated as boundary state and not reverted:
+  - `aidm_server/capabilities.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+- Prior recurring-audit memory/context from `/Users/danny/.codex/memories/MEMORY.md`, `/Users/danny/.codex/memories/skills/aidm-daily-audit/SKILL.md`, and the automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`.
+- Latest top report in `improvements_suggestions.md`, especially the 2026-06-24 cleanup/evidence hardening and the two carry-forward external-required release rows.
+- Frontend modal UX/accessibility surfaces:
+  - `aidm_frontend/src/ModalShell.tsx`
+  - `aidm_frontend/src/useModalFocusTrap.ts`
+  - `aidm_frontend/src/App.tsx`
+  - `aidm_frontend/src/App.test.tsx`
+  - `aidm_frontend/src/PlayerDeleteDialog.tsx`
+  - `aidm_frontend/src/PlayerEditDialog.tsx`
+- Frontend TTS/audio lifecycle code in `aidm_frontend/src/useTtsNarration.ts`, especially object URL cleanup and queued-audio failure paths.
+- Existing guardrails and proof paths:
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+- Release status tooling through `make release-checklist-status`.
+- Frontend production dependency audit through `npm --prefix aidm_frontend audit --omit=dev`.
+- Static source scans for direct JSON parsing, secret/token handling, subprocess/error-handling hotspots, dynamic HTML markers, modal roles, focus-trap behavior, and object URL lifecycle markers.
+
+## Small Safe Fix Made
+
+### Add a pending destructive-dialog close regression
+
+Affected files:
+- `aidm_frontend/src/App.test.tsx`
+- `improvements_suggestions.md`
+
+Problem:
+The shared modal shell already disables close buttons/backdrop dismissal for pending player edit/delete operations, and `closeCurrentDialog` already avoids closing pending player dialogs when Escape is pressed. However, the regression suite only proved the normal delete confirmation can close with Escape before a delete request starts. It did not prove the more important pending state: once a destructive delete is in flight, Escape must not dismiss the confirmation and make the user lose sight of the ongoing operation.
+
+Change:
+- Added a focused `App.test.tsx` regression that opens the character delete confirmation, stalls the `/api/players/30` delete request, verifies the dialog enters its pending `Deleting...` state, presses Escape, and asserts the dialog remains open while exactly one delete request is in flight.
+- Resolved the stalled delete request at the end of the test so React state settles cleanly and the dialog closes after the operation completes.
+- Did not change runtime modal, auth, backend, database, Socket.IO, provider, or gameplay behavior.
+
+Rationale:
+This is a narrow UX/accessibility and safety guardrail. It locks down an existing intended behavior around destructive actions without changing production code. The most likely future regression would be an innocent refactor of `useModalFocusTrap`, `closeCurrentDialog`, or pending-dialog state that lets Escape dismiss an in-flight destructive action. The new test catches that without expanding the runtime blast radius.
+
+## Verification
+
+- `npm --prefix aidm_frontend run test:unit -- App.test.tsx`
+  - Passed: 85 tests.
+- `npm --prefix aidm_frontend run typecheck`
+  - Passed.
+- `npm --prefix aidm_frontend run lint`
+  - Passed.
+- `npm --prefix aidm_frontend audit --omit=dev`
+  - Passed: 0 vulnerabilities.
+- `./.venv/bin/python -m pytest tests/test_auth.py tests/test_secret_scan.py tests/test_request_json_parsing_guard.py tests/test_render_packaging_cleanup_evidence.py -q`
+  - Passed: 44 tests.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `make release-checklist-status`
+  - Passed and wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+- `git diff --check`
+  - Passed after this report prepend.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` reports 104 passed, 2 external-required, 0 failed, and evidence packet status `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The local source tree, generated evidence, focused tests, production dependency audit, and guardrail checks are in good shape, but final release closure still depends on hosted/staging proof. This should remain a release-administration blocker until provider-specific backup/restore evidence and real telemetry receipt evidence are attached.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted database backup/restore proof and external telemetry receipt proof in the release venue.
+
+### Medium-High: Rendered browser UX/accessibility proof was not refreshed
+
+Current evidence:
+- This run added and verified a focused modal pending-state regression, plus frontend typecheck and lint.
+- This run did not start the app, capture screenshots, inspect console output, test keyboard-only flows in a real browser, or verify mobile/desktop layout.
+
+Risk:
+Unit tests and static checks are useful guardrails, but they cannot prove real focus behavior in a browser, visual overlap, mobile target sizing, scroll behavior, or rendered accessibility semantics.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+### Medium: The recurring audit hardening bundle is still accumulating uncommitted changes
+
+Current evidence:
+- `git status --short` still shows the prior auth-capability, scanner, request-JSON, cleanup, packaging-evidence, test, and report files modified together, plus this run's `aidm_frontend/src/App.test.tsx` addition.
+
+Risk:
+The changes are bounded and verified, but the review surface is growing. Additional recurring audit runs before review/commit will make it harder to separate auth behavior, security scanner hardening, request parsing guardrails, cleanup tooling, frontend UX regression coverage, and report-only changes.
+
+Recommended next step:
+- Review and commit the accumulated hardening bundle soon, or split it into reviewable auth, scanner, request-guard, cleanup/evidence, frontend-test, and report commits before the next recurring audit.
+
+## Larger Suggested Improvements
+
+- Add a `make audit-guardrails` target that runs request JSON parsing, state snapshot writer inventory, API type drift check, secret scan, frontend `App.test.tsx`, frontend typecheck/lint, packaging cleanup evidence tests, and the focused recurring-audit pytest bundle.
+- Add a small `useModalFocusTrap` unit test harness or component-level test to isolate Escape, Tab wrap, disabled-close, and focus-return behavior outside the large `App.test.tsx` workflow.
+- Refresh rendered browser/visual UX evidence separately so accessibility and layout conclusions are backed by actual screenshots and interaction checks.
+- Keep release-readiness reporting explicit about the difference between local generated evidence completion and hosted/staging external proof.
+- Split runtime auth/capability changes from scanner, request-guard, cleanup/evidence, frontend-test, and report-only changes when committing this dirty tree.
+
+## Recommended Next Run Focus
+
+1. Close or verify the two external-required release checklist rows with hosted database backup/restore and telemetry receipt evidence.
+2. If release evidence is still waiting on external proof, run browser/visual smoke and inspect rendered UX/accessibility behavior.
+3. If staying source-only, prefer a new guardrail outside the repeatedly touched scanner/request-cleanup areas.
+4. Decide whether to commit or split the accumulated audit hardening bundle before another dated report is prepended.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-24 16:04 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe follow-up source/tooling pass across the already-dirty recurring-audit checkout, missing automation memory, latest 2026-06-24 06:03 MDT report, cleanup and packaging evidence workflow, request JSON parsing guard, state snapshot writer inventory, generated API type drift, committed-secret scanner behavior, frontend production dependency audit state, release checklist status, and static security/UX/accessibility risk markers. Existing uncommitted auth, scanner, request-JSON, cleanup, and report edits were preserved; this run only tightened cleanup-script Git metadata preservation, updated packaging cleanup evidence expectations, expanded focused evidence tests, prepended this dated report, and wrote automation memory.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; existing uncommitted edits were treated as boundary state and not reverted:
+  - `aidm_server/capabilities.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+- Prior recurring-audit memory/context from `/Users/danny/.codex/memories/MEMORY.md` and `/Users/danny/.codex/memories/skills/aidm-daily-audit/SKILL.md`.
+- Automation memory path `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`; no file existed at the start of this run.
+- Latest top report in `improvements_suggestions.md`, especially the 06:03 MDT `.DS_Store` cleanup/evidence change and the two release checklist external-required rows.
+- Cleanup and packaging evidence workflow:
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `scripts/render_rc_issue_evidence.py`
+  - `scripts/create_source_archive.sh`
+- Existing guardrails and proof paths:
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+- Frontend production dependency audit through `npm --prefix aidm_frontend audit --omit=dev`.
+- Release checklist status through `make release-checklist-status`.
+- Static source scans for direct JSON parsing, dynamic HTML/code markers, session/local storage token handling, subprocess usage, TODO/FIXME markers, cleanup/archive coverage, and accessibility/focus-trap hotspots.
+
+## Small Safe Fix Made
+
+### Preserve `.git` during bytecode cache cleanup and require evidence coverage
+
+Affected files:
+- `scripts/cleanup_artifacts.sh`
+- `scripts/render_packaging_cleanup_evidence.py`
+- `tests/test_render_packaging_cleanup_evidence.py`
+- `improvements_suggestions.md`
+
+Problem:
+The earlier cleanup script already skipped `.venv` and `aidm_frontend/node_modules` while deleting `__pycache__` directories, and the newer `.DS_Store` cleanup pass also skipped `.git`. The bytecode-cache cleanup pass did not skip `.git`, leaving a small destructive-cleanup safety inconsistency. It was unlikely to matter in normal Git layouts, but cleanup tooling should not traverse Git metadata at all.
+
+Change:
+- Added `$ROOT_DIR/.git` pruning to the `__pycache__` cleanup `find` command.
+- Added `git metadata preserved` to the packaging cleanup evidence checks.
+- Updated packaging cleanup evidence tests so fixture cleanup scripts must include `.git` preservation coverage.
+- Did not run `make clean` or delete any current local artifacts during this audit run.
+
+Rationale:
+This is a narrow developer-workflow and packaging-safety fix. It does not alter backend runtime behavior, auth, gameplay state, provider selection, database state, frontend UI behavior, generated API contracts, or release checklist rules. It only prevents cleanup traversal into Git internals and makes release evidence catch regressions in that preservation policy.
+
+## Verification
+
+- `bash -n scripts/cleanup_artifacts.sh`
+  - Passed.
+- `./.venv/bin/python -m py_compile scripts/render_packaging_cleanup_evidence.py`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_render_packaging_cleanup_evidence.py -q`
+  - Passed: 4 tests.
+- `./.venv/bin/python -m pytest tests/test_auth.py tests/test_secret_scan.py tests/test_request_json_parsing_guard.py tests/test_render_packaging_cleanup_evidence.py -q`
+  - Passed: 44 tests.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `npm --prefix aidm_frontend audit --omit=dev`
+  - Passed: found 0 vulnerabilities.
+- `make release-checklist-status`
+  - Passed and wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+- `git diff --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` reports 104 passed, 2 external-required, 0 failed, and evidence packet status `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The local source tree, generated evidence, dependency audit, and guardrail checks are in good shape, but final release closure still depends on hosted/staging proof. This should remain a release-administration blocker until provider-specific backup/restore evidence and real telemetry receipt evidence are attached.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted backup/restore proof and external telemetry receipt proof in the release venue.
+
+### Medium-High: Rendered frontend UX/accessibility proof was not refreshed
+
+Current evidence:
+- This run checked static focus/accessibility markers and frontend production dependency audit state.
+- This run did not start the app, capture screenshots, test keyboard-only modal flows, inspect console output, or verify mobile/desktop layout.
+
+Risk:
+Static checks cannot prove modal focus order, real screen-reader labels, mobile layout, visual overlap, button target sizing, or interaction quality.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+### Medium: The recurring audit hardening bundle is still accumulating uncommitted changes
+
+Current evidence:
+- `git status --short` still shows the auth-capability, scanner, request-JSON, cleanup, packaging-evidence, test, and report files modified together.
+
+Risk:
+The current changes are bounded and tested, but the review surface is growing. Another audit run before review/commit will make it harder to separate auth behavior, security scanner hardening, cleanup tooling, and report-only changes.
+
+Recommended next step:
+- Review and commit the accumulated hardening bundle soon, or deliberately split it into reviewable auth, scanner, request-guard, cleanup, and report commits before the next recurring audit.
+
+## Larger Suggested Improvements
+
+- Add a `make audit-guardrails` target that runs the request JSON guard, state snapshot writer guard, API type check, secret scanner, packaging cleanup evidence tests, and focused recurring-audit test bundle.
+- Add a non-destructive cleanup dry run that reports `.DS_Store`, `__pycache__`, `tmp`, `.pytest_cache`, `.ruff_cache`, `.vite`, and `dist` candidates without deleting them.
+- Refresh rendered browser/visual UX evidence separately so accessibility and layout conclusions are backed by actual screenshots and interaction checks.
+- Keep release-readiness reporting explicit about the difference between local generated evidence completion and hosted/staging external proof.
+- Split runtime auth/capability changes from scanner, request-guard, cleanup, and report-only changes when committing this dirty tree.
+
+## Recommended Next Run Focus
+
+1. Close or verify the two external-required release checklist rows with hosted backup/restore and telemetry receipt evidence.
+2. If release evidence is still waiting on external proof, run browser/visual smoke and inspect UX/accessibility behavior.
+3. If staying source-only, look for one new guardrail outside the repeatedly touched scanner/request-cleanup areas.
+4. Decide whether to commit the accumulated audit hardening bundle before another dated report is prepended.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-24 06:03 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe source/tooling pass across the already-dirty recurring-audit checkout, automation memory, latest 2026-06-23 reports, cleanup and packaging evidence workflow, request JSON parsing guard, state snapshot writer inventory, generated API type drift, committed-secret scanner behavior, auth-capability changes already present in the worktree, frontend production dependency audit state, release checklist status, and static security/UX/accessibility carry-forward risks. Existing uncommitted edits were preserved; this run only added macOS `.DS_Store` cleanup coverage, updated packaging cleanup evidence expectations, added focused test coverage, prepended this dated report, and updated automation memory.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; existing uncommitted edits were treated as boundary state and not reverted:
+  - `aidm_server/capabilities.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`.
+- Latest top report in `improvements_suggestions.md`, especially the 2026-06-23 16:03 MDT `.env.production` secret-scanner hardening and carry-forward release evidence gaps.
+- Cleanup and packaging evidence workflow:
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `scripts/create_source_archive.sh`
+  - `.gitignore`
+- Ignored Finder metadata currently present in the checkout through `find ... -name .DS_Store`.
+- Existing guardrails and proof paths:
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+- Frontend production dependency audit through `npm --prefix aidm_frontend audit --omit=dev`.
+- Release checklist status through `make release-checklist-status`.
+- Static source scans for JSON parsing bypasses, local/session storage token handling, dynamic HTML markers, subprocess usage, TODO/FIXME markers, cleanup/archive coverage, and secret/key references.
+
+## Small Safe Fix Made
+
+### Include `.DS_Store` in cleanup evidence and cleanup behavior
+
+Affected files:
+- `scripts/cleanup_artifacts.sh`
+- `scripts/render_packaging_cleanup_evidence.py`
+- `tests/test_render_packaging_cleanup_evidence.py`
+- `improvements_suggestions.md`
+
+Problem:
+The repository already ignores `.DS_Store`, the source archive excludes `.DS_Store`, and many ignored `.DS_Store` files are present across the local checkout. However, `scripts/cleanup_artifacts.sh` did not remove these macOS Finder metadata files, and `scripts/render_packaging_cleanup_evidence.py` did not require cleanup coverage for them. That left a small repo-hygiene and packaging-evidence gap: ignored metadata could keep accumulating locally even though packaging policy already treats it as unwanted source handoff material.
+
+Change:
+- Added a pruned `find` pass to `scripts/cleanup_artifacts.sh` that deletes `.DS_Store` files while skipping `.git`, `.venv`, and `aidm_frontend/node_modules`.
+- Added `macOS Finder metadata` to the packaging cleanup evidence needles.
+- Updated focused packaging cleanup evidence tests so passing cleanup evidence now proves `.DS_Store` cleanup coverage.
+- Did not run `make clean` or delete current local artifacts during this audit run.
+
+Rationale:
+This is a narrow developer-workflow and packaging-readiness fix. It does not alter backend runtime behavior, auth, capability checks, gameplay state mutation, provider selection, database state, frontend UI behavior, generated API contracts, or release checklist logic. It only aligns cleanup behavior with existing ignore/archive policy and makes the evidence renderer catch regressions.
+
+## Verification
+
+- `bash -n scripts/cleanup_artifacts.sh`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_render_packaging_cleanup_evidence.py -q`
+  - Passed: 4 tests.
+- `./.venv/bin/python -m py_compile scripts/render_packaging_cleanup_evidence.py`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_auth.py tests/test_secret_scan.py tests/test_request_json_parsing_guard.py tests/test_render_packaging_cleanup_evidence.py -q`
+  - Passed: 44 tests.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `npm --prefix aidm_frontend audit --omit=dev`
+  - Passed: found 0 vulnerabilities.
+- `make release-checklist-status`
+  - Passed and wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+- `git diff --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` reports 104 passed, 2 external-required, 0 failed, and evidence packet status `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The source tree and generated local evidence remain strong, but final release closure still depends on target-specific hosted/staging proof. The release should not be described as administratively closed until hosted database backup/restore evidence and external telemetry receipt proof are attached or reviewed.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted backup/restore proof and external telemetry receipt proof in the release venue.
+
+### Medium-High: Rendered frontend UX/accessibility proof was still not refreshed
+
+Current evidence:
+- This run checked frontend production dependency audit state and static source risk markers.
+- This run did not start the frontend, capture screenshots, run browser flows, inspect keyboard focus, or verify rendered mobile/desktop layout.
+
+Risk:
+Static checks do not prove modal focus traps, screen-reader labels, mobile layout, visual overlap, button sizing, console cleanliness, or real interaction quality.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+### Medium: Accumulated audit/auth hardening edits remain uncommitted
+
+Current evidence:
+- `git status --short` now shows modified files:
+  - `aidm_server/capabilities.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/cleanup_artifacts.sh`
+  - `scripts/render_packaging_cleanup_evidence.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_auth.py`
+  - `tests/test_render_packaging_cleanup_evidence.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+
+Risk:
+The edits are bounded and tested, but recurring audit changes continue stacking in the same worktree. That makes review harder and increases the chance of mixing unrelated auth, scanner, request-guard, cleanup, and report changes in one release/publish step.
+
+Recommended next step:
+- Review and commit the accumulated hardening bundle soon, or deliberately split it into reviewable auth, guardrail, cleanup, and report commits before the next recurring audit.
+
+## Larger Suggested Improvements
+
+- Add a `make audit-guardrails` target that runs the request JSON guard, state snapshot writer guard, API type check, secret scanner, packaging cleanup evidence tests, and focused recurring-audit test bundle.
+- Refresh rendered browser/visual UX evidence in a separate run so accessibility and layout conclusions are backed by actual screenshots and interaction checks.
+- Extend packaging cleanup evidence to record whether ignored metadata files existed before cleanup in a non-destructive dry-run mode.
+- Add a short release-readiness note that distinguishes local generated evidence completion from the two external-required hosted/staging proof attachments.
+- Keep runtime auth/capability changes split from scanner, cleanup, and report-only changes when committing the current dirty tree.
+
+## Recommended Next Run Focus
+
+1. Close or verify the two external-required release checklist rows with hosted backup/restore and telemetry receipt evidence.
+2. If release evidence is still waiting on external proof, run frontend browser/visual smoke and inspect UX/accessibility behavior.
+3. If staying source-only, look for one new guardrail blind spot outside the recently repeated secret-scanner/request-JSON areas.
+4. Decide whether to commit the accumulated audit hardening bundle before another dated report is prepended.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-23 16:03 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe follow-up pass across the already-dirty recurring-audit checkout, prior same-day audit report, missing automation memory file, auth-capability boundary changes already present in the worktree, committed-secret scanner behavior, request JSON parsing guard behavior, state snapshot writer inventory, generated API type drift, frontend production dependency audit state, release checklist status, and static security/UX/accessibility carry-forward risks. The worktree already contained uncommitted changes in `aidm_server/capabilities.py`, `tests/test_auth.py`, `improvements_suggestions.md`, `scripts/check_request_json_parsing.py`, `scripts/scan_secrets.py`, `tests/test_request_json_parsing_guard.py`, and `tests/test_secret_scan.py` at the start of this run. Existing edits were preserved; this run only extended the committed-secret scanner's file-candidate logic for real environment files with environment suffixes, added focused coverage, prepended this dated report, and recreated automation memory.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; existing uncommitted auth-capability and audit-guardrail edits were treated as boundary state and not reverted.
+- Automation memory path `$CODEX_HOME/automations/daily-aidm-codebase-improvement-audit/memory.md`; no prior file was present at the start of this run.
+- Latest same-day top report in `improvements_suggestions.md`, especially the 2026-06-23 06:04 MDT committed-secret scanner expansion for `.pem`/`.key` and private-key blocks.
+- Current auth-capability diff in:
+  - `aidm_server/capabilities.py`
+  - `tests/test_auth.py`
+- Committed-secret scanner implementation and tests:
+  - `scripts/scan_secrets.py`
+  - `tests/test_secret_scan.py`
+- Request JSON parsing guard implementation and tests:
+  - `scripts/check_request_json_parsing.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `aidm_server/validation.py`
+- State snapshot writer inventory guard:
+  - `scripts/check_state_snapshot_writers.py`
+  - `docs/state_snapshot_writer_inventory.md`
+- API contract generation check:
+  - `scripts/generate_api_types.py --check`
+- Frontend production dependency audit state through `npm --prefix aidm_frontend audit --omit=dev`.
+- Release checklist status through `make release-checklist-status`.
+- Static source scans for JSON parsing bypasses, committed secret and token references, `.pem`/`.key`/`.env*` files, frontend browser storage/cookie usage, dynamic code/HTML injection markers, TODO/workaround markers, and capability-gated routes.
+
+## Small Safe Fix Made
+
+### Scan real `.env.*` files with deployment suffixes
+
+Affected files:
+- `scripts/scan_secrets.py`
+- `tests/test_secret_scan.py`
+- `improvements_suggestions.md`
+
+Problem:
+The committed-secret scanner intentionally skips `.env.local`, but its text-candidate decision still depended mostly on `Path.suffix`. A real environment file such as `.env.production` has suffix `.production`, so it could be skipped before pattern inspection even though production/staging env files are exactly where accidentally committed provider tokens, telemetry keys, or operator tokens are high-risk.
+
+Change:
+- Updated `_is_text_candidate` so dot-env files are scanned when their filename starts with `.env`, unless an earlier skip rule excludes the file.
+- Preserved the existing explicit `.env.local` skip.
+- Added `test_secret_scan_scans_real_env_files_with_environment_suffixes` to prove a secret in `.env.production` is detected and redacted.
+
+Rationale:
+This is a narrow security and developer-workflow hardening change. It does not alter runtime auth, provider selection, database state, gameplay state mutation, frontend behavior, generated API contracts, or deployment configuration. It only closes a scanner file-selection blind spot for env files that should not be committed with real secrets.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_secret_scan.py -q`
+  - Passed: 8 tests.
+- `./.venv/bin/python -m py_compile scripts/scan_secrets.py tests/test_secret_scan.py`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python -m pytest tests/test_auth.py tests/test_secret_scan.py tests/test_request_json_parsing_guard.py -q`
+  - Passed: 40 tests.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `npm --prefix aidm_frontend audit --omit=dev`
+  - Passed: found 0 vulnerabilities.
+- `make release-checklist-status`
+  - Wrote `tmp/release/release-checklist-status.md` and `.json`.
+  - Summary: 104 passed, 2 external-required, 0 manual-review, 0 failed, 0 unmapped.
+- `git diff --check`
+  - Passed as part of the combined guardrail command.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required evidence items
+
+Current evidence:
+- `make release-checklist-status` reports 104 passed, 2 external-required, 0 failed, and evidence packet status `ready-for-issue-closure`.
+- Remaining external-required rows:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The generated release packet is locally clean, but the release checklist still needs target-specific hosted/staging proof for backup/restore and telemetry receipt. Treat the source tree and generated packet as strong, but do not call the release administratively closed until those two external evidence items are attached or reviewed in the release venue.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then attach hosted backup/restore evidence and external telemetry receipt proof where the RC/release process expects them.
+
+### Medium-High: Rendered frontend UX/accessibility proof was not refreshed
+
+Current evidence:
+- This run checked frontend production dependency audit state only.
+- This run did not start the frontend, capture screenshots, run browser flows, inspect keyboard focus, or verify rendered mobile/desktop layout.
+
+Risk:
+Static checks do not prove modal focus traps, button sizing, mobile layout, visual overlap, screen-reader labels, console cleanliness, or real interaction quality.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+### Medium: Accumulated audit/auth hardening edits remain uncommitted
+
+Current evidence:
+- `git status --short` still shows modified files:
+  - `aidm_server/capabilities.py`
+  - `tests/test_auth.py`
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+
+Risk:
+The changes are bounded and tested, but recurring audit edits are stacking in the same files. That makes it harder to review one run's change independently and can increase merge/release friction.
+
+Recommended next step:
+- Review the accumulated hardening bundle and either commit it as one audit bundle or explicitly keep it as local-only work before more recurring-audit changes accumulate.
+
+## Larger Suggested Improvements
+
+- Add a short secret-scanner policy note explaining which env files are intentionally skipped (`.env.local`) and which deployment env files are scanned.
+- Consider a single `make audit-guardrails` target that runs the request JSON guard, state snapshot writer guard, API type contract check, secret scanner, and the focused guardrail tests used by recurring audits.
+- Refresh browser/visual smoke in a separate run so UX/accessibility claims are backed by rendered evidence instead of static source inspection.
+- Keep runtime auth/capability changes isolated from scanner/report changes when committing, if the current dirty tree is split into reviewable bundles.
+- Add a release-status explainer that distinguishes generated local evidence completion from the two external-required hosted/staging proof attachments.
+
+## Recommended Next Run Focus
+
+1. Confirm the two external-required release checklist rows have hosted backup/restore and telemetry receipt evidence attached.
+2. If release evidence is closed, run frontend browser/visual smoke and inspect accessibility/focus behavior.
+3. If staying source-only, inspect another single guardrail blind spot with direct tests rather than broad runtime behavior.
+4. Decide whether the accumulated daily-audit hardening bundle should be committed before more audit reports are prepended.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-23 06:04 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the already-dirty recurring-audit checkout, the absent automation memory file, the latest 2026-06-22 reports, committed-secret scanner coverage, request JSON parsing guard behavior, state snapshot writer inventory, generated API type drift, frontend production dependency audit state, release proof value status, operator signoff status, release checklist status, and static security/UX/accessibility carry-forward risks. The worktree already contained uncommitted audit changes in `improvements_suggestions.md`, `scripts/check_request_json_parsing.py`, `scripts/scan_secrets.py`, `tests/test_request_json_parsing_guard.py`, and `tests/test_secret_scan.py` at the start of this run. Those edits were preserved; this run only extended the committed-secret scanner to cover private-key files, added focused coverage, prepended this dated report, and updated automation memory.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; existing uncommitted audit files were treated as boundary state and not reverted.
+- Automation memory path `$CODEX_HOME/automations/daily-aidm-codebase-improvement-audit/memory.md`; no prior file was present at the start of this run.
+- Latest top reports in `improvements_suggestions.md`, especially:
+  - 2026-06-22 16:02 MDT positional `request.get_json(False, True)` guard coverage.
+  - 2026-06-22 06:03 MDT secret-scanner allowlist tightening.
+  - 2026-06-21 request JSON parsing and scanner redaction guardrails.
+- Committed-secret scanner implementation and tests:
+  - `scripts/scan_secrets.py`
+  - `tests/test_secret_scan.py`
+- Request JSON parsing guard implementation and focused tests:
+  - `scripts/check_request_json_parsing.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `aidm_server/validation.py`
+- Existing lightweight release/developer guardrails:
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+  - `git diff --check`
+- Frontend dependency/security state through `npm --prefix aidm_frontend audit --omit=dev`.
+- External proof and signoff renderers:
+  - `make external-proof-values-check`
+  - `make operator-signoff-status`
+  - `make release-checklist-status`
+  - `make rc-finalize-signoff`
+- Static source scans for direct JSON parsing, private-key markers, committed `.pem`/`.key` files, frontend storage/cookie usage, dynamic code/HTML injection surfaces, TODO/workaround markers, and provider/key-related configuration references.
+
+## Small Safe Fix Made
+
+### Scan committed private-key files
+
+Affected files:
+- `scripts/scan_secrets.py`
+- `tests/test_secret_scan.py`
+- `improvements_suggestions.md`
+
+Problem:
+The committed-secret scanner covered common source/config extensions and several provider-token patterns, but it did not treat `.pem` or `.key` files as text candidates. That meant an accidentally committed private key file could be skipped before pattern inspection, even though this repository has release and deployment workflows where key material should never land in source.
+
+Change:
+- Added `.pem` and `.key` to the scanner's text-candidate extension list.
+- Added a `Private key block` detector for `-----BEGIN ... PRIVATE KEY-----` headers.
+- Added `test_secret_scan_detects_private_key_files` to prove a `.pem` file is scanned, detected, and redacted in the emitted snippet.
+- Kept the private-key fixture assembled at runtime so the repository scanner does not flag its own test source.
+
+Rationale:
+This is a narrow security/developer-workflow guardrail fix. It changes no runtime auth behavior, provider behavior, database state, gameplay state mutation, frontend behavior, API contract, or deployment configuration. It only expands an existing local/CI scanner so a high-risk committed file type is inspected.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_secret_scan.py -q`
+  - Passed: 7 tests.
+- `./.venv/bin/python -m py_compile scripts/scan_secrets.py tests/test_secret_scan.py`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python -m pytest tests/test_request_json_parsing_guard.py -q`
+  - Passed: 6 tests.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `npm --prefix aidm_frontend audit --omit=dev`
+  - Passed: found 0 production vulnerabilities.
+- `make external-proof-values-check`
+  - Passed: required complete 22/22; no missing required fields, metadata errors, or invalid errors.
+- `make operator-signoff-status`
+  - Passed: required complete 19/19; missing or invalid required items 0.
+- `make release-checklist-status`
+  - Rendered status: 104 passed, 2 external-required, 0 failed, evidence packet `ready-for-issue-closure`.
+- `make rc-finalize-signoff`
+  - Passed: regenerated operator signoff, external proof check, release evidence packet, artifact consistency, and release checklist status.
+- `git diff --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Release checklist still has two external-required attachment/review items
+
+Current evidence:
+- `make external-proof-values-check` passed with required complete 22/22.
+- `make operator-signoff-status` passed with required complete 19/19 and no errors.
+- `make rc-finalize-signoff` passed end to end.
+- `make release-checklist-status` still reports 2 `external-required` items:
+  - Data Integrity line 69: database backup taken before deployment.
+  - Observability line 107: external telemetry endpoint receives events when enabled.
+
+Risk:
+The signoff manifest is complete, but the checklist still wants target-specific/manual evidence attachment or review for backup/restore and telemetry receipt. Treat the current state as signoff-ready from generated local artifacts, but not as fully closed administratively until those two evidence attachments are verified in the release venue.
+
+Recommended next step:
+
+```bash
+make release-checklist-status
+sed -n '1,80p' tmp/release/release-checklist-status.md
+```
+
+Then confirm the hosted backup/restore proof and external telemetry receipt are attached where the RC issue/release process expects them.
+
+### Medium-High: Rendered frontend UX/accessibility proof was not refreshed in this run
+
+Current evidence:
+- This run checked frontend production dependency audit state only.
+- This run did not start the frontend, capture screenshots, run a browser flow, inspect focus behavior, or review rendered mobile/desktop states.
+
+Risk:
+Static source checks and dependency audits do not prove modal focus traps, keyboard reachability, mobile layout, visual overlap, button sizing, screen-reader labels, or console cleanliness.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+### Medium: Existing audit guardrail edits remain uncommitted
+
+Current evidence:
+- `git status --short` still shows modified audit files:
+  - `improvements_suggestions.md`
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/scan_secrets.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `tests/test_secret_scan.py`
+
+Risk:
+The changes are bounded and verified, but repeated daily audit edits are accumulating in the same files. That can make it harder to isolate one run's fix or produce a clean release-candidate worktree.
+
+Recommended next step:
+- Review the accumulated guardrail diff as one audit bundle and either commit it or explicitly decide to keep it as local-only work.
+
+## Larger Suggested Improvements
+
+- Keep the secret scanner focused on high-confidence findings, but add provider/file-type coverage when it maps directly to AIDM's documented deployment surfaces.
+- Consider adding private-key scanning to any future pre-commit hook or local `dev-check` documentation if the team starts handling deployment certificates in adjacent folders.
+- Add a short scanner policy note describing why `.env.local` is intentionally skipped while `.pem`/`.key` files are not.
+- Keep using `make rc-finalize-signoff` as the source of truth for generated signoff readiness after external proof values are filled.
+- Add a small report helper that explains why `release-checklist-status` can show `external-required` while `operator-signoff-status` is passed, so future audit reports do not confuse generated signoff completeness with administrative evidence attachment.
+- Refresh browser/visual UX and accessibility proof in a separate run; do not infer rendered quality from source-only checks.
+
+## Recommended Next Run Focus
+
+1. Confirm the two `external-required` release checklist rows have their backup/restore and telemetry evidence attached in the RC issue/release venue.
+2. If release evidence is administratively closed, run frontend browser/visual smoke and inspect accessibility/focus behavior.
+3. If staying source-only, look for another single guardrail blind spot with focused tests rather than broadening runtime behavior.
+4. Decide whether to commit the accumulated recurring-audit guardrail changes before more daily audit edits stack up.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-22 16:02 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement follow-up across the already-dirty daily-audit checkout, fallback automation memory, the same-day 2026-06-22 06:03 MDT report, request JSON parsing guard behavior, committed-secret scanner behavior, state snapshot writer inventory guard, generated API type drift, frontend production dependency audit state, and carry-forward hosted/staging proof gaps. The worktree already contained uncommitted audit changes in `improvements_suggestions.md`, `scripts/check_request_json_parsing.py`, `scripts/scan_secrets.py`, `tests/test_request_json_parsing_guard.py`, and `tests/test_secret_scan.py` at the start of this run. Those edits were preserved; this run only extended the request JSON parsing guard, added focused coverage, prepended this dated report, and updated automation memory.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; existing uncommitted guardrail/report files were treated as boundary state and not reverted.
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md` because `$CODEX_HOME` was unset in this shell.
+- Latest top reports in `improvements_suggestions.md`, especially:
+  - 2026-06-22 06:03 MDT secret-scanner allowlist tightening.
+  - 2026-06-21 16:04 MDT request JSON parsing guard syntax-error handling.
+  - Carry-forward hosted/staging proof blockers.
+- Request JSON parsing guard implementation and focused tests:
+  - `scripts/check_request_json_parsing.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `aidm_server/validation.py`
+- Existing lightweight release/developer guardrails:
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+- Committed-secret scanner tests already dirty from prior same-day audit work:
+  - `scripts/scan_secrets.py`
+  - `tests/test_secret_scan.py`
+- Frontend production dependency audit state through `npm --prefix aidm_frontend audit --omit=dev`.
+- Static source references for request JSON parsing forms in `aidm_server`, `scripts`, and `tests`.
+
+## Small Safe Fix Made
+
+### Catch positional silent JSON parsing in the request guard
+
+Affected files:
+- `scripts/check_request_json_parsing.py`
+- `tests/test_request_json_parsing_guard.py`
+- `improvements_suggestions.md`
+
+Problem:
+The request JSON parsing guard now uses AST inspection and catches direct backend calls such as `request.get_json(silent=True)`, including multiline keyword calls. Flask also accepts positional arguments as `get_json(force=False, silent=False, cache=True)`, so a route-level call like `request.get_json(False, True)` could still bypass the guard while enabling silent JSON parsing outside the shared validation helpers.
+
+Change:
+- Extended `_is_request_get_json_silent_call` to flag a literal second positional `True` argument as silent mode.
+- Added `test_find_violations_reports_positional_silent_json_parsing` to prove the bypass form is reported.
+- Preserved the existing allowed-helper behavior, multiline keyword detection, syntax-error reporting, and CLI wording.
+
+Rationale:
+This is a narrow developer-workflow and correctness guardrail fix. It changes no runtime request parsing, auth behavior, database state, gameplay state mutation, provider configuration, frontend behavior, generated API contracts, or secret-scan policy. It only closes a positional-call blind spot in an existing source check.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_request_json_parsing_guard.py -q`
+  - Passed: 6 tests.
+- `./.venv/bin/python -m py_compile scripts/check_request_json_parsing.py tests/test_request_json_parsing_guard.py`
+  - Passed.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python -m pytest tests/test_secret_scan.py -q`
+  - Passed: 6 tests.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `npm --prefix aidm_frontend audit --omit=dev`
+  - Passed: found 0 production vulnerabilities.
+- `git diff --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Hosted beta proof remains the main release blocker
+
+Current evidence:
+- Local source guardrails for committed-secret scanning, request JSON parsing, state snapshot writer inventory, generated API type drift, release evidence helpers, frontend production dependency audit, and external proof validation are present and passing locally.
+- This run did not have a hosted/staging target URL, target env file, operator token, non-admin token, workspace ID, campaign/session/player IDs, or deployment output to prove the real hosted environment.
+
+Risk:
+Local source checks cannot prove hosted CORS, cookie flags, CSRF behavior, account-token suppression, non-admin denial behavior, metrics exposure, Socket.IO deployment behavior, provider configuration, observability receipt, beta SLOs, or final operator signoff.
+
+Recommended next step:
+
+```bash
+make hosted-rc-evidence HOSTED_RC_EVIDENCE_ARGS="--target-url <target-url> --auth-token <operator-token> --workspace-id <workspace-id> --non-admin-token <token> --campaign-id <campaign-id> --session-id <session-id> --player-id <player-id> --env-file <target-env>"
+```
+
+### Medium-High: Browser-token and cookie behavior still needs hosted confirmation
+
+Current evidence:
+- Prior static inspection found the expected account/workspace token migration and cookie handling paths in `aidm_frontend/src/useRuntimeSettings.ts` and request header construction in `aidm_frontend/src/api.ts`.
+- This run did not start a hosted browser session or inspect final deployed response headers.
+
+Risk:
+A local-only token transport path can look correct while hosted SameSite, Secure, CSRF, CORS, or reverse-proxy behavior differs. This is especially important for account-token suppression and non-admin denial proof.
+
+Recommended next step:
+
+```bash
+make hosted-cookie-auth-smoke HOSTED_COOKIE_AUTH_ARGS="--target-url <target-url> --auth-token <operator-token> --non-admin-token <token>"
+```
+
+### Medium: Rendered frontend UX/accessibility proof was not refreshed
+
+Current evidence:
+- This run verified frontend production dependency audit state only.
+- This run did not start the frontend, capture screenshots, run a browser flow, or inspect rendered interactive states.
+
+Risk:
+Static source inspection and dependency checks do not prove modal focus behavior, keyboard reachability, mobile layout, visual overlap, button sizing, screen-reader labels, or console cleanliness.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+## Larger Suggested Improvements
+
+- Keep expanding source guardrails around concrete bypasses rather than broadening runtime behavior during daily audits.
+- Consider documenting the Flask `get_json(force, silent, cache)` positional order near the checker predicate so future edits do not accidentally drop positional coverage.
+- Keep secret-scan reporting redacted and value-scoped; failed scans should identify file, line, and finding kind without echoing credential material into logs.
+- Keep source-only audit changes small until hosted/staging proof is available. The strongest current release-readiness improvement is still live hosted evidence, not broad local churn.
+- Refresh rendered frontend smoke separately; static checks cannot replace visual, keyboard, and focus validation.
+
+## Recommended Next Run Focus
+
+1. If hosted/staging credentials and IDs are available, run `make hosted-rc-evidence` and inspect the generated evidence.
+2. If hosted proof remains unavailable, run frontend browser/visual smoke and `make visual-smoke-review`.
+3. Re-run `make external-proof-values-check`, `make rc-finalize-signoff`, and `make release-checklist-status` only after real hosted proof values are present.
+4. Preserve the existing uncommitted guardrail changes unless the user explicitly asks for a broader cleanup or commit.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-22 06:03 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the existing daily-audit guardrail checkout, fallback automation memory, the latest 2026-06-21 reports, committed-secret scanner behavior, request JSON parsing guard behavior, state snapshot writer inventory guard, generated API type drift, dependency audit state, source references around JSON parsing, browser token/storage handling, cookie/CSRF surfaces, subprocess and broad exception boundaries, and frontend UX/accessibility proof gaps. The worktree already contained uncommitted audit changes in `improvements_suggestions.md`, `scripts/check_request_json_parsing.py`, `scripts/scan_secrets.py`, `tests/test_request_json_parsing_guard.py`, and `tests/test_secret_scan.py` at the start of this run. Those edits were preserved; this run only tightened secret-scanner allowlisting, added focused scanner coverage, prepended this dated report, and updated automation memory.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; existing uncommitted files matched prior audit guardrail work and were not reverted.
+- Automation memory fallback at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md` because `$CODEX_HOME` was unset in this shell.
+- Latest top reports in `improvements_suggestions.md`, especially:
+  - 2026-06-21 16:04 MDT request JSON parsing guard syntax-error handling.
+  - 2026-06-21 06:02 MDT secret-scan output redaction.
+  - Carry-forward hosted/staging proof blockers.
+- Committed-secret scanner implementation and focused tests:
+  - `scripts/scan_secrets.py`
+  - `tests/test_secret_scan.py`
+- Request JSON parsing guard implementation and tests:
+  - `scripts/check_request_json_parsing.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `aidm_server/validation.py`
+- Existing lightweight release/developer guardrails:
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+- Frontend dependency and static security surfaces:
+  - `npm --prefix aidm_frontend audit --omit=dev`
+  - Static searches for direct DOM HTML injection, dynamic code execution, browser storage, and cookie access in `aidm_frontend/src`.
+- Backend/script static surfaces for direct JSON parsing, subprocess use, broad exception boundaries, and temporary-workaround markers.
+
+## Small Safe Fix Made
+
+### Tighten secret-scanner allowlisting to the matched secret value
+
+Affected files:
+- `scripts/scan_secrets.py`
+- `tests/test_secret_scan.py`
+- `improvements_suggestions.md`
+
+Problem:
+The committed-secret scanner allowed a finding when either the detected secret value or the full source line contained allowlist markers such as `example`, `fake`, or `placeholder`. That meant a real pasted credential could be skipped if the variable name or nearby comment included a benign marker, for example `OPENAI_EXAMPLE_API_KEY = "sk-..."`.
+
+Change:
+- Removed full-line allowlisting from `scan_paths`; allowlist markers now apply only to the matched secret value.
+- Preserved existing placeholder behavior for detected values like `your-token-placeholder`.
+- Added `test_secret_scan_does_not_allowlist_real_secret_from_line_context` to prove a real-looking key is still reported when `example` appears elsewhere on the line.
+- Kept the prior scanner redaction behavior intact so reported snippets still replace the matched value with `<redacted>`.
+
+Rationale:
+This is a narrow security/developer-workflow hardening change. It changes no runtime behavior, auth behavior, database state, gameplay state mutation, frontend behavior, provider configuration, generated API contracts, or secret pattern policy. It only closes an allowlist bypass in an existing repo guardrail.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_secret_scan.py -q`
+  - Passed: 6 tests.
+- `./.venv/bin/python -m py_compile scripts/scan_secrets.py tests/test_secret_scan.py`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python -m pytest tests/test_request_json_parsing_guard.py -q`
+  - Passed: 5 tests.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `npm --prefix aidm_frontend audit --omit=dev`
+  - Passed: found 0 production vulnerabilities.
+- `git diff --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Hosted beta proof remains the main release blocker
+
+Current evidence:
+- Local source guardrails for committed-secret scanning, request JSON parsing, state snapshot writer inventory, generated API type drift, release evidence helpers, frontend production dependency audit, and external proof validation are present and passing locally.
+- This run did not have a hosted/staging target URL, target env file, operator token, non-admin token, workspace ID, campaign/session/player IDs, or deployment output to prove the real hosted environment.
+
+Risk:
+Local source checks cannot prove hosted CORS, cookie flags, CSRF behavior, account-token suppression, non-admin denial behavior, metrics exposure, Socket.IO deployment behavior, provider configuration, observability receipt, beta SLOs, or final operator signoff.
+
+Recommended next step:
+
+```bash
+make hosted-rc-evidence HOSTED_RC_EVIDENCE_ARGS="--target-url <target-url> --auth-token <operator-token> --workspace-id <workspace-id> --non-admin-token <token> --campaign-id <campaign-id> --session-id <session-id> --player-id <player-id> --env-file <target-env>"
+```
+
+### Medium-High: Browser-token and cookie behavior still needs hosted confirmation
+
+Current evidence:
+- Static frontend inspection found the expected account/workspace token migration and cookie handling paths in `aidm_frontend/src/useRuntimeSettings.ts` and request header construction in `aidm_frontend/src/api.ts`.
+- The local tests and source checks do not prove the browser receives final hosted cookie attributes or CSRF behavior from the deployed backend.
+
+Risk:
+A local-only token transport path can look correct while hosted SameSite, Secure, CSRF, CORS, or reverse-proxy behavior differs. This is especially important for account-token suppression and non-admin denial proof.
+
+Recommended next step:
+
+```bash
+make hosted-cookie-auth-smoke HOSTED_COOKIE_AUTH_ARGS="--target-url <target-url> --auth-token <operator-token> --non-admin-token <token>"
+```
+
+Use the repository's exact hosted evidence command if the hosted RC evidence wrapper has the required IDs available.
+
+### Medium: Rendered frontend UX/accessibility proof was not refreshed
+
+Current evidence:
+- This run inspected frontend storage, cookie, DOM-injection, and dynamic-code surfaces statically, and `npm audit --omit=dev` found 0 production vulnerabilities.
+- This run did not start the frontend, capture screenshots, run a browser flow, or inspect rendered interactive states.
+
+Risk:
+Static source inspection and backend/developer guardrails do not prove modal focus behavior, keyboard reachability, mobile layout, visual overlap, button sizing, screen-reader labels, or console cleanliness.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+## Larger Suggested Improvements
+
+- Keep scanner allowlisting value-scoped. If future examples need to be ignored, prefer fake values that contain explicit placeholder markers instead of allowing entire source lines.
+- Consider adding a compact regression test for each newly supported provider key format as provider integrations expand.
+- Keep the committed-secret scanner redaction behavior from the prior audit in place. Failed scans should identify file, line, and finding kind without echoing credential material into logs.
+- Keep source-only audit changes small until hosted/staging proof is available. The strongest current release-readiness improvement is still live hosted evidence, not broad local churn.
+- Refresh rendered frontend smoke separately; static scans cannot replace visual and keyboard/focus validation.
+
+## Recommended Next Run Focus
+
+1. If hosted/staging credentials and IDs are available, run `make hosted-rc-evidence` and inspect the generated evidence.
+2. If hosted proof remains unavailable, run frontend browser/visual smoke and `make visual-smoke-review`.
+3. Re-run `make external-proof-values-check`, `make rc-finalize-signoff`, and `make release-checklist-status` only after real hosted proof values are present.
+4. Preserve the existing uncommitted guardrail changes unless the user explicitly asks for a broader cleanup or commit.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-21 16:04 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement follow-up across the already-dirty daily-audit guardrail checkout, the fallback automation memory, the latest 2026-06-21 06:02 MDT report, committed-secret scanner behavior, request JSON parsing guard behavior, state snapshot writer inventory guard, generated API type drift, source references around JSON parsing, browser token/storage handling, cookie/CSRF/CORS surfaces, subprocess usage, broad exception boundaries, ignored/generated artifacts, and frontend UX/accessibility proof gaps. The worktree already contained uncommitted audit changes in `improvements_suggestions.md`, `scripts/check_request_json_parsing.py`, `scripts/scan_secrets.py`, `tests/test_request_json_parsing_guard.py`, and `tests/test_secret_scan.py` at the start of this run. Those edits were preserved; this run only added syntax-error handling to the request JSON parsing guard, focused guard coverage, this dated report, and automation-memory updates.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; existing uncommitted files matched prior audit guardrail work and were not reverted.
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md` because `$CODEX_HOME` was unset in this shell.
+- Latest top report in `improvements_suggestions.md`, especially:
+  - 2026-06-21 06:02 MDT secret-scan output redaction.
+  - 2026-06-20 16:01 MDT request JSON parsing guard AST hardening.
+  - Carry-forward hosted/staging proof blockers.
+- Request JSON parsing guard implementation and tests:
+  - `scripts/check_request_json_parsing.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `aidm_server/validation.py`
+- Secret scan implementation and tests already dirty from prior audit work:
+  - `scripts/scan_secrets.py`
+  - `tests/test_secret_scan.py`
+- Existing lightweight release/developer guardrails:
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+- Static source searches across backend, frontend, scripts, and tests for direct JSON parsing, dangerous DOM escape hatches, browser storage/cookie handling, subprocess usage, broad exception boundaries, ignored/generated artifacts, and UX/accessibility proof surfaces.
+
+## Small Safe Fix Made
+
+### Make the request JSON parsing guard fail cleanly on syntax errors
+
+Affected files:
+- `scripts/check_request_json_parsing.py`
+- `tests/test_request_json_parsing_guard.py`
+- `improvements_suggestions.md`
+
+Problem:
+The request JSON parsing guard now uses AST inspection, which correctly catches multiline `request.get_json(silent=True)` calls. However, if a scanned backend Python file was temporarily unparseable, `ast.parse(...)` would raise a raw `SyntaxError` traceback. That made the guard noisier and less actionable in local or CI output, especially during active route editing.
+
+Change:
+- Catch `SyntaxError` while scanning non-allowlisted backend Python files.
+- Report the file, line number, syntax-error message, and source line as a normal guard violation.
+- Preserve the existing direct-call detection and the existing CLI wording substring `Direct get_json(silent=True) usage found` so older test expectations and operator muscle memory still work.
+- Added `test_find_violations_reports_syntax_errors_without_traceback` to prove the guard reports unparseable files without throwing.
+
+Rationale:
+This is a narrow developer-workflow and correctness guardrail hardening change. It changes no runtime request handling, auth behavior, database state, gameplay state mutation, provider configuration, frontend behavior, generated API contracts, or scanner matching policy. It only makes an existing safety check fail with a clear, bounded message instead of a Python traceback.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_request_json_parsing_guard.py -q`
+  - Passed: 5 tests.
+- `./.venv/bin/python -m py_compile scripts/check_request_json_parsing.py tests/test_request_json_parsing_guard.py`
+  - Passed.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python -m pytest tests/test_secret_scan.py -q`
+  - Passed: 5 tests.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `git diff --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Hosted beta proof remains the main release blocker
+
+Current evidence:
+- Local source guardrails for committed-secret scanning, request JSON parsing, state snapshot writer inventory, generated API type drift, release evidence helpers, and external proof validation are present and passing locally.
+- This run did not have a hosted/staging target URL, target env file, operator token, non-admin token, workspace ID, campaign/session/player IDs, or deployment output to prove the real hosted environment.
+
+Risk:
+Local source checks cannot prove hosted CORS, cookie flags, CSRF behavior, account-token suppression, non-admin denial behavior, metrics exposure, Socket.IO deployment behavior, provider configuration, observability receipt, beta SLOs, or final operator signoff.
+
+Recommended next step:
+
+```bash
+make hosted-rc-evidence HOSTED_RC_EVIDENCE_ARGS="--target-url <target-url> --auth-token <operator-token> --workspace-id <workspace-id> --non-admin-token <token> --campaign-id <campaign-id> --session-id <session-id> --player-id <player-id> --env-file <target-env>"
+```
+
+### Medium-High: Final release confidence still depends on filled external proof values
+
+Current evidence:
+- External proof and signoff tooling exists, and the related local source checks remained compatible with this run's changes.
+- This run did not execute final proof-value validation against real hosted artifacts or an operator signoff manifest.
+
+Risk:
+Generated release artifacts are not sufficient by themselves. Missing, placeholder, local-only, or unmerged values must remain separate from final hosted readiness.
+
+Recommended next step:
+
+```bash
+make external-proof-values-check
+make rc-finalize-signoff
+make release-checklist-status
+```
+
+Run those only after hosted evidence values are filled or merged.
+
+### Medium: Rendered frontend UX/accessibility proof was not refreshed
+
+Current evidence:
+- This run inspected frontend storage and UX proof surfaces statically, but did not start the frontend, capture screenshots, run a browser flow, or inspect rendered interactive states.
+
+Risk:
+Static source inspection and backend/developer guardrails do not prove modal focus behavior, keyboard reachability, mobile layout, visual overlap, button sizing, screen-reader labels, or console cleanliness.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+## Larger Suggested Improvements
+
+- Keep `scripts/check_request_json_parsing.py` as a small release guardrail, but treat any reported syntax-error violation as a signal to fix the edited route before relying on JSON parser policy proof.
+- Consider adding a compact CI artifact summary for request-JSON guard failures if the guard starts catching multiple files; the current single-script output is adequate for local runs.
+- Keep the committed-secret scanner redaction from the prior audit in place. Failed secret scans should identify file, line, and finding kind without echoing credential material into logs.
+- Keep source-only audit changes small until hosted/staging proof is available. The strongest current release-readiness improvement is still live hosted evidence, not broad local churn.
+- Refresh rendered frontend smoke separately; static scans cannot replace visual and keyboard/focus validation.
+
+## Recommended Next Run Focus
+
+1. If hosted/staging credentials and IDs are available, run `make hosted-rc-evidence` and inspect the generated evidence.
+2. If hosted proof remains unavailable, run frontend browser/visual smoke and `make visual-smoke-review`.
+3. Re-run `make external-proof-values-check`, `make rc-finalize-signoff`, and `make release-checklist-status` only after real hosted proof values are present.
+4. Preserve the existing uncommitted guardrail changes unless the user explicitly asks for a broader cleanup or commit.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-21 06:02 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the already-dirty audit guardrail checkout, the automation memory fallback path, the latest 2026-06-20 reports, committed-secret scanner behavior, request JSON parsing guard behavior, state snapshot writer inventory guard, generated API type drift, source references around JSON parsing, browser-token storage, cookies/CSRF/CORS, subprocess usage, broad exception boundaries, and frontend UX/accessibility proof gaps. The worktree already contained uncommitted audit changes in `improvements_suggestions.md`, `scripts/check_request_json_parsing.py`, `scripts/scan_secrets.py`, `tests/test_request_json_parsing_guard.py`, and `tests/test_secret_scan.py` at the start of this run. Those edits were preserved; this run only added scanner output redaction, focused scanner coverage, this dated report, and automation-memory updates.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; the existing uncommitted edits matched prior audit guardrail work and were not reverted.
+- Automation memory at `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md` because `$CODEX_HOME` was unset in this shell.
+- Latest top report in `improvements_suggestions.md`, especially:
+  - 2026-06-20 16:01 MDT request JSON parsing guard hardening.
+  - 2026-06-20 06:03 MDT Google/Gemini API-key scanner coverage.
+  - Carry-forward hosted/staging proof blockers.
+- Secret scan implementation and tests:
+  - `scripts/scan_secrets.py`
+  - `tests/test_secret_scan.py`
+  - Makefile/CI references that run `scripts/scan_secrets.py`.
+- Request JSON parsing guard implementation and tests:
+  - `scripts/check_request_json_parsing.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `aidm_server/validation.py`
+- Existing lightweight release/developer guardrails:
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+- Broad source search across backend, frontend, scripts, and tests for `request.get_json`, shared JSON parsing helpers, local/session storage, cookies, CSRF/CORS, dangerous DOM APIs, subprocess usage, broad exception boundaries, and UX/accessibility proof surfaces.
+
+## Small Safe Fix Made
+
+### Redact detected secret values from committed-secret scan findings
+
+Affected files:
+- `scripts/scan_secrets.py`
+- `tests/test_secret_scan.py`
+- `improvements_suggestions.md`
+
+Problem:
+The committed-secret scanner was already useful as a local, CI, and release guardrail, but when it found a likely secret it stored and printed `line.strip()[:160]` as the finding snippet. That meant a failed scan could echo the detected credential value back into terminal logs or CI logs while trying to prevent that same credential from being committed.
+
+Change:
+- Added `_redacted_snippet(line, secret_value)` to replace only the detected secret value with `<redacted>` before storing the finding snippet.
+- Kept detection, allowlist checks, path skipping, line numbers, finding kinds, and file paths unchanged.
+- Added `test_secret_scan_redacts_secret_values_from_findings` to prove the scanner still gives useful context while omitting the actual key value.
+
+Rationale:
+This is a narrow security/developer-workflow hardening change. It reduces accidental secret exposure in failed guardrail output without changing runtime behavior, auth, provider configuration, database state, gameplay state mutation, frontend behavior, generated API contracts, or the scanner's matching policy.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_secret_scan.py -q`
+  - Passed: 5 tests.
+- `./.venv/bin/python -m py_compile scripts/scan_secrets.py tests/test_secret_scan.py`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python -m pytest tests/test_request_json_parsing_guard.py -q`
+  - Passed: 4 tests.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `git diff --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Hosted beta proof remains the main release blocker
+
+Current evidence:
+- Local source guardrails for committed-secret scanning, request JSON parsing, state snapshot writer inventory, generated API type drift, release evidence helpers, and external proof validation are present and passing locally.
+- This run did not have a hosted/staging target URL, target env file, operator token, non-admin token, workspace ID, campaign/session/player IDs, or deployment output to prove the real hosted environment.
+
+Risk:
+Local source checks cannot prove hosted CORS, cookie flags, CSRF behavior, account-token suppression, non-admin denial behavior, metrics exposure, Socket.IO deployment behavior, provider configuration, observability receipt, beta SLOs, or final operator signoff.
+
+Recommended next step:
+
+```bash
+make hosted-rc-evidence HOSTED_RC_EVIDENCE_ARGS="--target-url <target-url> --auth-token <operator-token> --workspace-id <workspace-id> --non-admin-token <token> --campaign-id <campaign-id> --session-id <session-id> --player-id <player-id> --env-file <target-env>"
+```
+
+### Medium-High: Final release confidence still depends on filled external proof values
+
+Current evidence:
+- External proof and signoff tooling exists, and the related local source checks remained compatible with this run's changes.
+- This run did not execute final proof-value validation against real hosted artifacts or an operator signoff manifest.
+
+Risk:
+Generated release artifacts are not sufficient by themselves. Missing, placeholder, local-only, or unmerged values must remain separate from final hosted readiness.
+
+Recommended next step:
+
+```bash
+make external-proof-values-check
+make rc-finalize-signoff
+make release-checklist-status
+```
+
+Run those only after hosted evidence values are filled or merged.
+
+### Medium: Rendered frontend UX/accessibility proof was not refreshed
+
+Current evidence:
+- This run inspected frontend token/storage and UX proof surfaces statically, but did not start the frontend, capture screenshots, run a browser flow, or inspect rendered interactive states.
+
+Risk:
+Static source inspection and backend/developer guardrails do not prove modal focus behavior, keyboard reachability, mobile layout, visual overlap, button sizing, screen-reader labels, or console cleanliness.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+## Larger Suggested Improvements
+
+- Keep `scripts/scan_secrets.py` in CI and publish guardrails, but keep scanner output redacted by default. Failed checks should identify file, line, and kind without replaying secret material into logs.
+- If provider support expands, add provider-specific token signatures with targeted tests rather than broad token regexes that create noisy false positives.
+- Consider a future `--show-secret-context` escape hatch only if there is a real operator need; default output should remain redacted.
+- Keep source-only audit changes small until hosted/staging proof is available. The strongest current release-readiness improvement is still live hosted evidence, not broad local churn.
+- Refresh rendered frontend smoke separately; static scans cannot replace visual and keyboard/focus validation.
+
+## Recommended Next Run Focus
+
+1. If hosted/staging credentials and IDs are available, run `make hosted-rc-evidence` and inspect the generated evidence.
+2. If hosted proof remains unavailable, run frontend browser/visual smoke and `make visual-smoke-review`.
+3. Re-run `make external-proof-values-check`, `make rc-finalize-signoff`, and `make release-checklist-status` only after real hosted proof values are present.
+4. Preserve the existing uncommitted guardrail changes unless the user explicitly asks for a broader cleanup or commit.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-20 16:01 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement follow-up across the already-dirty checkout, automation memory fallback behavior, the prior 2026-06-20 secret-scan audit, request JSON parsing guard coverage, state snapshot writer inventory guard, generated API contract check, committed-secret scanning, and source references to direct JSON parsing. The worktree already contained the 2026-06-20 06:03 MDT report plus `scripts/scan_secrets.py` and `tests/test_secret_scan.py` changes at the start of this run. Those edits were preserved. This run only tightened the request JSON parsing guard, added focused coverage for that guard, prepended this report, and updated automation memory.
+
+## What Was Inspected
+
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; existing edits were limited to:
+  - `improvements_suggestions.md`
+  - `scripts/scan_secrets.py`
+  - `tests/test_secret_scan.py`
+- Automation memory location from `$CODEX_HOME/automations/daily-aidm-codebase-improvement-audit/memory.md`; the shell expansion did not find an existing file, so this run used the documented fallback path `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`.
+- The 2026-06-20 06:03 MDT top report, especially the prior Google/Gemini API-key scanner hardening and the carry-forward release blockers.
+- Request JSON parsing guard implementation and tests:
+  - `scripts/check_request_json_parsing.py`
+  - `tests/test_request_json_parsing_guard.py`
+  - `aidm_server/validation.py`
+- Direct JSON parsing references across backend, scripts, and tests with a source search for `get_json`, `parse_json_body`, and `parse_optional_json_body`.
+- Existing lightweight release guardrails:
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+- Existing secret-scan regression tests from the prior run, to verify this run did not disturb that uncommitted work.
+
+## Small Safe Fix Made
+
+### Detect multiline route-level `request.get_json(silent=True)` calls
+
+Affected files:
+- `scripts/check_request_json_parsing.py`
+- `tests/test_request_json_parsing_guard.py`
+- `improvements_suggestions.md`
+
+Problem:
+The request JSON parsing guard enforced the right policy, but it used a single-line regex. That caught compact route code like:
+
+```python
+payload = request.get_json(silent=True)
+```
+
+It did not catch an equivalent call split across lines:
+
+```python
+payload = request.get_json(
+    silent=True,
+)
+```
+
+That left a small bypass in a release guardrail whose purpose is to keep route handlers on the shared `parse_json_body` and `parse_optional_json_body` helpers.
+
+Change:
+- Replaced the line-oriented regex check with a small AST check for direct `request.get_json(silent=True)` calls.
+- Kept the existing allowlist behavior for `aidm_server/validation.py` and explicit `--allow-path` values.
+- Added `test_find_violations_reports_multiline_silent_json_parsing` to prove the multiline bypass is now detected with the route path and call-start line.
+
+Rationale:
+This is a narrow developer-workflow and correctness guardrail fix. It changes no runtime request handling, no auth behavior, no database state, no gameplay state mutation, no provider configuration, no generated API contracts, and no frontend behavior. It only makes an existing local/CI-style safety check harder to bypass accidentally.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_request_json_parsing_guard.py -q`
+  - Passed: 4 tests.
+- `./.venv/bin/python -m py_compile scripts/check_request_json_parsing.py tests/test_request_json_parsing_guard.py`
+  - Passed.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+- `./.venv/bin/python -m pytest tests/test_secret_scan.py -q`
+  - Passed: 4 tests.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `git diff --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Hosted beta proof remains the main release blocker
+
+Current evidence:
+- Source-level guardrails for request JSON parsing, state snapshot writer inventory, generated API contract drift, committed-secret scanning, release evidence helpers, and external proof validation are present and passing locally.
+- This run did not have a hosted/staging target URL, target env file, operator token, non-admin token, workspace ID, campaign/session/player IDs, or deployment output to prove the real hosted environment.
+
+Risk:
+Local source checks cannot prove hosted CORS, cookie flags, CSRF behavior, account-token suppression, non-admin denial behavior, metrics exposure, Socket.IO deployment behavior, provider configuration, observability receipt, beta SLOs, or final operator signoff.
+
+Recommended next step:
+
+```bash
+make hosted-rc-evidence HOSTED_RC_EVIDENCE_ARGS="--target-url <target-url> --auth-token <operator-token> --workspace-id <workspace-id> --non-admin-token <token> --campaign-id <campaign-id> --session-id <session-id> --player-id <player-id> --env-file <target-env>"
+```
+
+### Medium-High: Final release confidence still depends on filled external proof values
+
+Current evidence:
+- The external proof/signoff tooling exists, and related source checks remain compatible with this run's changes.
+- This run did not execute final proof-value validation against real hosted artifacts or an operator signoff manifest.
+
+Risk:
+Generated release artifacts are not sufficient by themselves. Missing, placeholder, local-only, or unmerged values must remain separate from final hosted readiness.
+
+Recommended next step:
+
+```bash
+make external-proof-values-check
+make rc-finalize-signoff
+make release-checklist-status
+```
+
+Run those only after hosted evidence values are filled or merged.
+
+### Medium: Rendered frontend UX/accessibility proof was not refreshed
+
+Current evidence:
+- This run focused on backend/developer guardrails and did not start a browser, capture screenshots, or inspect interactive frontend states.
+
+Risk:
+Static source inspection and backend guardrails do not prove modal focus behavior, keyboard reachability, mobile layout, visual overlap, button sizing, or console cleanliness.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+## Larger Suggested Improvements
+
+- Keep the request JSON parsing guard in `dev-check` and RC checks; with the AST detector it now covers both compact and formatted call styles.
+- Consider extending the guard later to flag route-level aliases only if such aliases appear in real code. Avoid speculative broad matching that could create noisy false positives.
+- Keep the source-only audit cadence small. The codebase has useful local guardrails now, while the largest release-readiness gap remains hosted evidence.
+- Once hosted credentials and IDs are available, prioritize end-to-end hosted proof over additional local-only guardrails.
+
+## Recommended Next Run Focus
+
+1. If hosted/staging credentials and IDs are available, run `make hosted-rc-evidence` and inspect the generated evidence.
+2. If hosted proof is still unavailable, run frontend browser/visual smoke and `make visual-smoke-review`.
+3. Re-run `make external-proof-values-check`, `make rc-finalize-signoff`, and `make release-checklist-status` after real hosted proof values are present.
+4. Preserve the existing uncommitted secret-scan changes unless the user explicitly asks for a broader cleanup or commit.
+
+# Daily AIDM Codebase Improvement Audit - 2026-06-20 06:03 MDT
+
+Automation ID: `daily-aidm-codebase-improvement-audit`
+
+Scope: safe-improvement pass across the clean checkout, automation memory, prior dated audit reports, request JSON parsing guard, state snapshot writer inventory guard, generated API contracts, release-evidence helper scripts, external proof/signoff tooling, local SLO baseline tooling, frontend token/storage references, and committed-secret scan coverage. The worktree was clean at the start of this run. This run only extended the local secret scanner, added focused coverage for that scanner, prepended this report, and updated automation memory.
+
+## What Was Inspected
+
+- Automation memory path `/Users/danny/.codex/automations/daily-aidm-codebase-improvement-audit/memory.md`; it did not exist at the start of this run, so the run treated this as a fresh automation-memory seed.
+- Current physical checkout path `/Users/danny/Developer/AIDM-main` with `pwd -P`.
+- Dirty-tree boundary with `git status --short`; the checkout started clean.
+- The 2026-06-19 top reports in `improvements_suggestions.md`, especially:
+  - optional JSON parsing centralization;
+  - state snapshot writer inventory hardening;
+  - hosted/staging proof as the remaining high-priority release blocker.
+- Existing guardrails:
+  - `scripts/check_request_json_parsing.py`
+  - `scripts/check_state_snapshot_writers.py`
+  - `scripts/generate_api_types.py --check`
+  - `scripts/scan_secrets.py`
+- Release and external-proof tooling:
+  - `scripts/check_external_proof_values.py`
+  - `scripts/merge_external_proof_values.py`
+  - `scripts/render_local_beta_slo_baseline.py`
+  - `scripts/render_release_checklist_status.py`
+  - related focused tests under `tests/`.
+- Frontend token/storage scan surfaces:
+  - `aidm_frontend/src/useRuntimeSettings.ts`
+  - `aidm_frontend/src/api.ts`
+  - `aidm_frontend/src/useTtsNarration.ts`
+  - `aidm_frontend/src/SceneMusicPlayer.tsx`
+  - `aidm_frontend/src/DiceRollDialog.tsx`
+- Broad source searches for dangerous DOM APIs, local/session storage, cookies, direct JSON parsing, shell execution, broad exception handling, and release evidence JSON parsing.
+
+## Small Safe Fix Made
+
+### Add Google/Gemini API-key detection to the committed-secret scan
+
+Affected files:
+- `scripts/scan_secrets.py`
+- `tests/test_secret_scan.py`
+- `improvements_suggestions.md`
+
+Problem:
+The secret scanner already detected several high-risk committed secret shapes, including OpenAI-style keys, GitHub tokens, AWS access keys, Deepgram keys, and generic sensitive assignments. AIDM also uses Gemini through `GOOGLE_GENAI_API_KEY`, but the scanner did not have a dedicated Google API-key signature. That left a realistic provider key shape outside the fastest pre-publish guard.
+
+Change:
+- Added a `Google API key` pattern matching `AIza...` Google API-key shaped values.
+- Added `test_secret_scan_detects_google_api_key` to prove the scanner flags a Gemini/Google-style key fixture.
+- Verified the added fixture does not cause the repo-level scanner to flag its own test file.
+
+Rationale:
+This is a narrow security/developer-workflow hardening change. It improves the existing local guard used before publish and does not touch runtime provider configuration, app behavior, auth, database state, gameplay state mutation, frontend UX, generated API contracts, or deployment behavior.
+
+## Verification
+
+- `./.venv/bin/python -m pytest tests/test_secret_scan.py -q`
+  - Passed: 4 tests.
+- `./.venv/bin/python -m py_compile scripts/scan_secrets.py tests/test_secret_scan.py`
+  - Passed.
+- `./.venv/bin/python scripts/scan_secrets.py`
+  - Passed: no likely committed secrets found.
+- `./.venv/bin/python scripts/check_request_json_parsing.py`
+  - Passed: no direct `request.get_json(silent=True)` usage outside shared helpers.
+- `./.venv/bin/python scripts/check_state_snapshot_writers.py`
+  - Passed: inventory matches 22 direct writes across 18 documented scopes.
+- `./.venv/bin/python scripts/generate_api_types.py --check`
+  - Passed.
+
+## High-Priority Findings
+
+### High: Hosted beta proof remains the main release blocker
+
+Current evidence:
+- Source-level guardrails are increasingly strong: request JSON parsing, state snapshot writer inventory, generated API contract checks, committed-secret scanning, external proof value checks, hosted RC evidence scripts, local beta SLO baseline tooling, and release checklist/status tooling are all present.
+- This run did not have a hosted/staging target URL, target env file, operator token, non-admin token, workspace ID, campaign/session/player IDs, or deployment output to prove the real hosted environment.
+
+Risk:
+The repo can prove a lot locally, but it still cannot prove hosted CORS, cookie flags, CSRF behavior, account-token suppression, non-admin denial behavior, metrics exposure, Socket.IO deployment behavior, provider configuration, observability receipt, beta SLOs, or final operator signoff until the hosted evidence suite runs against the real target.
+
+Recommended next step:
+
+```bash
+make hosted-rc-evidence HOSTED_RC_EVIDENCE_ARGS="--target-url <target-url> --auth-token <operator-token> --workspace-id <workspace-id> --non-admin-token <token> --campaign-id <campaign-id> --session-id <session-id> --player-id <player-id> --env-file <target-env>"
+```
+
+### Medium-High: Final release confidence still depends on external proof values and operator signoff
+
+Current evidence:
+- The external proof tooling has strong local validation for missing values, persisted secrets, wrong GitHub Action repositories, missing local evidence files, local-only beta SLO evidence, and source archive attachment checks.
+- This run inspected the tooling but did not run it against filled final external proof values.
+
+Risk:
+The release checklist can show that artifacts were generated, but final readiness still depends on real, filled values and an operator signoff manifest generated from those values. Empty, incomplete, or local-only evidence must not be treated as hosted release proof.
+
+Recommended next step:
+
+```bash
+make external-proof-values-check
+make rc-finalize-signoff
+make release-checklist-status
+```
+
+Run those after hosted proof values have been filled or merged.
+
+### Medium: Rendered frontend UX/accessibility proof was not refreshed in this run
+
+Current evidence:
+- Static scans did not reveal dangerous DOM API usage.
+- This run did not start the frontend, run browser smoke, or inspect screenshots.
+
+Risk:
+Static checks do not prove modal focus behavior, keyboard reachability, mobile layout, visual overlap, button sizing, or console cleanliness.
+
+Recommended next step:
+
+```bash
+cd aidm_frontend && npm run smoke:browser
+cd aidm_frontend && npm run smoke:visual
+make visual-smoke-review
+```
+
+## Larger Suggested Improvements
+
+- Keep `scripts/scan_secrets.py` in the publish guardrail path; the scanner now better matches the provider keys AIDM actually supports.
+- Consider adding similarly specific signatures for any future provider keys if new providers are added, but avoid overly broad token regexes that create noisy false positives.
+- Keep external-proof validation focused on evidence quality, not just artifact existence. Incomplete values should remain clearly separate from final hosted readiness.
+- Continue to favor one small guardrail/test improvement per audit until hosted proof and signoff artifacts are available.
+
+## Recommended Next Run Focus
+
+1. If hosted/staging credentials and IDs are available, run `make hosted-rc-evidence` and inspect the generated evidence.
+2. If hosted proof is still unavailable, run frontend browser/visual smoke and `make visual-smoke-review`.
+3. Re-run `make external-proof-values-check` once real hosted proof values are filled or merged.
+4. Keep source-only audits small; the major remaining gap is live hosted evidence, not broad code churn.
+
 # Daily AIDM Codebase Improvement Audit - 2026-06-19 16:03 MDT
 
 Automation ID: `daily-aidm-codebase-improvement-audit`

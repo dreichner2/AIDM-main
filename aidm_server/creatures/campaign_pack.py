@@ -37,11 +37,29 @@ def _pack_name(title: str, theme: str, base_name: str, rank: str) -> str:
     return f"{prefix} {base_name}"
 
 
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _minimum_int(value: Any, *, default: int, minimum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, parsed)
+
+
 def generate_campaign_pack_bestiary(payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     payload = payload if isinstance(payload, dict) else {}
     themes = _themes(payload)
     title = str(payload.get('title') or payload.get('campaignTitle') or payload.get('campaign_title') or 'Campaign').strip()
-    count = max(3, min(18, int(payload.get('count') or 8)))
+    count = _bounded_int(payload.get('count'), default=8, minimum=3, maximum=18)
+    party_level = _minimum_int(payload.get('partyLevel') or payload.get('party_level'), default=2, minimum=1)
+    party_size = _minimum_int(payload.get('partySize') or payload.get('party_size'), default=4, minimum=1)
     creatures: list[dict[str, Any]] = []
     for index in range(count):
         rank, base_id, role, difficulty = DEFAULT_PACK_ROLES[index % len(DEFAULT_PACK_ROLES)]
@@ -55,8 +73,8 @@ def generate_campaign_pack_bestiary(payload: dict[str, Any] | None = None) -> li
                 'difficulty': difficulty,
                 'descriptionHint': f'{title} {rank} bestiary creature',
             },
-            party_level=max(1, int(payload.get('partyLevel') or payload.get('party_level') or 2)),
-            party_size=max(1, int(payload.get('partySize') or payload.get('party_size') or 4)),
+            party_level=party_level,
+            party_size=party_size,
         )
         variant['id'] = stable_slug(f"{title} {rank} {theme} {base['id']} {index + 1}")
         variant['name'] = _pack_name(title, theme, base['name'], rank)

@@ -35,6 +35,8 @@ TEXT_EXTENSIONS = {
     '.lock',
     '.md',
     '.mjs',
+    '.key',
+    '.pem',
     '.py',
     '.sh',
     '.toml',
@@ -64,8 +66,20 @@ SECRET_PATTERNS = [
         re.compile(r'\bgh[pousr]_[A-Za-z0-9_]{30,}\b'),
     ),
     (
+        'GitHub fine-grained token',
+        re.compile(r'\bgithub_pat_[A-Za-z0-9_]{30,}\b'),
+    ),
+    (
         'AWS access key',
         re.compile(r'\bAKIA[0-9A-Z]{16}\b'),
+    ),
+    (
+        'Google API key',
+        re.compile(r'\bAIza[A-Za-z0-9_-]{35}\b'),
+    ),
+    (
+        'Private key block',
+        re.compile(r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'),
     ),
     (
         'Deepgram-looking API key',
@@ -119,7 +133,7 @@ def _iter_files(paths: list[Path]):
 
 
 def _is_text_candidate(path: Path) -> bool:
-    if path.suffix not in TEXT_EXTENSIONS:
+    if path.suffix not in TEXT_EXTENSIONS and not path.name.startswith('.env'):
         return False
     try:
         return b'\0' not in path.read_bytes()[:4096]
@@ -130,6 +144,11 @@ def _is_text_candidate(path: Path) -> bool:
 def _allowed(value: str) -> bool:
     lowered = value.lower()
     return any(marker in lowered for marker in ALLOWLIST_MARKERS)
+
+
+def _redacted_snippet(line: str, secret_value: str) -> str:
+    redacted_line = line.replace(secret_value, '<redacted>') if secret_value else line
+    return redacted_line.strip()[:160]
 
 
 def scan_paths(paths: list[Path]) -> list[Finding]:
@@ -146,14 +165,14 @@ def scan_paths(paths: list[Path]) -> list[Finding]:
             for kind, pattern in SECRET_PATTERNS:
                 for match in pattern.finditer(line):
                     secret_value = match.group(1) if match.groups() else match.group(0)
-                    if _allowed(secret_value) or _allowed(line):
+                    if _allowed(secret_value):
                         continue
                     findings.append(
                         Finding(
                             path=path,
                             line_number=line_number,
                             kind=kind,
-                            snippet=line.strip()[:160],
+                            snippet=_redacted_snippet(line, secret_value),
                         )
                     )
     return findings

@@ -3376,6 +3376,56 @@ describe('App user workflow regressions', () => {
     expect(deleteButton).toHaveFocus()
   })
 
+  it('keeps the character delete confirmation open while deletion is pending', async () => {
+    await renderLoadedApp()
+
+    const originalFetch = globalThis.fetch
+    let resolveDelete: (response: Response) => void = () => undefined
+    const pendingDelete = new Promise<Response>((resolve) => {
+      resolveDelete = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://localhost:3000')
+        const method = init?.method ?? 'GET'
+        if (method === 'DELETE' && url.pathname === '/api/players/30') {
+          const headers = new Headers(init?.headers)
+          fetchCalls.push({
+            method,
+            path: url.pathname,
+            origin: url.origin,
+            body: init?.body ? JSON.parse(String(init.body)) : null,
+            authorization: headers.get('Authorization'),
+            workspaceToken: headers.get('X-AIDM-Workspace-Token'),
+            workspaceIdHeader: headers.get('X-AIDM-Workspace-Id'),
+          })
+          return pendingDelete
+        }
+        return originalFetch(input, init)
+      }),
+    )
+
+    const characterActions = screen.getByLabelText('Character actions')
+    fireEvent.click(within(characterActions).getByRole('button', { name: 'Delete' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Character' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete Character' }))
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Deleting...' })).toBeDisabled())
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    expect(screen.getByRole('dialog', { name: 'Delete Character' })).toBeInTheDocument()
+    expect(fetchCalls.filter((call) => call.method === 'DELETE' && call.path === '/api/players/30')).toHaveLength(1)
+
+    await act(async () => {
+      resolveDelete(jsonResponse({ deleted: true }))
+    })
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Delete Character' })).not.toBeInTheDocument(),
+    )
+  })
+
   it('shows a manual share link when clipboard access is unavailable', async () => {
     localStorage.setItem('aidm:baseUrl', 'https://backend-tunnel.ngrok-free.app')
 

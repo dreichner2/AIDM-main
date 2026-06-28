@@ -11,8 +11,15 @@ rm -rf \
   "$ROOT_DIR/aidm_frontend/dist"
 
 find "$ROOT_DIR" \
+  -path "$ROOT_DIR/.git" -prune -o \
   -path "$ROOT_DIR/.venv" -prune -o \
   -path "$ROOT_DIR/aidm_frontend/node_modules" -prune -o \
   -type d -name "__pycache__" -prune -exec rm -rf {} +
+
+find "$ROOT_DIR" \
+  -path "$ROOT_DIR/.git" -prune -o \
+  -path "$ROOT_DIR/.venv" -prune -o \
+  -path "$ROOT_DIR/aidm_frontend/node_modules" -prune -o \
+  -type f -name ".DS_Store" -delete
 
 echo "Cleaned local cache and runtime artifacts."

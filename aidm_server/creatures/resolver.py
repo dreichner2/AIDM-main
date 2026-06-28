@@ -66,6 +66,14 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(maximum, parsed))
 
 
+def _minimum_int(value: Any, *, default: int, minimum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, parsed)
+
+
 def _enabled(value: Any, *, default: bool = True) -> bool:
     if value is None:
         return default
@@ -85,8 +93,8 @@ def normalize_creature_request(request: dict[str, Any] | None) -> dict[str, Any]
         'desiredRole': _text(request.get('desiredRole', request.get('desired_role'))),
         'desiredCreatureType': _text(request.get('desiredCreatureType', request.get('desired_creature_type'))),
         'themeTags': _list(request.get('themeTags', request.get('theme_tags'))),
-        'partyLevel': max(1, int(request.get('partyLevel', request.get('party_level')) or 1)),
-        'partySize': max(1, int(request.get('partySize', request.get('party_size')) or 4)),
+        'partyLevel': _minimum_int(request.get('partyLevel', request.get('party_level')), default=1, minimum=1),
+        'partySize': _minimum_int(request.get('partySize', request.get('party_size')), default=4, minimum=1),
         'difficulty': _text(request.get('difficulty') or 'standard').lower(),
         'descriptionHint': _text(request.get('descriptionHint', request.get('description_hint'))),
         'allowGeneration': _enabled(request.get('allowGeneration', request.get('allow_generation')), default=True),

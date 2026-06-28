@@ -580,6 +580,17 @@ def _path_has_forbidden_archive_part(parts: tuple[str, ...]) -> bool:
     return any(forbidden in zip(parts, parts[1:]) for forbidden in FORBIDDEN_ARCHIVE_PATHS)
 
 
+def _link_target_is_forbidden(linkname: str) -> bool:
+    target = pathlib.PurePosixPath(linkname.strip())
+    if not linkname.strip() or target.is_absolute() or '..' in target.parts:
+        return True
+    parts = tuple(part for part in target.parts if part not in {'', '.'})
+    return (
+        _path_has_forbidden_archive_part(parts)
+        or target.suffix in FORBIDDEN_ARCHIVE_SUFFIXES
+    )
+
+
 def _load_lfs_patterns(path: pathlib.Path = DEFAULT_GITATTRIBUTES) -> list[str]:
     if not path.exists():
         return []
@@ -654,6 +665,8 @@ def inspect_source_archive(path: pathlib.Path | None) -> dict[str, Any]:
                     or pathlib.PurePosixPath(name).suffix in FORBIDDEN_ARCHIVE_SUFFIXES
                 ):
                     forbidden.append(name)
+                if (member.issym() or member.islnk()) and _link_target_is_forbidden(member.linkname):
+                    forbidden.append(f'{name} -> {member.linkname}')
                 if member.isfile() and member.size >= LARGE_ARCHIVE_MEMBER_THRESHOLD_BYTES:
                     project_path = _archive_project_path(name)
                     lfs_tracked = _matches_lfs_pattern(project_path, lfs_patterns)

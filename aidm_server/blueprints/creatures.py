@@ -557,8 +557,8 @@ def create_creature_variant_endpoint():
     variant = create_creature_variant(
         base,
         request_payload,
-        party_level=int(request_payload.get('partyLevel') or request_payload.get('party_level') or 1),
-        party_size=int(request_payload.get('partySize') or request_payload.get('party_size') or 4),
+        party_level=_positive_int(request_payload.get('partyLevel') or request_payload.get('party_level'), 1),
+        party_size=_positive_int(request_payload.get('partySize') or request_payload.get('party_size'), 4),
     )
     return jsonify({'creature': variant, 'balance': variant.get('balance') or {}})
 

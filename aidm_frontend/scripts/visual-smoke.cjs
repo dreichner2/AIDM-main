@@ -13,6 +13,7 @@ const FRONTEND_ROOT = path.resolve(__dirname, '..')
 const PYTHON = process.env.PYTHON || path.join(REPO_ROOT, '.venv', 'bin', 'python')
 const CHROMIUM_CHANNEL = process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || ''
 const SMOKE_TIMEOUT_MS = Number(process.env.AIDM_VISUAL_SMOKE_TIMEOUT_MS || 90_000)
+const SHUTDOWN_GRACE_MS = Number(process.env.AIDM_VISUAL_SMOKE_SHUTDOWN_GRACE_MS || 2_000)
 const ARTIFACT_ROOT = path.join(REPO_ROOT, 'tmp', 'verification_artifacts', 'visual-smoke')
 
 const children = new Set()
@@ -56,16 +57,16 @@ function spawnManaged(command, args, options) {
   return child
 }
 
-function stopManaged(child) {
+function stopManaged(child, signal = 'SIGTERM') {
   if (!child || child.killed) return
   try {
     if (process.platform === 'win32') {
-      child.kill('SIGTERM')
+      child.kill(signal)
     } else {
-      process.kill(-child.pid, 'SIGTERM')
+      process.kill(-child.pid, signal)
     }
   } catch {
-    child.kill('SIGTERM')
+    child.kill(signal)
   }
 }
 
@@ -79,10 +80,31 @@ function isPathLikeExecutable(command) {
   return path.isAbsolute(command) || command.includes('/') || command.includes('\\')
 }
 
-async function shutdown() {
-  for (const child of [...children]) {
+function waitForChildExit(child, timeoutMs) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs)
+    child.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+}
+
+async function stopAllManaged() {
+  const activeChildren = [...children]
+  for (const child of activeChildren) {
     stopManaged(child)
   }
+  await Promise.all(activeChildren.map((child) => waitForChildExit(child, SHUTDOWN_GRACE_MS)))
+  for (const child of [...children]) {
+    stopManaged(child, 'SIGKILL')
+  }
+  await Promise.all([...children].map((child) => waitForChildExit(child, SHUTDOWN_GRACE_MS)))
+}
+
+async function shutdown() {
+  await stopAllManaged()
   cleanupTempDir()
 }
 
@@ -377,8 +399,7 @@ async function main() {
   log('capturing visual smoke screenshots')
   const screenshots = await runVisualFlow(frontendUrl, backendUrl, ids, artifactDir)
 
-  stopManaged(frontend)
-  stopManaged(backend)
+  await stopAllManaged()
   cleanupTempDir()
   log(`passed: ${screenshots.length} screenshots written under ${path.relative(REPO_ROOT, artifactDir)}`)
 }

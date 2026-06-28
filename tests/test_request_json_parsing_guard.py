@@ -37,6 +37,63 @@ def test_find_violations_reports_route_level_silent_json_parsing(tmp_path):
     assert violations[0].line_number == 2
 
 
+def test_find_violations_reports_multiline_silent_json_parsing(tmp_path):
+    server = tmp_path / 'aidm_server'
+    server.mkdir()
+    validation = server / 'validation.py'
+    validation.write_text('def parse(request):\n    return request.get_json(silent=True)\n', encoding='utf-8')
+    route = server / 'blueprint.py'
+    route.write_text(
+        "def unsafe(request):\n"
+        "    payload = request.get_json(\n"
+        "        silent=True,\n"
+        "    )\n"
+        "    return payload\n",
+        encoding='utf-8',
+    )
+
+    violations = find_violations(server, allowed_paths=(validation,))
+
+    assert len(violations) == 1
+    assert violations[0].path == route
+    assert violations[0].line_number == 2
+
+
+def test_find_violations_reports_positional_silent_json_parsing(tmp_path):
+    server = tmp_path / 'aidm_server'
+    server.mkdir()
+    validation = server / 'validation.py'
+    validation.write_text('def parse(request):\n    return request.get_json(silent=True)\n', encoding='utf-8')
+    route = server / 'blueprint.py'
+    route.write_text(
+        "def unsafe(request):\n"
+        "    return request.get_json(False, True)\n",
+        encoding='utf-8',
+    )
+
+    violations = find_violations(server, allowed_paths=(validation,))
+
+    assert len(violations) == 1
+    assert violations[0].path == route
+    assert violations[0].line_number == 2
+
+
+def test_find_violations_reports_syntax_errors_without_traceback(tmp_path):
+    server = tmp_path / 'aidm_server'
+    server.mkdir()
+    validation = server / 'validation.py'
+    validation.write_text('def parse(request):\n    return request.get_json(silent=True)\n', encoding='utf-8')
+    route = server / 'broken_route.py'
+    route.write_text('def broken(:\n    return {}\n', encoding='utf-8')
+
+    violations = find_violations(server, allowed_paths=(validation,))
+
+    assert len(violations) == 1
+    assert violations[0].path == route
+    assert violations[0].line_number == 1
+    assert '<syntax error:' in violations[0].line
+
+
 def test_main_returns_nonzero_when_violation_exists(tmp_path, capsys):
     server = tmp_path / 'aidm_server'
     server.mkdir()

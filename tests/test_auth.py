@@ -134,6 +134,45 @@ def test_capabilities_endpoint_reports_account_role_capabilities(tmp_path, monke
     assert admin_payload['descriptions']['dm_runtime_control']
 
 
+def test_workspace_bearer_token_has_player_capabilities_and_cannot_author_bestiary(tmp_path, monkeypatch):
+    app, _socketio = _build_auth_runtime(
+        tmp_path,
+        monkeypatch,
+        extra_env={
+            'AIDM_API_AUTH_TOKENS': 'owner-token',
+            'AIDM_API_AUTH_TOKEN_WORKSPACES': 'owner=owner-token',
+        },
+    )
+    client = app.test_client()
+    with app.app_context():
+        world = World(name='Token Capability World', description='token capability auth')
+        db.session.add(world)
+        db.session.flush()
+        campaign = Campaign(title='Token Capability Campaign', world_id=world.world_id, workspace_id='owner')
+        db.session.add(campaign)
+        db.session.commit()
+        campaign_id = campaign.campaign_id
+
+    headers = {'Authorization': 'Bearer owner-token'}
+    capabilities_response = client.get('/api/capabilities', headers=headers)
+    authoring_response = client.post(
+        f'/api/campaigns/{campaign_id}/bestiary',
+        headers=headers,
+        json={'creature': core_creature('wolf')},
+    )
+
+    assert capabilities_response.status_code == 200
+    capabilities_payload = capabilities_response.get_json()
+    assert capabilities_payload['account_id'] is None
+    assert capabilities_payload['is_workspace_admin'] is False
+    assert capabilities_payload['capabilities'] == ['player_action', 'player_read']
+    assert 'dm_authoring' not in capabilities_payload['capabilities']
+    assert 'debug_read' not in capabilities_payload['capabilities']
+    assert 'local_operator_only' not in capabilities_payload['capabilities']
+    assert authoring_response.status_code == 403
+    assert authoring_response.get_json()['details']['required_capability'] == 'dm_authoring'
+
+
 def test_beta_incidents_require_workspace_admin_account_but_players_can_report(tmp_path, monkeypatch):
     app, _socketio = _build_auth_runtime(tmp_path, monkeypatch)
     client = app.test_client()

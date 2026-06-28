@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from flask import g, has_request_context
+
 from aidm_server.errors import error_response
 from aidm_server.workspace_access import current_account_id, current_account_is_workspace_admin
 
@@ -39,9 +41,15 @@ WORKSPACE_ADMIN_CAPABILITIES: set[Capability] = {
 LOCAL_OPERATOR_CAPABILITIES: set[Capability] = {*WORKSPACE_ADMIN_CAPABILITIES, 'local_operator_only'}
 
 
+def _request_has_auth_token() -> bool:
+    return has_request_context() and bool(getattr(g, 'aidm_auth_token_present', False))
+
+
 def current_actor_capabilities() -> set[Capability]:
     """Return request-scoped capabilities without treating unauthenticated local mode as a player."""
     if current_account_id() is None:
+        if _request_has_auth_token():
+            return set(PLAYER_CAPABILITIES)
         return set(LOCAL_OPERATOR_CAPABILITIES)
     if current_account_is_workspace_admin():
         return set(WORKSPACE_ADMIN_CAPABILITIES)

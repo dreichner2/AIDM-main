@@ -37,6 +37,14 @@ def _write_tar(path, members: list[str]) -> None:
             archive.addfile(info, io.BytesIO(data))
 
 
+def _write_link_tar(path, member_name: str, linkname: str) -> None:
+    with tarfile.open(path, mode='w:gz') as archive:
+        info = tarfile.TarInfo(member_name)
+        info.type = tarfile.SYMTYPE
+        info.linkname = linkname
+        archive.addfile(info)
+
+
 def _write_hosted_rc_evidence(
     path,
     *,
@@ -169,6 +177,20 @@ def test_inspect_source_archive_reports_clean_and_forbidden_members(tmp_path):
     corrupt_result = inspect_source_archive(corrupt_archive)
     assert corrupt_result['status'] == 'invalid'
     assert corrupt_result['forbidden']
+
+
+def test_inspect_source_archive_flags_forbidden_link_targets(tmp_path):
+    archive_path = tmp_path / 'aidm-source-link.tar.gz'
+    _write_link_tar(
+        archive_path,
+        'AIDM-main/docs/current-database',
+        '../tmp/dnd_ai_dm.db',
+    )
+
+    result = inspect_source_archive(archive_path)
+
+    assert result['status'] == 'failed'
+    assert result['forbidden'] == ['AIDM-main/docs/current-database -> ../tmp/dnd_ai_dm.db']
 
 
 def test_inspect_source_archive_tracks_large_lfs_members(tmp_path, monkeypatch):

@@ -32,12 +32,14 @@ DEFAULT_OUTPUT = REPO_ROOT / 'tmp' / 'release' / 'packaging-cleanup-evidence.md'
 DEFAULT_JSON_OUTPUT = REPO_ROOT / 'tmp' / 'release' / 'packaging-cleanup-evidence.json'
 
 CLEAN_SCRIPT_NEEDLES: tuple[tuple[str, str], ...] = (
+    ('git metadata preserved', '$ROOT_DIR/.git'),
     ('pytest cache', '$ROOT_DIR/.pytest_cache'),
     ('runtime tmp directory', '$ROOT_DIR/tmp'),
     ('backend memory artifact', '$ROOT_DIR/aidm_server/:memory:'),
     ('frontend vite cache', '$ROOT_DIR/aidm_frontend/.vite'),
     ('frontend dist build output', '$ROOT_DIR/aidm_frontend/dist'),
     ('python bytecode caches', '__pycache__'),
+    ('macOS Finder metadata', '.DS_Store'),
 )
 
 CLEAN_DEPS_NEEDLES: tuple[tuple[str, str], ...] = (

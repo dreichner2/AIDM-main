@@ -22,12 +22,14 @@ def test_build_evidence_verifies_cleanup_coverage_and_archive_exclusions(tmp_pat
     cleanup.write_text(
         '\n'.join(
             [
+                '$ROOT_DIR/.git',
                 '$ROOT_DIR/.pytest_cache',
                 '$ROOT_DIR/tmp',
                 '$ROOT_DIR/aidm_server/:memory:',
                 '$ROOT_DIR/aidm_frontend/.vite',
                 '$ROOT_DIR/aidm_frontend/dist',
                 '__pycache__',
+                '.DS_Store',
             ]
         ),
         encoding='utf-8',
@@ -49,6 +51,8 @@ def test_build_evidence_verifies_cleanup_coverage_and_archive_exclusions(tmp_pat
     assert evidence['source_archive']['status'] == 'passed'
     assert evidence['archive_policy']['allowed_template_members_found'] == ['AIDM-main/.env.local.example']
     assert evidence['failures'] == []
+    assert any(check['label'] == 'git metadata preserved' for check in evidence['clean_checks'])
+    assert any(check['label'] == 'macOS Finder metadata' for check in evidence['clean_checks'])
     assert '# Packaging Cleanup Evidence' in markdown
     assert 'make clean-deps Coverage' in markdown
     assert 'Source Archive Exclusion Policy' in markdown
@@ -58,8 +62,8 @@ def test_build_evidence_verifies_cleanup_coverage_and_archive_exclusions(tmp_pat
 def test_build_evidence_fails_when_archive_contains_forbidden_paths(tmp_path):
     cleanup = tmp_path / 'cleanup_artifacts.sh'
     cleanup.write_text(
-        '$ROOT_DIR/.pytest_cache\n$ROOT_DIR/tmp\n$ROOT_DIR/aidm_server/:memory:\n'
-        '$ROOT_DIR/aidm_frontend/.vite\n$ROOT_DIR/aidm_frontend/dist\n__pycache__\n',
+        '$ROOT_DIR/.git\n$ROOT_DIR/.pytest_cache\n$ROOT_DIR/tmp\n$ROOT_DIR/aidm_server/:memory:\n'
+        '$ROOT_DIR/aidm_frontend/.vite\n$ROOT_DIR/aidm_frontend/dist\n__pycache__\n.DS_Store\n',
         encoding='utf-8',
     )
     makefile = tmp_path / 'Makefile'
@@ -83,8 +87,8 @@ def test_build_evidence_fails_when_archive_contains_large_non_lfs_file(tmp_path,
     monkeypatch.setattr(render_rc_issue_evidence, 'LARGE_ARCHIVE_MEMBER_THRESHOLD_BYTES', 1)
     cleanup = tmp_path / 'cleanup_artifacts.sh'
     cleanup.write_text(
-        '$ROOT_DIR/.pytest_cache\n$ROOT_DIR/tmp\n$ROOT_DIR/aidm_server/:memory:\n'
-        '$ROOT_DIR/aidm_frontend/.vite\n$ROOT_DIR/aidm_frontend/dist\n__pycache__\n',
+        '$ROOT_DIR/.git\n$ROOT_DIR/.pytest_cache\n$ROOT_DIR/tmp\n$ROOT_DIR/aidm_server/:memory:\n'
+        '$ROOT_DIR/aidm_frontend/.vite\n$ROOT_DIR/aidm_frontend/dist\n__pycache__\n.DS_Store\n',
         encoding='utf-8',
     )
     makefile = tmp_path / 'Makefile'
@@ -107,8 +111,8 @@ def test_build_evidence_fails_when_archive_contains_large_non_lfs_file(tmp_path,
 def test_main_writes_markdown_and_json(tmp_path):
     cleanup = tmp_path / 'cleanup_artifacts.sh'
     cleanup.write_text(
-        '$ROOT_DIR/.pytest_cache\n$ROOT_DIR/tmp\n$ROOT_DIR/aidm_server/:memory:\n'
-        '$ROOT_DIR/aidm_frontend/.vite\n$ROOT_DIR/aidm_frontend/dist\n__pycache__\n',
+        '$ROOT_DIR/.git\n$ROOT_DIR/.pytest_cache\n$ROOT_DIR/tmp\n$ROOT_DIR/aidm_server/:memory:\n'
+        '$ROOT_DIR/aidm_frontend/.vite\n$ROOT_DIR/aidm_frontend/dist\n__pycache__\n.DS_Store\n',
         encoding='utf-8',
     )
     makefile = tmp_path / 'Makefile'

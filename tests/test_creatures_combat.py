@@ -991,6 +991,8 @@ def test_creature_request_normalizes_string_booleans_and_enemy_count_bounds():
             'allowGeneration': 'false',
             'allowVariants': '0',
             'saveGenerated': 'off',
+            'partyLevel': 'bogus',
+            'partySize': '0',
             'enemyCount': 99,
         }
     )
@@ -998,6 +1000,8 @@ def test_creature_request_normalizes_string_booleans_and_enemy_count_bounds():
     assert request['allowGeneration'] is False
     assert request['allowVariants'] is False
     assert request['saveGenerated'] is False
+    assert request['partyLevel'] == 1
+    assert request['partySize'] == 1
     assert request['enemyCount'] == 24
 
 
@@ -2397,6 +2401,21 @@ def test_campaign_pack_generation_and_evolution_create_persistent_creatures():
     assert evolved['combatMemorySeed']['personalGrudgeTargetId'] == 'player_1'
 
 
+def test_campaign_pack_generation_defaults_malformed_numeric_hints():
+    pack = generate_campaign_pack_bestiary(
+        {
+            'title': 'Ashen Crown',
+            'themes': ['ash'],
+            'count': 'bogus',
+            'partyLevel': 'not-a-level',
+            'partySize': '0',
+        }
+    )
+
+    assert len(pack) == 8
+    assert all(creature['source'] == 'campaign_pack' for creature in pack)
+
+
 def test_creature_api_endpoints(client, app):
     ids = seed_world_campaign_player_session(app)
 
@@ -2416,6 +2435,17 @@ def test_creature_api_endpoints(client, app):
             'allowVariants': False,
         },
     ).get_json()
+    variant_response = client.post(
+        '/api/creatures/variant',
+        json={
+            'baseCreature': core_creature('wolf'),
+            'request': {
+                'partyLevel': 'bogus',
+                'partySize': '0',
+                'difficulty': 'easy',
+            },
+        },
+    )
     combat = client.post(
         f"/api/sessions/{ids['session_id']}/combat/start",
         json={'creature': core_creature('wolf'), 'enemyCount': 1},
@@ -2443,6 +2473,8 @@ def test_creature_api_endpoints(client, app):
 
     assert core['entries']
     assert resolve['creature']['id'] == 'goblin_skirmisher'
+    assert variant_response.status_code == 200
+    assert variant_response.get_json()['creature']['source'] == 'generated_variant'
     assert combat['combat']['status'] == 'active'
     assert composed['combat']['flags']['resolverMethod'] == 'encounter_composed'
     assert composed['combat']['flags']['enemyCount'] == 3
